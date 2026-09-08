@@ -139,6 +139,13 @@
   .rowinput:focus-visible{outline:2px solid var(--accent);}
   .rowinput:disabled{background:var(--surface-2); color:var(--muted); cursor:not-allowed;}
 
+  /* Shane's ask: Receiving's price inputs should read as Rand values, not bare numbers. The "R" is a
+     purely visual prefix laid over a plain <input type="number"> (a real "R120" isn't valid numeric
+     input) — see randFieldHtml() in render_functions.js, the one place all three of these are built. */
+  .rand-field{position:relative; display:inline-flex; align-items:center; width:100%;}
+  .rand-field .rand-prefix{position:absolute; left:8px; color:var(--muted); font-size:12px; pointer-events:none;}
+  .rand-field input{padding-left:19px; width:100%;}
+
   .chip{display:inline-flex; align-items:center; gap:5px; padding:3px 9px; border-radius:99px; font-size:11.5px; font-weight:600; white-space:nowrap;}
   .chip.good{background:var(--good-soft); color:var(--good);}
   .chip.warn{background:var(--warn-soft); color:var(--warn);}
@@ -1757,6 +1764,15 @@ function datalistOptions(id, values){
   return `<datalist id="${id}">` + values.map(v=>`<option value="${esc(v)}">`).join("") + `</datalist>`;
 }
 function chip(text, kind){ return `<span class="chip ${kind}">${esc(text)}</span>`; }
+// A price/cost <input type="number"> with a visible "R" (Rand) prefix — Shane's ask for Receiving: these
+// read as money, not bare numbers. The prefix is purely visual (a real "R120" isn't valid input for
+// type="number"), so the field's own value stays a plain number underneath, unchanged for the code that
+// reads it (.value is still just "120"). `attrs` is any extra raw HTML attributes (id, data-*, title, ...).
+function randFieldHtml(cls, value, placeholder, attrs, wrapperStyle){
+  // wrapperStyle sizes the whole R-prefixed control (e.g. a fixed width to match a table column) — the
+  // input itself always fills it (100%), same as the width:100% every other type=number input gets.
+  return `<span class="rand-field"${wrapperStyle?` style="${wrapperStyle}"`:""}><span class="rand-prefix">R</span><input type="number" step="0.01"${cls?` class="${esc(cls)}"`:""} placeholder="${esc(placeholder||"0.00")}" value="${esc(value===undefined||value===null?"":value)}" ${attrs||""}></span>`;
+}
 function statusChip(status){
   if(status==="OK") return chip("OK","good");
   if(!status) return "";
@@ -2387,10 +2403,14 @@ function renderReceiving(){
     // order cancelled, wrong stock sent back, etc. Mirrors Shopping List's "Unable to buy" inline reason
     // box (shoppingIssueEditing) via receivingNotReceivedEditing, tracked per pending-line id.
     const notReceivedOpen = receivingNotReceivedEditing.has(p.id);
-    const notReceivedForm = manage ? `
-      <div class="buyrow" data-receive-row="${esc(p.id||"")}" style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;">
-        <input type="number" step="0.01" class="receive-qty" placeholder="Count qty" value="" style="width:80px;">
-        <input type="number" step="0.01" class="receive-cost" placeholder="Cost/u" value="${esc(hasCost?p.cost:"")}" data-default="${esc(hasCost?p.cost:"")}" style="width:80px;">
+    // Amount and Price used to share one crowded "Confirm received" cell with the action buttons —
+    // Shane's ask: give them their own headed columns instead, so it's clear which typed number is the
+    // count and which is the cost. data-receive-row now lives on the <tr> itself (rather than a div
+    // wrapping just these two inputs) since the amount/price inputs and the buttons that read them are
+    // siblings across three different cells now, not all inside one — see data-receive-tick's click
+    // handler, which finds both via `.closest("[data-receive-row]")` off whichever cell the click came from.
+    const actionsCell = manage ? `
+      <div class="buyrow" style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;">
         <button class="btn primary" data-receive-tick="${esc(p.id||"")}" title="Confirm received" style="padding:2px 10px;font-size:12px;">✓ Received</button>
         ${notReceivedOpen ? "" : `<button class="btn" data-notreceived-addnew="${esc(p.id||"")}" style="padding:2px 10px;font-size:12px;">✕ Not received</button>`}
       </div>
@@ -2400,7 +2420,18 @@ function renderReceiving(){
         <button class="btn primary" data-notreceived-tick="${esc(p.id||"")}" title="Confirm not received" style="padding:2px 10px;font-size:12px;background:var(--critical);border-color:var(--critical);">✕ Confirm</button>
         <button class="btn" data-notreceived-cancel="${esc(p.id||"")}" style="padding:2px 6px;font-size:12px;">Cancel</button>
       </div>` : ""}` : `<span class="helptext">Awaiting confirmation</span>`;
-    return `
+    return manage ? `
+    <tr data-receive-row="${esc(p.id||"")}">
+      <td>${esc(p.baseProduct)}</td>
+      <td>${esc(categoryFor(p.baseProduct)||"—")}</td>
+      <td class="helptext">${esc(p.date||"—")}${overdue ? ` ${chip("overdue","warn")}` : ""}</td>
+      <td>${costCell}</td>
+      <td>${esc(p.supplier||"—")}</td>
+      <td>${esc(p.loggedBy||"—")}</td>
+      <td><input type="number" step="0.01" class="receive-qty" placeholder="Count qty" value="" style="width:80px;"></td>
+      <td>${randFieldHtml("receive-cost", hasCost?p.cost:"", "Cost/u", `data-default="${esc(hasCost?p.cost:"")}"`, "width:80px;")}</td>
+      <td>${actionsCell}</td>
+    </tr>` : `
     <tr>
       <td>${esc(p.baseProduct)}</td>
       <td>${esc(categoryFor(p.baseProduct)||"—")}</td>
@@ -2408,7 +2439,7 @@ function renderReceiving(){
       <td>${costCell}</td>
       <td>${esc(p.supplier||"—")}</td>
       <td>${esc(p.loggedBy||"—")}</td>
-      <td>${notReceivedForm}</td>
+      <td>${actionsCell}</td>
     </tr>`;
   }).join("");
 
@@ -2433,7 +2464,7 @@ function renderReceiving(){
     const editForm = manage && editing ? `
       <div class="buyrow" data-receive-row="${esc(p.id||"")}" style="display:flex;align-items:center;gap:4px;white-space:nowrap;margin-top:4px;">
         <input type="number" step="0.01" class="receive-qty" placeholder="Qty" value="${esc(p.receivedQty!==undefined?p.receivedQty:"")}" style="width:64px;">
-        <input type="number" step="0.01" class="receive-cost" placeholder="Cost/u" value="${esc(p.receivedCost!==undefined?p.receivedCost:"")}" style="width:80px;">
+        ${randFieldHtml("receive-cost", p.receivedCost!==undefined?p.receivedCost:"", "Cost/u", "", "width:80px;")}
         <button class="btn primary" data-receive-tick="${esc(p.id||"")}" title="Save correction" style="padding:2px 10px;font-size:12px;">✓ Save</button>
         <button class="btn" data-receive-edit-cancel="${esc(p.id||"")}" style="padding:2px 6px;font-size:12px;">✕</button>
       </div>` : "";
@@ -2472,7 +2503,7 @@ function renderReceiving(){
         <div class="formgrid">
           <div class="field"><label>Base product</label><input type="text" id="directReceiveBase" list="baseProductsDL"></div>
           <div class="field"><label>Quantity received</label><input type="number" step="0.01" id="directReceiveQty" placeholder="e.g. 10"></div>
-          <div class="field"><label>Cost per unit</label><input type="number" step="0.01" id="directReceiveCost" placeholder="if known"></div>
+          <div class="field"><label>Cost per unit</label>${randFieldHtml("", "", "if known", 'id="directReceiveCost"')}</div>
           <div class="field"><label>Supplier</label><input type="text" id="directReceiveSupplier" placeholder="optional"></div>
           <div><button class="btn primary" id="logDirectReceipt">+ Log received stock</button></div>
         </div>
@@ -2484,8 +2515,8 @@ function renderReceiving(){
       <div class="cardhead"><div><h3>Pending delivery</h3><div class="desc">${search ? `${pendingShown.length} of ${pending.length}` : pending.length} order(s) awaiting confirmation, oldest first.</div></div></div>
       <div class="cardbody" style="padding:0;">
         <div class="tablewrap" style="border:none;border-radius:0;"><table>
-          <thead><tr><th>Base product</th><th>Category</th><th>Ordered</th><th>Cost</th><th>Supplier</th><th>Ordered by</th><th>${manage?"Confirm received":"Status"}</th></tr></thead>
-          <tbody>${pendingRows || (search ? `<tr><td colspan="7" class="empty">No pending deliveries match "${esc(receivingSearch)}".</td></tr>` : `<tr><td colspan="7" class="empty">Nothing outstanding — everything logged so far has been confirmed received.</td></tr>`)}</tbody>
+          <thead><tr><th>Base product</th><th>Category</th><th>Ordered</th><th>Cost</th><th>Supplier</th><th>Ordered by</th>${manage?"<th>Amount</th><th>Price</th><th></th>":"<th>Status</th>"}</tr></thead>
+          <tbody>${pendingRows || (search ? `<tr><td colspan="${manage?9:7}" class="empty">No pending deliveries match "${esc(receivingSearch)}".</td></tr>` : `<tr><td colspan="${manage?9:7}" class="empty">Nothing outstanding — everything logged so far has been confirmed received.</td></tr>`)}</tbody>
         </table></div>
       </div>
     </div>
