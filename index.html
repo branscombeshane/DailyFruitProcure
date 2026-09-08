@@ -479,9 +479,9 @@ let salesPendingA = null; // {filename, rows} staged Pyroca file for the current
 let salesPendingB = null; // {filename, rows} staged DF Veg file for the current report date, awaiting Submit
 let sageDateFilter = new Date().toISOString().slice(0,10);
 let sageOnlyPurchasedOnDate = true;
-let purchaseDraftDate = "";
-let purchaseDraftLines = [];
-let purchaseDateFilter = "";
+// Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
+// often than it's audited in bulk, so opening the tab should land on today's entries, not the full history.
+let purchaseDateFilter = new Date().toISOString().slice(0,10);
 let priceHistorySelectedProduct = null; // which base product's chart is showing on the Price History page
 // which of the three alert-type stat tiles at the top of Price History is active: "" (Alerts, all of
 // them), "up" (Big increases only), or "down" (Big drops only) — filters the Recent alerts table below.
@@ -597,11 +597,14 @@ const ROLE_TABS = {
 const SAFE_AUTO_REFRESH_TABS = new Set(["home","shoppinglist","quickbuy","shoppingarchive","receiving","purchase"]);
 
 // Shopping List and Quick Buy have their own inline forms (buy/unable-to-purchase entry) tracked as open
-// Map/Set state; Receiving and Purchase mix that (receivingEditing/receivingNotReceivedEditing,
-// purchaseDraftLines) with a few specific DOM inputs that were never wired to a JS variable at all (see
-// the comment on SAFE_AUTO_REFRESH_TABS above) — checked directly by id/class since there's nowhere else
-// their live value exists. A silent refresh is deferred whenever any of this is true; the next poll just
-// tries again.
+// Map/Set state; Receiving mixes that (receivingEditing/receivingNotReceivedEditing) with a few specific
+// DOM inputs that were never wired to a JS variable at all (see the comment on SAFE_AUTO_REFRESH_TABS
+// above) — checked directly by id/class since there's nowhere else their live value exists. A silent
+// refresh is deferred whenever any of this is true; the next poll just tries again. Purchase Costs has
+// nothing of its own to protect here — since the manual "New purchase entry" draft form was removed
+// (Shane's call: everything now comes in through Receiving/Quick Buy/Shopping List instead), the only
+// things left on that page are the date filter (committed instantly) and a delete button (immediate),
+// neither of which a silent refresh could ever wipe.
 function hasUnsavedInlineEdit(){
   if(shoppingBuyEditing.size > 0 || shoppingIssueEditing.size > 0 || quickBuySelected !== null) return true;
   if(currentTab==="receiving"){
@@ -614,14 +617,6 @@ function hasUnsavedInlineEdit(){
     // silent refresh on this tab even when nobody's touched anything.
     for(const el of document.querySelectorAll(".receive-qty, .notreceived-reason")){ if(el.value !== "") return true; }
     for(const el of document.querySelectorAll(".receive-cost")){ if(el.value !== (el.dataset.default||"")) return true; }
-  }
-  if(currentTab==="purchase"){
-    if(purchaseDraftLines.length > 0) return true;
-    const draftFieldIds = ["draftLineBase","draftLineQty","draftLineCost","draftLineSupplier"];
-    for(const id of draftFieldIds){
-      const el = document.getElementById(id);
-      if(el && el.value !== "") return true;
-    }
   }
   return false;
 }
@@ -3107,13 +3102,17 @@ function renderPurchase(){
     return {p, i, found, count, dateKey: p.date || "(no date)"};
   });
 
-  const distinctDates = Array.from(new Set(entries.map(e=>e.dateKey))).sort().reverse();
+  // The default filter (today's date — see purchaseDateFilter's declaration) won't be in this list on a
+  // day nothing's been logged yet; folded in here so the dropdown still shows/selects it correctly and
+  // the empty state below reads as "nothing today" rather than silently falling back to "All dates".
+  const distinctDates = Array.from(new Set(entries.map(e=>e.dateKey).concat(purchaseDateFilter ? [purchaseDateFilter] : []))).sort().reverse();
   const dateFilterOptions = `<option value="">All dates</option>` +
     distinctDates.map(d=>`<option value="${esc(d)}" ${d===purchaseDateFilter?"selected":""}>${esc(d)}</option>`).join("");
 
   const groupDates = purchaseDateFilter ? distinctDates.filter(d=>d===purchaseDateFilter) : distinctDates;
   const groupsHtml = groupDates.map(dateKey=>{
     const group = entries.filter(e=>e.dateKey===dateKey);
+    if(!group.length) return ""; // today (or whichever date is filtered) with nothing logged yet — see the empty-state message below instead
     const groupRows = group.map(({p,i,found,count})=>{
       // Once Receiving has confirmed a line, ITS numbers are the real, final ones (Receiving's own copy
       // says as much) — a correction made there only ever touches receivedQty/receivedCost, never the
@@ -3130,10 +3129,15 @@ function renderPurchase(){
       const hasQty = displayQty!==undefined && displayQty!==null && displayQty!=="";
       const hasCost = displayCost!==undefined && displayCost!==null && displayCost!=="";
       const total = (hasQty && hasCost) ? Number(displayQty)*Number(displayCost) : null;
-      const statusTag = notReceived ? ` ${chip("Not received" + (p.notReceivedReason?": "+p.notReceivedReason:""), "critical")}` : (!received ? ` ${chip("Ordered","neutral")}` : "");
+      // A status chip used to sit right after the product name on the same line — fine when it fit, but
+      // on a narrow name+chip combo (e.g. "Not received: NOT BOOKED") it would wrap onto its own line
+      // UNDER the name anyway, just unpredictably (sometimes crowding the name half off to one side
+      // first). Shane's "fix the layout" ask: always stack it on its own line below the name, so the
+      // product name is never in doubt and every row keeps the same shape whether it has a tag or not.
+      const statusTag = notReceived ? chip("Not received" + (p.notReceivedReason?": "+p.notReceivedReason:""), "critical") : (!received ? chip("Ordered","neutral") : "");
       return `
       <tr>
-        <td>${esc(p.baseProduct)}${statusTag}</td>
+        <td>${esc(p.baseProduct)}${statusTag ? `<div style="margin-top:4px;">${statusTag}</div>` : ""}</td>
         <td class="num">${hasQty ? fmtNum(displayQty) : "—"}</td>
         <td class="num">${hasCost ? money(displayCost) : "—"}</td>
         <td class="num">${total!==null ? money(total) : "—"}</td>
@@ -3157,50 +3161,9 @@ function renderPurchase(){
       </div>`;
   }).join("");
 
-  const draftRows = purchaseDraftLines.map((l,i)=>{
-    const hasQty = l.qty!==undefined && l.qty!==null && l.qty!=="";
-    const total = hasQty ? Number(l.qty)*Number(l.cost) : null;
-    return `
-    <tr>
-      <td>${esc(l.baseProduct)}</td>
-      <td class="num">${hasQty ? fmtNum(l.qty) : "—"}</td>
-      <td class="num">${money(l.cost)}</td>
-      <td class="num">${total!==null ? money(total) : "—"}</td>
-      <td>${esc(l.supplier||"—")}</td>
-      <td><button class="delbtn" data-del-draft="${i}" title="Remove line">✕</button></td>
-    </tr>`;
-  }).join("");
-
   return `
     <div class="pagehead">
-      <div><h2>Purchase Costs</h2><p>Pick the date you bought stock, add a line for every product you purchased that day, then submit them all together. Buying the same product from more than one supplier on the same day is fine — add a separate line for each.</p></div>
-    </div>
-    ${datalistOptions("baseProductsDL", distinctBaseProducts())}
-    <div class="card">
-      <div class="cardhead">
-        <div><h3>New purchase entry</h3><div class="desc">Set the date once, add every product bought that day below, then submit as a batch.</div></div>
-      </div>
-      <div class="cardbody">
-        <div class="formgrid" style="margin-bottom:14px;">
-          <div class="field"><label>Purchase date</label><input type="date" id="purchDraftDate" value="${esc(purchaseDraftDate)}"></div>
-        </div>
-        <div class="formgrid">
-          <div class="field"><label>Base product</label><input type="text" id="draftLineBase" list="baseProductsDL"></div>
-          <div class="field"><label>Quantity</label><input type="number" step="0.01" id="draftLineQty" placeholder="e.g. 10"></div>
-          <div class="field"><label>Cost per procurement unit</label><input type="number" step="0.01" id="draftLineCost" placeholder="e.g. 85.00"></div>
-          <div class="field"><label>Supplier</label><input type="text" id="draftLineSupplier" placeholder="optional"></div>
-          <div><button class="btn" id="addDraftLine">Add line</button></div>
-        </div>
-        ${purchaseDraftLines.length ? `
-        <div class="tablewrap" style="margin-top:14px;"><table>
-          <thead><tr><th>Base product</th><th class="num">Qty</th><th class="num">Cost / unit</th><th class="num">Total</th><th>Supplier</th><th></th></tr></thead>
-          <tbody>${draftRows}</tbody>
-        </table></div>
-        <div style="margin-top:14px;display:flex;gap:10px;align-items:center;">
-          <button class="btn primary" id="submitPurchaseBatch">Submit ${purchaseDraftLines.length} ${purchaseDraftLines.length===1?"entry":"entries"} for ${esc(purchaseDraftDate||"—")}</button>
-          <button class="btn" id="clearPurchaseDraft">Clear</button>
-        </div>` : `<div class="empty" style="margin-top:14px;">No lines added yet — add products above, then submit.</div>`}
-      </div>
+      <div><h2>Purchase Costs</h2><p>Every purchase logged through Receiving, Quick Buy, or the Shopping List lands here automatically — this page is for reviewing those figures and removing a line only if it was logged by mistake.</p></div>
     </div>
     <div class="card">
       <div class="cardhead">
@@ -3211,7 +3174,7 @@ function renderPurchase(){
         </div>
       </div>
       <div class="cardbody" style="padding:0;">
-        ${groupsHtml || `<div class="empty">No purchases logged yet.</div>`}
+        ${groupsHtml || `<div class="empty">${purchaseDateFilter ? `No purchases logged for ${esc(purchaseDateFilter)}.` : "No purchases logged yet."}</div>`}
       </div>
     </div>`;
 }
@@ -4532,67 +4495,13 @@ function wireTabEvents(){
   }
 
   if(currentTab==="purchase"){
-    document.getElementById("purchDraftDate").addEventListener("change", (e)=>{
-      purchaseDraftDate = e.target.value;
-      render();
-    });
     document.getElementById("purchDateFilter").addEventListener("change", (e)=>{
       purchaseDateFilter = e.target.value;
       render();
     });
-    document.getElementById("addDraftLine").addEventListener("click", ()=>{
-      if(!purchaseDraftDate){ toast("Pick a date first"); return; }
-      const bp = document.getElementById("draftLineBase").value.trim();
-      const qty = document.getElementById("draftLineQty").value;
-      const cost = document.getElementById("draftLineCost").value;
-      const supplier = document.getElementById("draftLineSupplier").value.trim();
-      if(!bp || !cost){ toast("Base product and cost are both required"); return; }
-      const line = {baseProduct:bp, cost:Number(cost)};
-      if(qty!==""){ line.qty = Number(qty); }
-      if(supplier){ line.supplier = supplier; }
-      purchaseDraftLines.push(line);
-      render();
-    });
-    document.querySelectorAll("[data-del-draft]").forEach(b=>{
-      b.addEventListener("click", ()=>{
-        const i = Number(b.dataset.delDraft);
-        purchaseDraftLines.splice(i,1);
-        render();
-      });
-    });
-    const clearBtn = document.getElementById("clearPurchaseDraft");
-    if(clearBtn){
-      clearBtn.addEventListener("click", ()=>{
-        purchaseDraftLines = [];
-        render();
-      });
-    }
-    const submitBtn = document.getElementById("submitPurchaseBatch");
-    if(submitBtn){
-      submitBtn.addEventListener("click", ()=>{
-        if(!purchaseDraftDate){ toast("Pick a date first"); return; }
-        if(!purchaseDraftLines.length){ toast("Add at least one line first"); return; }
-        const count = purchaseDraftLines.length;
-        const dateSaved = purchaseDraftDate;
-        purchaseDraftLines.forEach(l=>{
-          const entry = {id:newId(), date:dateSaved, baseProduct:l.baseProduct, cost:l.cost};
-          if(l.qty!==undefined) entry.qty = l.qty;
-          if(l.supplier) entry.supplier = l.supplier;
-          if(currentUser) entry.loggedBy = currentUser.name;
-          // This screen is for typing in an already-complete, known purchase record (both qty and cost
-          // required up front) — distinct from Quick Buy/Shopping List's live day-to-day ordering, where
-          // cost is often genuinely unknown until later. So unlike THAT flow, a line entered here counts
-          // as received immediately; it won't show up in the Receiving queue at all.
-          entry.receivedQty = entry.qty;
-          entry.receivedCost = entry.cost;
-          entry.receivedBy = entry.loggedBy;
-          entry.receivedDate = dateSaved;
-          DATA.purchaseCosts.push(entry);
-        });
-        purchaseDraftLines = [];
-        persist("Submitted " + count + " purchase" + (count===1?"":"s") + " for " + dateSaved, ["purchaseCosts"]);
-      });
-    }
+    // The manual "New purchase entry" draft form (add/clear/submit a batch of typed-in lines) was
+    // removed here — Shane's call: everything now comes in through Receiving, Quick Buy, or the Shopping
+    // List instead, so this tab is read/audit-only apart from deleting a mistaken row below.
     document.querySelectorAll("[data-del-purchase]").forEach(b=>{
       b.addEventListener("click", ()=>{
         const i = Number(b.dataset.delPurchase);
