@@ -233,9 +233,35 @@
   @keyframes loadPulse{0%,100%{transform:scale(1); opacity:1;} 50%{transform:scale(1.07); opacity:.85;}}
   @keyframes loadDot{0%,80%,100%{opacity:0;} 40%{opacity:1;}}
   @keyframes loadFadeIn{from{opacity:0; transform:translateY(4px);} to{opacity:1; transform:translateY(0);}}
+
+  /* Shane's ask: a visible "the system is being updated" indicator, everywhere, for every role — shown
+     for the exact duration of any save round-trip (persist() / persistPurchaseAction(), see setSyncBusy),
+     which between them cover every write in the app (Shopping List, Quick Buy, Receiving, Item Setup,
+     Product Mixes, Purchase Costs, Stock Take, Users, Settings, Sales upload, Backup/Restore). A small
+     floating pill rather than a full-screen block, so it doesn't hide the page underneath or fight with
+     the kiosk top bar/sidebar — it just sits above whichever one is showing. Counter-driven (see
+     setSyncBusy) so two overlapping saves don't let the first one's finish hide the second one's spinner.*/
+  .sync-overlay{
+    position:fixed; top:14px; right:14px; z-index:80; display:flex; align-items:center; gap:8px;
+    background:var(--surface); border:1px solid var(--line); box-shadow:var(--shadow); border-radius:999px;
+    padding:8px 14px 8px 10px; font-size:12.5px; font-weight:500; color:var(--ink);
+    opacity:0; transform:translateY(-6px); pointer-events:none; transition:opacity .15s ease, transform .15s ease;
+  }
+  .sync-overlay.show{opacity:1; transform:translateY(0);}
+  /* Receiving's kiosk top bar has its own name+Logout in that same top-right corner — push the pill
+     below the bar just for that role so the two never overlap (see render()'s kiosk-offset toggle). */
+  .sync-overlay.kiosk-offset{top:68px;}
+  @media (max-width: 860px){
+    .sync-overlay.kiosk-offset{top:60px;}
+  }
+  .sync-spinner{
+    width:14px; height:14px; border-radius:50%; flex:none;
+    border:2px solid var(--accent-soft); border-top-color:var(--accent);
+    animation:loadSpin .8s linear infinite;
+  }
   @media (prefers-reduced-motion: reduce){
     .toast{transition:none;}
-    .loadring::before, .loadmark, .loaddots span, .loadscene{animation:none;}
+    .loadring::before, .loadmark, .loaddots span, .loadscene, .sync-spinner{animation:none;}
   }
   @media (max-width: 860px){
     .app{flex-direction:column;}
@@ -246,13 +272,29 @@
     .main{padding:18px;}
   }
 
+  /* Receiving is scoped to exactly one tab (see ROLE_TABS) and is usually a shared tablet parked at the
+     dock — the sidebar has nothing to navigate to for that role, so it's hidden entirely for a genuinely
+     full-screen page (see render()'s `kiosk` branch), and this slim bar takes over just Logout, which
+     would otherwise have gone missing along with the sidebar footer that normally hosts it. */
+  .kiosk-topbar{
+    display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;
+    padding:14px 32px; margin:-26px -32px 22px; background:var(--surface); border-bottom:1px solid var(--line);
+  }
+  .kiosk-topbar .kiosk-brand{display:flex; align-items:center; gap:10px; font-family:"Fraunces",serif; font-weight:600; font-size:15px;}
+  .kiosk-topbar .kiosk-mark{width:26px;height:26px;border-radius:7px;background:var(--accent);color:var(--accent-ink);
+    display:flex;align-items:center;justify-content:center;font-size:13px;flex:none;}
+  .kiosk-topbar .kiosk-user{font-size:12.5px; color:var(--muted); text-transform:capitalize;}
+  @media (max-width: 860px){
+    .kiosk-topbar{margin:-18px -18px 18px; padding:12px 18px;}
+  }
+
   /* Receiving's printable goods-received slip (see printReceivingSlip / renderReceivingSlipHtml). Fixed
      black-on-white colors on purpose, not the theme tokens above — dark mode is for the screen, never
      for paper. Hidden on screen; @media print flips it to the only thing that prints, so the app chrome
      (sidebar, nav, whatever tab happens to be open) never ends up on the page. */
   .print-slip-area{ display:none; }
   @media print{
-    body > .app, body > .toast{ display:none !important; }
+    body > .app, body > .toast, body > .sync-overlay{ display:none !important; }
     .print-slip-area{ display:block !important; background:#fff; color:#111; padding:24px; font-family:Arial,Helvetica,sans-serif; }
     .print-slip{ max-width:420px; margin:0 auto; }
     .print-slip h2{ margin:0 0 2px; font-size:20px; }
@@ -282,6 +324,7 @@
   <main class="main" id="main"></main>
 </div>
 <div class="toast" id="toast"></div>
+<div class="sync-overlay" id="syncOverlay" aria-hidden="true"><span class="sync-spinner"></span><span>Updating…</span></div>
 <div class="print-slip-area" id="printSlipArea" aria-hidden="true"></div>
 
 <script>
@@ -377,6 +420,18 @@ let saveConflict = null;
 let staleDataAvailable = false;
 let lastKnownDataVersion = null; // DATA.dataVersion as of this tab's last successful load/refresh/save; compared against the server's on every poll
 let dataRefreshInFlight = false; // guards against overlapping silent refreshes if a slow one is still in flight when the next poll fires
+
+// Shane's ask: a visible indicator, everywhere, for every role, while a save is actually in flight —
+// see persist()/persistPurchaseAction(), the app's only two write paths (every mutating action funnels
+// through one of them). A counter rather than a boolean so two overlapping saves (e.g. a fast double
+// click, or two different actions firing close together) can't have the first one's completion hide the
+// spinner while the second one is still genuinely in flight — it only hides once NOTHING is pending.
+let syncBusyCount = 0;
+function setSyncBusy(busy){
+  syncBusyCount = Math.max(0, syncBusyCount + (busy ? 1 : -1));
+  const el = document.getElementById("syncOverlay");
+  if(el) el.classList.toggle("show", syncBusyCount > 0);
+}
 let lastActivityAt = Date.now(); // bumped by any click/keypress/scroll/touch — see wireActivityTracking() — checked against IDLE_LOGOUT_MS to auto-logout an unattended, still-logged-in session
 // tentatively restored here (before real data has loaded); boot() re-validates it against the
 // real DATA.users once the fetch completes, since the empty starting shape above can't tell
@@ -1255,6 +1310,7 @@ async function loadShoppingArchive(date){
 // Omit it (or pass nothing) for a genuine full save — currently just Restore from backup — where every
 // sheet really does need rewriting.
 async function persist(successMsg, changedKeys){
+  setSyncBusy(true);
   try{
     const payload = changedKeys ? Object.assign({}, DATA, {changedKeys}) : DATA;
     // Content-Type: text/plain keeps this a CORS "simple request" — Apps Script Web Apps don't
@@ -1283,6 +1339,7 @@ async function persist(successMsg, changedKeys){
   }catch(e){
     toast("Could not save — check your connection and try again");
   }
+  setSyncBusy(false);
   render();
 }
 
@@ -1292,6 +1349,7 @@ async function persist(successMsg, changedKeys){
 // the market — never overwrite each other and never need to reload. No version check applies here;
 // there's nothing for it to conflict with.
 async function persistPurchaseAction(payload, successMsg){
+  setSyncBusy(true);
   try{
     const res = await fetch(API_URL, {
       method: "POST",
@@ -1311,6 +1369,7 @@ async function persistPurchaseAction(payload, successMsg){
   }catch(e){
     toast("Could not save — check your connection and try again");
   }
+  setSyncBusy(false);
   render();
 }
 
@@ -1409,6 +1468,15 @@ function wireLoginEvents(){
 }
 
 function render(){
+  // Computed up-front (not just inside the logged-in branch below) so the sync-overlay offset toggle
+  // near the end of this function can always run, whichever branch actually executes.
+  const kiosk = !!currentUser && currentUser.role === "receiving";
+  const syncOverlayEl = document.getElementById("syncOverlay");
+  // The kiosk top bar's own right-hand content (name + Logout) sits in the same top-right corner the
+  // floating sync pill normally uses — nudge the pill down below the bar just for that one role so the
+  // two never visually collide (see .sync-overlay.kiosk-offset).
+  if(syncOverlayEl) syncOverlayEl.classList.toggle("kiosk-offset", kiosk);
+
   // preserve focus + cursor position across the full innerHTML rebuild below, so typing into a
   // live-filtered search box (Item Setup search, Quick Buy search) doesn't drop focus after each keystroke
   const activeEl = document.activeElement;
@@ -1444,7 +1512,12 @@ function render(){
     main.innerHTML = renderLogin();
     wireLoginEvents();
   } else {
-    if(sidebar) sidebar.style.display = "";
+    // Receiving is scoped to exactly one tab (see ROLE_TABS) and is usually a shared tablet parked at
+    // the dock — nothing for that role to navigate to, so the sidebar (and the space it takes up) is
+    // hidden entirely for a genuinely full-screen page. Shane's ask. Logout, which normally lives in the
+    // sidebar footer, moves into the kiosk top bar below since the sidebar is gone. (`kiosk` itself is
+    // computed once, up top of render() — reused here rather than redeclared.)
+    if(sidebar) sidebar.style.display = kiosk ? "none" : "";
     if(!roleCanAccessTab(currentUser.role, currentTab)){
       const firstAllowed = TABS.find(t=> roleCanAccessTab(currentUser.role, t.id));
       if(firstAllowed) setCurrentTab(firstAllowed.id);
@@ -1473,12 +1546,20 @@ function render(){
     // visible regardless of which one the user wanders to afterward. saveConflict (an actually-rejected
     // save) takes priority over staleDataAvailable (just a heads-up, nothing lost yet) when somehow both
     // are true at once.
-    main.innerHTML = (saveConflict ? renderSaveConflictBanner(saveConflict) : (staleDataAvailable ? renderStaleDataBanner() : "")) + pageHtml;
+    main.innerHTML = (kiosk ? renderKioskTopBar() : "") + (saveConflict ? renderSaveConflictBanner(saveConflict) : (staleDataAvailable ? renderStaleDataBanner() : "")) + pageHtml;
     wireTabEvents();
     const reloadBtn = document.getElementById("saveConflictReload");
     if(reloadBtn) reloadBtn.addEventListener("click", ()=> location.reload());
     const staleReloadBtn = document.getElementById("staleDataReload");
     if(staleReloadBtn) staleReloadBtn.addEventListener("click", ()=> location.reload());
+    if(kiosk){
+      const kioskLogoutBtn = document.getElementById("kioskLogoutBtn");
+      if(kioskLogoutBtn) kioskLogoutBtn.addEventListener("click", ()=>{
+        currentUser = null;
+        try{ sessionStorage.removeItem("dailyFruitUser"); }catch(e){}
+        render();
+      });
+    }
   }
 
   if(activeId){
@@ -1577,6 +1658,20 @@ function renderLogin(){
         <input type="password" inputmode="numeric" pattern="[0-9]*" id="loginPin" class="login-pin" placeholder="PIN" ${loginBusy?"disabled":""}>
         ${loginError ? `<div class="helptext" style="color:var(--critical);margin-top:8px;">${esc(loginError)}</div>` : ""}
         <button class="btn primary" id="loginSubmit" ${loginBusy?"disabled":""} style="width:100%;margin-top:14px;padding:13px;font-size:15px;">${loginBusy?"Checking for updates…":"Log in"}</button>
+      </div>
+    </div>`;
+}
+
+// Receiving-only "kiosk" top bar (see render()'s `kiosk` branch) — stands in for the sidebar that's
+// hidden entirely for that role, so Logout (its only real function besides navigation, and Receiving has
+// nowhere else to navigate to) doesn't disappear along with it.
+function renderKioskTopBar(){
+  return `
+    <div class="kiosk-topbar">
+      <div class="kiosk-brand"><span class="kiosk-mark">DF</span> Daily Fruit - Procurement</div>
+      <div style="display:flex;align-items:center;gap:14px;">
+        <span class="kiosk-user">${esc(currentUser.name)} · Receiving</span>
+        <button class="btn small" id="kioskLogoutBtn">Logout</button>
       </div>
     </div>`;
 }
