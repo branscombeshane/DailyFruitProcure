@@ -569,13 +569,16 @@ if(!TABS.some(t=>t.id===currentTab)){
 // counting stock (their Shopping List view is further restricted to read-only inside
 // renderShoppingList/renderBuyCell).
 // Receiving: a new role, scoped to just confirming deliveries — see canManageReceiving.
-// "home" (the landing Dashboard) is Owner + Procurement only, by Shane's explicit request — Stock Taker
-// and Receiving stay scoped to their single-purpose tab, same as before.
+// Market: scoped to just Quick Buy — for staff who only buy at the market and don't need the rest of
+// the app (no Shopping List view, no Receiving, nothing else).
+// "home" (the landing Dashboard) is Owner + Procurement only, by Shane's explicit request — Stock Taker,
+// Receiving and Market stay scoped to their single-purpose tab, same as before.
 const ROLE_TABS = {
   owner: ["home","shoppinglist","quickbuy","shoppingarchive","receiving","dashboard","salesdata","itemsetup","recipes","purchase","pricehistory","sageimport","stocktake","users","stockvariance","backup"],
   procurement: ["home","shoppinglist","quickbuy","shoppingarchive","receiving","purchase","pricehistory","sageimport","stocktake"],
   stocktaker: ["shoppinglist","stocktake"],
   receiving: ["receiving"],
+  market: ["quickbuy"],
 };
 
 // Tabs where a background data refresh can safely swap DATA and re-render without ever wiping typing
@@ -2352,6 +2355,11 @@ function renderReceivingSlipHtml(p){
 }
 function renderReceiving(){
   const manage = canManageReceiving();
+  // Marking a delivery "Not received" (and seeing the history of what's been marked that way) is an
+  // Owner/Procurement call — Shane's ask: the Receiving role logs what physically arrives, full stop,
+  // and doesn't get a say in resolving an order that never showed up. Owner/Procurement still see and
+  // use it exactly as before.
+  const canMarkNotReceived = manage && currentUser.role !== "receiving";
   const todayStr = new Date().toISOString().slice(0,10);
   const defaultCutoff = new Date(Date.now() - RECEIVING_RECENT_DAYS*86400000).toISOString().slice(0,10);
 
@@ -2407,9 +2415,9 @@ function renderReceiving(){
     const actionsCell = manage ? `
       <div class="buyrow" style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;">
         <button class="btn primary" data-receive-tick="${esc(p.id||"")}" title="Confirm received" style="padding:2px 10px;font-size:12px;">✓ Received</button>
-        ${notReceivedOpen ? "" : `<button class="btn" data-notreceived-addnew="${esc(p.id||"")}" style="padding:2px 10px;font-size:12px;">✕ Not received</button>`}
+        ${(canMarkNotReceived && !notReceivedOpen) ? `<button class="btn" data-notreceived-addnew="${esc(p.id||"")}" style="padding:2px 10px;font-size:12px;">✕ Not received</button>` : ""}
       </div>
-      ${notReceivedOpen ? `
+      ${(canMarkNotReceived && notReceivedOpen) ? `
       <div class="buyrow" data-notreceived-row="${esc(p.id||"")}" style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;margin-top:4px;">
         <input type="text" class="notreceived-reason" placeholder="Reason (e.g. out of stock)" style="width:200px;">
         <button class="btn primary" data-notreceived-tick="${esc(p.id||"")}" title="Confirm not received" style="padding:2px 10px;font-size:12px;background:var(--critical);border-color:var(--critical);">✕ Confirm</button>
@@ -2489,7 +2497,7 @@ function renderReceiving(){
       <div class="stat"><div class="label">Pending delivery</div><div class="value" style="color:${pending.length?'var(--warn)':'var(--good)'}">${pending.length}</div></div>
       <div class="stat"><div class="label">${esc(rangeStatLabel)}</div><div class="value small">${recentlyReceived.length}</div></div>
       <div class="stat"><div class="label">${esc(rangeDiscStatLabel)}</div><div class="value" style="color:${discrepancyCount?'var(--warn)':'var(--good)'}">${discrepancyCount}</div></div>
-      <div class="stat"><div class="label">Not received</div><div class="value" style="color:${notReceived.length?'var(--critical)':'var(--good)'}">${notReceived.length}</div></div>
+      ${canMarkNotReceived ? `<div class="stat"><div class="label">Not received</div><div class="value" style="color:${notReceived.length?'var(--critical)':'var(--good)'}">${notReceived.length}</div></div>` : ""}
     </div>
     ${manage ? `
     <div class="card">
@@ -2515,6 +2523,7 @@ function renderReceiving(){
         </table></div>
       </div>
     </div>
+    ${canMarkNotReceived ? `
     <div class="card">
       <div class="cardhead"><div><h3>Not received</h3><div class="desc">${search ? `${notReceivedShown.length} of ${notReceived.length}` : notReceived.length} order(s) confirmed as NOT arriving, with a reason on file. Reopen sends one back to Pending delivery.</div></div></div>
       <div class="cardbody" style="padding:0;">
@@ -2523,7 +2532,7 @@ function renderReceiving(){
           <tbody>${notReceivedRows || (search ? `<tr><td colspan="6" class="empty">No "not received" lines match "${esc(receivingSearch)}".</td></tr>` : `<tr><td colspan="6" class="empty">Nothing marked not received.</td></tr>`)}</tbody>
         </table></div>
       </div>
-    </div>
+    </div>` : ""}
     <div class="card">
       <div class="cardhead">
         <div><h3>Recently received</h3><div class="desc">${search ? `${recentlyReceivedShown.length} of ${recentlyReceived.length} shown, c` : "C"}onfirmed in ${rangeLabel}. A discrepancy flag means what arrived didn't match what was ordered.</div></div>
@@ -3586,8 +3595,8 @@ function renderStockVariance(){
 // ---------- Users ----------
 function renderUsers(){
   const users = DATA.users || [];
-  const roleLabel = {owner:"Owner", procurement:"Procurement", stocktaker:"Stock Taker", receiving:"Receiving"};
-  const roleOptionsFor = (current)=> ["owner","procurement","stocktaker","receiving"].map(r=>
+  const roleLabel = {owner:"Owner", procurement:"Procurement", stocktaker:"Stock Taker", receiving:"Receiving", market:"Market"};
+  const roleOptionsFor = (current)=> ["owner","procurement","stocktaker","receiving","market"].map(r=>
     `<option value="${r}" ${r===current?"selected":""}>${roleLabel[r]}</option>`).join("");
 
   const rows = users.map((u,i)=>{
@@ -3634,7 +3643,8 @@ function renderUsers(){
         <strong>Owner</strong> — everything, including Users and Backup &amp; Restore. Lands on the Dashboard when logging in.<br>
         <strong>Procurement</strong> — Dashboard, Shopping List, Quick Buy, Shopping List Archive, Purchase Costs, Sage CSV, Input Stock Levels, and Receiving (can confirm deliveries too, not just see what's outstanding). Lands on the Dashboard when logging in.<br>
         <strong>Stock Taker</strong> — Input Stock Levels, and a read-only Shopping List. No Dashboard.<br>
-        <strong>Receiving</strong> — only the Receiving tab, to log stock as it's counted in. For staff whose only job is receiving deliveries (e.g. a night-shift hand) — they don't need or see anything else. No Dashboard.
+        <strong>Receiving</strong> — only the Receiving tab, to log stock as it's counted in. For staff whose only job is receiving deliveries (e.g. a night-shift hand) — they don't need or see anything else. No Dashboard. Can't mark a delivery "Not received" — that stays an Owner/Procurement call.<br>
+        <strong>Market</strong> — only Quick Buy, to log what's bought at the market. For staff whose only job is buying — they don't need or see anything else. No Dashboard.
       </div>
     </div>`;
 }
