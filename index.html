@@ -491,6 +491,7 @@ let stockTakeDate = new Date().toISOString().slice(0,10);
 let stockArchiveDateFilter = "";
 let shoppingCategoryFilter = "";
 let shoppingStatusFilter = "";
+let shoppingSearch = ""; // filters the Base products table by base product — same free-text search convention as Receiving/Shopping List Archive, ANDs with the status/category filters and the "Bought today" tile below
 let shoppingBoughtTodayOnly = false; // toggled by the "Bought today" summary tile — ANDs with the status/category filters above, since it's a separate dimension (has anything been logged today), not another status
 let shoppingBuyEditing = new Map(); // baseProduct -> id of the purchase line being edited, or "new" when adding another line, for whichever rows are currently showing the inline buy-entry inputs
 let shoppingIssueEditing = new Set(); // baseProducts currently showing the inline "unable to purchase" reason input on the Shopping List
@@ -567,16 +568,17 @@ if(!TABS.some(t=>t.id===currentTab)){
 // who can see which tab. Owner: everything. Procurement: the day-to-day buying workflow (Receiving
 // included, and can confirm deliveries too — see canManageReceiving/renderReceiving). Stock Taker: just
 // counting stock (their Shopping List view is further restricted to read-only inside
-// renderShoppingList/renderBuyCell).
+// renderShoppingList/renderBuyCell) — plus the same Receiving access as the Receiving role itself
+// (Shane's ask: give Stock Taker every function Receiving has), see canManageReceiving below.
 // Receiving: a new role, scoped to just confirming deliveries — see canManageReceiving.
 // Market: scoped to just Quick Buy — for staff who only buy at the market and don't need the rest of
 // the app (no Shopping List view, no Receiving, nothing else).
 // "home" (the landing Dashboard) is Owner + Procurement only, by Shane's explicit request — Stock Taker,
-// Receiving and Market stay scoped to their single-purpose tab, same as before.
+// Receiving and Market stay scoped to their single-purpose tab(s), same as before.
 const ROLE_TABS = {
   owner: ["home","shoppinglist","quickbuy","shoppingarchive","receiving","dashboard","salesdata","itemsetup","recipes","purchase","pricehistory","sageimport","stocktake","users","stockvariance","backup"],
   procurement: ["home","shoppinglist","quickbuy","shoppingarchive","receiving","purchase","pricehistory","sageimport","stocktake"],
-  stocktaker: ["shoppinglist","stocktake"],
+  stocktaker: ["shoppinglist","stocktake","receiving"],
   receiving: ["receiving"],
   market: ["quickbuy"],
 };
@@ -633,7 +635,7 @@ function canManagePurchases(){
 // Procurement read-only) — Shane asked to let Procurement receive too, since they're often the ones
 // on hand when a delivery actually arrives. See renderReceiving().
 function canManageReceiving(){
-  return !!currentUser && (currentUser.role==="owner" || currentUser.role==="receiving" || currentUser.role==="procurement");
+  return !!currentUser && (currentUser.role==="owner" || currentUser.role==="receiving" || currentUser.role==="procurement" || currentUser.role==="stocktaker");
 }
 // Deleting a confirmed "Recently received" line outright (as opposed to correcting its qty/cost, which
 // any receiving-capable role can already do) is a step further than a routine count correction — Shane's
@@ -1978,10 +1980,12 @@ function renderShoppingList(){
   const statusOptions = `<option value="">All statuses</option>` +
     statusList.map(s=>`<option value="${esc(s)}" ${s===shoppingStatusFilter?"selected":""}>${esc(shoppingStatusLabel(s))} (${counts[s]||0})</option>`).join("");
 
+  const search = shoppingSearch.trim().toLowerCase();
   let rows = all;
   if(shoppingCategoryFilter) rows = rows.filter(r=> (r.category||"Uncategorized")===shoppingCategoryFilter);
   if(shoppingStatusFilter) rows = rows.filter(r=> r.status===shoppingStatusFilter);
   if(shoppingBoughtTodayOnly) rows = rows.filter(r=> purchaseEntriesForDate(r.baseProduct, today).length > 0);
+  if(search) rows = rows.filter(r=> r.baseProduct.toLowerCase().includes(search));
 
   const noStockTakesYet = DATA.stockTakes.length === 0;
 
@@ -2019,13 +2023,14 @@ function renderShoppingList(){
     <div class="card">
       <div class="cardhead">
         <div><h3>Base products</h3><div class="desc">${rows.length} of ${all.length} shown, most urgent first.</div></div>
+        <div class="field" style="min-width:220px;"><label>Search</label><input type="text" id="shoppingSearchInput" placeholder="Base product…" value="${esc(shoppingSearch)}"></div>
         <div class="field" style="min-width:170px;"><label>Status</label><select id="shoppingStatusFilterSel">${statusOptions}</select></div>
         <div class="field" style="min-width:170px;"><label>Category</label><select id="shoppingCategoryFilterSel">${categoryOptions}</select></div>
       </div>
       <div class="cardbody" style="padding:0;">
         <div class="tablewrap" style="border:none;border-radius:0;max-height:640px;overflow-y:auto;"><table>
           <thead><tr><th>Base product</th><th>Category</th><th>Status</th><th class="num">Current stock</th><th>Counted on</th><th class="num">Holding target</th><th class="num">Suggested buy</th><th>Unit</th><th>Bought today</th><th>Flags</th></tr></thead>
-          <tbody>${tableRows || `<tr><td colspan="10" class="empty">Nothing matches this filter.</td></tr>`}</tbody>
+          <tbody>${tableRows || `<tr><td colspan="10" class="empty">${search ? `No products match "${esc(shoppingSearch)}".` : "Nothing matches this filter."}</td></tr>`}</tbody>
         </table></div>
       </div>
     </div>`;
@@ -2358,8 +2363,9 @@ function renderReceiving(){
   // Marking a delivery "Not received" (and seeing the history of what's been marked that way) is an
   // Owner/Procurement call — Shane's ask: the Receiving role logs what physically arrives, full stop,
   // and doesn't get a say in resolving an order that never showed up. Owner/Procurement still see and
-  // use it exactly as before.
-  const canMarkNotReceived = manage && currentUser.role !== "receiving";
+  // use it exactly as before. Stock Taker was given the rest of Receiving's functions (Shane's ask: same
+  // as Receiving) so it's excluded here too — same restriction, for the same reason.
+  const canMarkNotReceived = manage && currentUser.role !== "receiving" && currentUser.role !== "stocktaker";
   const todayStr = new Date().toISOString().slice(0,10);
   const defaultCutoff = new Date(Date.now() - RECEIVING_RECENT_DAYS*86400000).toISOString().slice(0,10);
 
@@ -3642,7 +3648,7 @@ function renderUsers(){
       <div class="cardbody helptext">
         <strong>Owner</strong> — everything, including Users and Backup &amp; Restore. Lands on the Dashboard when logging in.<br>
         <strong>Procurement</strong> — Dashboard, Shopping List, Quick Buy, Shopping List Archive, Purchase Costs, Sage CSV, Input Stock Levels, and Receiving (can confirm deliveries too, not just see what's outstanding). Lands on the Dashboard when logging in.<br>
-        <strong>Stock Taker</strong> — Input Stock Levels, and a read-only Shopping List. No Dashboard.<br>
+        <strong>Stock Taker</strong> — Input Stock Levels, a read-only Shopping List, and the same Receiving access as the Receiving role (can confirm deliveries, log stock with no order on file, correct received figures — but, same as Receiving, can't mark a delivery "Not received"). No Dashboard.<br>
         <strong>Receiving</strong> — only the Receiving tab, to log stock as it's counted in. For staff whose only job is receiving deliveries (e.g. a night-shift hand) — they don't need or see anything else. No Dashboard. Can't mark a delivery "Not received" — that stays an Owner/Procurement call.<br>
         <strong>Market</strong> — only Quick Buy, to log what's bought at the market. For staff whose only job is buying — they don't need or see anything else. No Dashboard.
       </div>
@@ -3688,6 +3694,13 @@ function wireTabEvents(){
   }
 
   if(currentTab==="shoppinglist"){
+    const shoppingSearchInput = document.getElementById("shoppingSearchInput");
+    if(shoppingSearchInput){
+      shoppingSearchInput.addEventListener("input", (e)=>{
+        shoppingSearch = e.target.value;
+        render();
+      });
+    }
     document.getElementById("shoppingStatusFilterSel").addEventListener("change", (e)=>{
       shoppingStatusFilter = e.target.value;
       render();
