@@ -516,6 +516,7 @@ let receivingEditing = new Set();
 // shoppingIssueEditing's pattern for "unable to purchase" on the Shopping List.
 let receivingNotReceivedEditing = new Set();
 let receivingSearch = ""; // filters BOTH the Pending delivery and Recently received tables on Receiving, by base product or supplier — see renderReceiving()
+let receivingTileFilter = ""; // "" | "pending" | "received" | "discrepancy" | "notreceived" — which of the four summary tiles atop Receiving is toggled on; narrows the page down to just that tile's card (and, for "discrepancy", to just the discrepant rows within Recently received). Same toggle convention as Shopping List's status tiles — see renderReceiving()
 // optional custom date range for the "Recently received" table on Receiving — both empty means the
 // default RECEIVING_RECENT_DAYS window (unchanged behavior); setting either overrides it — see renderReceiving()
 let receivingDateFrom = "";
@@ -2360,6 +2361,17 @@ function renderReceivingSlipHtml(p){
       <div class="print-slip-foot">Printed ${esc(new Date().toLocaleString())}${currentUser ? " by " + esc(currentUser.name) : ""}</div>
     </div>`;
 }
+// Clickable summary tile for the four stats atop Receiving — clicking one narrows the page down to just
+// that tile's card (clicking the already-active one clears back to showing all three cards), same
+// toggle convention as Shopping List's status tiles (statBlock) and Price History's alert tiles
+// (priceStatBlock). "discrepancy" additionally narrows Recently received to just the flagged rows,
+// since a discrepancy isn't its own card — it's a slice of Recently received.
+function receivingStatBlock(label, filterValue, currentFilter, count, color, small){
+  const active = currentFilter === filterValue;
+  return `<div class="stat clickable${active?" active":""}" data-receiving-tile-filter="${esc(filterValue)}" title="Show only ${esc(label)}${active?" (click again to clear)":""}">
+    <div class="label">${esc(label)}</div><div class="value${small?" small":""}"${color?` style="color:${color}"`:""}>${count}</div>
+  </div>`;
+}
 function renderReceiving(){
   const manage = canManageReceiving();
   // Marking a delivery "Not received" (and seeing the history of what's been marked that way) is an
@@ -2368,6 +2380,13 @@ function renderReceiving(){
   // use it exactly as before. Stock Taker was given the rest of Receiving's functions (Shane's ask: same
   // as Receiving) so it's excluded here too — same restriction, for the same reason.
   const canMarkNotReceived = manage && currentUser.role !== "receiving" && currentUser.role !== "stocktaker";
+  // Defends against a stale filter from a different role/session — e.g. Owner had "notreceived" toggled
+  // on, then a Receiving-role user (who never sees that tile at all) picks up the same browser tab.
+  const tileFilter = (receivingTileFilter === "notreceived" && !canMarkNotReceived) ? "" : receivingTileFilter;
+  const showPendingCard = !tileFilter || tileFilter === "pending";
+  const showRecentlyReceivedCard = !tileFilter || tileFilter === "received" || tileFilter === "discrepancy";
+  const showNotReceivedCard = canMarkNotReceived && (!tileFilter || tileFilter === "notreceived");
+  const discrepancyOnly = tileFilter === "discrepancy";
   const todayStr = new Date().toISOString().slice(0,10);
   const defaultCutoff = new Date(Date.now() - RECEIVING_RECENT_DAYS*86400000).toISOString().slice(0,10);
 
@@ -2398,7 +2417,7 @@ function renderReceiving(){
     || (p.baseProduct||"").toLowerCase().includes(search)
     || (p.supplier||"").toLowerCase().includes(search);
   const pendingShown = pending.filter(matchesReceivingSearch);
-  const recentlyReceivedShown = recentlyReceived.filter(matchesReceivingSearch);
+  const recentlyReceivedShown = recentlyReceived.filter(matchesReceivingSearch).filter(p=> !discrepancyOnly || receivingDiscrepancy(p));
   const notReceivedShown = notReceived.filter(matchesReceivingSearch);
 
   const pendingRows = pendingShown.map(p=>{
@@ -2502,10 +2521,10 @@ function renderReceiving(){
       </div>
     </div>
     <div class="cardrow">
-      <div class="stat"><div class="label">Pending delivery</div><div class="value" style="color:${pending.length?'var(--warn)':'var(--good)'}">${pending.length}</div></div>
-      <div class="stat"><div class="label">${esc(rangeStatLabel)}</div><div class="value small">${recentlyReceived.length}</div></div>
-      <div class="stat"><div class="label">${esc(rangeDiscStatLabel)}</div><div class="value" style="color:${discrepancyCount?'var(--warn)':'var(--good)'}">${discrepancyCount}</div></div>
-      ${canMarkNotReceived ? `<div class="stat"><div class="label">Not received</div><div class="value" style="color:${notReceived.length?'var(--critical)':'var(--good)'}">${notReceived.length}</div></div>` : ""}
+      ${receivingStatBlock("Pending delivery", "pending", tileFilter, pending.length, pending.length?'var(--warn)':'var(--good)')}
+      ${receivingStatBlock(rangeStatLabel, "received", tileFilter, recentlyReceived.length, undefined, true)}
+      ${receivingStatBlock(rangeDiscStatLabel, "discrepancy", tileFilter, discrepancyCount, discrepancyCount?'var(--warn)':'var(--good)')}
+      ${canMarkNotReceived ? receivingStatBlock("Not received", "notreceived", tileFilter, notReceived.length, notReceived.length?'var(--critical)':'var(--good)') : ""}
     </div>
     ${manage ? `
     <div class="card">
@@ -2522,6 +2541,7 @@ function renderReceiving(){
     </div>
     ${datalistOptions("baseProductsDL", distinctBaseProducts())}
     ` : ""}
+    ${showPendingCard ? `
     <div class="card">
       <div class="cardhead"><div><h3>Pending delivery</h3><div class="desc">${search ? `${pendingShown.length} of ${pending.length}` : pending.length} order(s) awaiting confirmation, oldest first.</div></div></div>
       <div class="cardbody" style="padding:0;">
@@ -2530,8 +2550,8 @@ function renderReceiving(){
           <tbody>${pendingRows || (search ? `<tr><td colspan="${manage?9:7}" class="empty">No pending deliveries match "${esc(receivingSearch)}".</td></tr>` : `<tr><td colspan="${manage?9:7}" class="empty">Nothing outstanding — everything logged so far has been confirmed received.</td></tr>`)}</tbody>
         </table></div>
       </div>
-    </div>
-    ${canMarkNotReceived ? `
+    </div>` : ""}
+    ${showNotReceivedCard ? `
     <div class="card">
       <div class="cardhead"><div><h3>Not received</h3><div class="desc">${search ? `${notReceivedShown.length} of ${notReceived.length}` : notReceived.length} order(s) confirmed as NOT arriving, with a reason on file. Reopen sends one back to Pending delivery.</div></div></div>
       <div class="cardbody" style="padding:0;">
@@ -2541,9 +2561,10 @@ function renderReceiving(){
         </table></div>
       </div>
     </div>` : ""}
+    ${showRecentlyReceivedCard ? `
     <div class="card">
       <div class="cardhead">
-        <div><h3>Recently received</h3><div class="desc">${search ? `${recentlyReceivedShown.length} of ${recentlyReceived.length} shown, c` : "C"}onfirmed in ${rangeLabel}. A discrepancy flag means what arrived didn't match what was ordered.</div></div>
+        <div><h3>Recently received</h3><div class="desc">${search ? `${recentlyReceivedShown.length} of ${(discrepancyOnly?discrepancyCount:recentlyReceived.length)} shown, c` : "C"}onfirmed in ${rangeLabel}.${discrepancyOnly ? " Showing only deliveries with a discrepancy — what arrived didn't match what was ordered." : " A discrepancy flag means what arrived didn't match what was ordered."}</div></div>
         <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;">
           <div class="field" style="min-width:140px;"><label>From</label><input type="date" id="receivingDateFromInput" value="${esc(receivingDateFrom)}" max="${esc(todayStr)}"></div>
           <div class="field" style="min-width:140px;"><label>To</label><input type="date" id="receivingDateToInput" value="${esc(receivingDateTo)}" max="${esc(todayStr)}"></div>
@@ -2553,10 +2574,10 @@ function renderReceiving(){
       <div class="cardbody" style="padding:0;">
         <div class="tablewrap" style="border:none;border-radius:0;"><table>
           <thead><tr><th>Base product</th><th>Dates</th><th>Received</th><th>Received by</th><th></th></tr></thead>
-          <tbody>${receivedRows || (search ? `<tr><td colspan="5" class="empty">No recently received lines match "${esc(receivingSearch)}".</td></tr>` : `<tr><td colspan="5" class="empty">Nothing confirmed received in ${rangeWindowWord} yet.</td></tr>`)}</tbody>
+          <tbody>${receivedRows || (search ? `<tr><td colspan="5" class="empty">No recently received lines match "${esc(receivingSearch)}".</td></tr>` : `<tr><td colspan="5" class="empty">${discrepancyOnly ? `No discrepancies in ${rangeWindowWord}.` : `Nothing confirmed received in ${rangeWindowWord} yet.`}</td></tr>`)}</tbody>
         </table></div>
       </div>
-    </div>`;
+    </div>` : ""}`;
 }
 
 // ---------- Home Dashboard (landing page, Owner + Procurement only) ----------
@@ -4076,6 +4097,13 @@ function wireTabEvents(){
   }
 
   if(currentTab==="receiving"){
+    document.querySelectorAll("[data-receiving-tile-filter]").forEach(el=>{
+      el.addEventListener("click", ()=>{
+        const val = el.dataset.receivingTileFilter;
+        receivingTileFilter = (receivingTileFilter === val) ? "" : val;
+        render();
+      });
+    });
     const receivingSearchInput = document.getElementById("receivingSearchInput");
     if(receivingSearchInput){
       receivingSearchInput.addEventListener("input", (e)=>{
