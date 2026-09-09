@@ -567,9 +567,9 @@ if(!TABS.some(t=>t.id===currentTab)){
 
 // who can see which tab. Owner: everything. Procurement: the day-to-day buying workflow (Receiving
 // included, and can confirm deliveries too — see canManageReceiving/renderReceiving). Stock Taker: just
-// counting stock (their Shopping List view is further restricted to read-only inside
-// renderShoppingList/renderBuyCell) — plus the same Receiving access as the Receiving role itself
-// (Shane's ask: give Stock Taker every function Receiving has), see canManageReceiving below.
+// counting stock (Input Stock Levels) plus the same Receiving access as the Receiving role itself
+// (Shane's ask: give Stock Taker every function Receiving has), see canManageReceiving below — no
+// Shopping List (Shane's later call: pulled back out again).
 // Receiving: a new role, scoped to just confirming deliveries — see canManageReceiving.
 // Market: scoped to just Quick Buy — for staff who only buy at the market and don't need the rest of
 // the app (no Shopping List view, no Receiving, nothing else).
@@ -578,7 +578,7 @@ if(!TABS.some(t=>t.id===currentTab)){
 const ROLE_TABS = {
   owner: ["home","shoppinglist","quickbuy","shoppingarchive","receiving","dashboard","salesdata","itemsetup","recipes","purchase","pricehistory","sageimport","stocktake","users","stockvariance","backup"],
   procurement: ["home","shoppinglist","quickbuy","shoppingarchive","receiving","purchase","pricehistory","sageimport","stocktake"],
-  stocktaker: ["shoppinglist","stocktake","receiving"],
+  stocktaker: ["stocktake","receiving"],
   receiving: ["receiving"],
   market: ["quickbuy"],
 };
@@ -1885,7 +1885,9 @@ function renderBuyCell(r, today){
     </span>` : "";
 
   if(!canManagePurchases()){
-    // read-only role (Stock Taker): show what's ordered/received (or why it wasn't), no way to log/edit here
+    // defensive fallback for a non-managing role — only Owner/Procurement can actually reach the
+    // Shopping List tab at all now (see ROLE_TABS), so this normally never renders: show what's
+    // ordered/received (or why it wasn't), no way to log/edit here.
     const parts = entries.map(e=> purchaseLineChip(e));
     if(issue) parts.push(issueChipHtml(issue));
     if(!parts.length) return `<span class="helptext">—</span>`;
@@ -2314,8 +2316,8 @@ function renderShoppingArchive(){
 // until someone confirms it actually arrived. Solves the case that prompted this (herbs ordered from a
 // farmer in the morning, delivered after Procurement has gone for the day, with no price until the
 // invoice comes) but applies to every purchase, so nothing's numbers are ever treated as final without
-// someone having actually laid eyes on the delivery. Owner, Receiving and Procurement can all confirm;
-// Stock Taker (which can't even see this tab — see ROLE_TABS) is the only role that can't.
+// someone having actually laid eyes on the delivery. Owner, Receiving, Procurement and Stock Taker can
+// all confirm (see canManageReceiving) — Market is the only role that can't even see this tab (ROLE_TABS).
 const RECEIVING_RECENT_DAYS = 7;
 // Spells out the actual ordered vs. received figures on a discrepancy flag, rather than a bare "qty
 // differs" — the original ordered qty/cost is otherwise invisible once a line is received (it's
@@ -3648,7 +3650,7 @@ function renderUsers(){
       <div class="cardbody helptext">
         <strong>Owner</strong> — everything, including Users and Backup &amp; Restore. Lands on the Dashboard when logging in.<br>
         <strong>Procurement</strong> — Dashboard, Shopping List, Quick Buy, Shopping List Archive, Purchase Costs, Sage CSV, Input Stock Levels, and Receiving (can confirm deliveries too, not just see what's outstanding). Lands on the Dashboard when logging in.<br>
-        <strong>Stock Taker</strong> — Input Stock Levels, a read-only Shopping List, and the same Receiving access as the Receiving role (can confirm deliveries, log stock with no order on file, correct received figures — but, same as Receiving, can't mark a delivery "Not received"). No Dashboard.<br>
+        <strong>Stock Taker</strong> — Input Stock Levels, and the same Receiving access as the Receiving role (can confirm deliveries, log stock with no order on file, correct received figures — but, same as Receiving, can't mark a delivery "Not received"). No Shopping List, no Dashboard.<br>
         <strong>Receiving</strong> — only the Receiving tab, to log stock as it's counted in. For staff whose only job is receiving deliveries (e.g. a night-shift hand) — they don't need or see anything else. No Dashboard. Can't mark a delivery "Not received" — that stays an Owner/Procurement call.<br>
         <strong>Market</strong> — only Quick Buy, to log what's bought at the market. For staff whose only job is buying — they don't need or see anything else. No Dashboard.
       </div>
