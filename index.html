@@ -474,7 +474,8 @@ function setCurrentTab(tabId){
 let itemSearch = "";
 let itemSetupCategoryFilter = "";
 let dashboardCategoryFilter = "";
-let salesUploadDate = new Date().toISOString().slice(0,10); // date the Item Sales upload covers — defaults to today, change it to backdate historical reports into the sales history archive
+let salesUploadDate = new Date().toISOString().slice(0,10); // date the Item Sales upload covers — auto-defaulted to the oldest missing report date each render (see salesUploadMissingDates) until the user picks one themselves, then it stays put
+let salesUploadDateUserSet = false; // true once the user manually changes the Report date field — stops the auto-default from overriding their choice
 let salesPendingA = null; // {filename, rows} staged Pyroca file for the current report date, awaiting Submit
 let salesPendingB = null; // {filename, rows} staged DF Veg file for the current report date, awaiting Submit
 let sageDateFilter = new Date().toISOString().slice(0,10);
@@ -3072,6 +3073,21 @@ function renderSalesEntityCard(title, entityKey, pending, currentCount){
 // Which recent days have had an Item Sales report submitted for them, so a missed day is easy to
 // spot at a glance rather than discovered later as an unexplained gap in Calculated Holdings' averages.
 const UPLOAD_COVERAGE_WINDOW = 30;
+// Oldest-first list of ISO dates in the last UPLOAD_COVERAGE_WINDOW days (excluding today) with no
+// submitted Item Sales report yet. Shared by the Upload history strip below and by renderSalesData's
+// auto-default for the Report date field (Shane's ask: default to the oldest missing date).
+function salesUploadMissingDates(){
+  const uploaded = new Set(DATA.salesHistory.map(h=>h.date));
+  const today = new Date().toISOString().slice(0,10);
+  const missing = [];
+  for(let i=UPLOAD_COVERAGE_WINDOW-1;i>=0;i--){
+    const d = new Date();
+    d.setDate(d.getDate()-i);
+    const iso = d.toISOString().slice(0,10);
+    if(iso<today && !uploaded.has(iso)) missing.push(iso);
+  }
+  return missing;
+}
 function renderUploadCoverage(){
   const uploaded = new Set(DATA.salesHistory.map(h=>h.date));
   const today = new Date().toISOString().slice(0,10);
@@ -3082,7 +3098,7 @@ function renderUploadCoverage(){
     d.setDate(d.getDate()-i);
     days.push({iso:d.toISOString().slice(0,10), dow:DOW[d.getDay()], num:d.getDate()});
   }
-  const missing = days.filter(d=> d.iso<today && !uploaded.has(d.iso)).map(d=>d.iso);
+  const missing = salesUploadMissingDates();
   const cells = days.map(d=>{
     let status = "pending", label = "Today — not yet uploaded";
     if(uploaded.has(d.iso)){ status = "done"; label = "Uploaded"; }
@@ -3104,18 +3120,34 @@ function renderUploadCoverage(){
 }
 
 function renderSalesData(){
+  // Auto-default the Report date to the oldest date still missing a submitted report, so catching up on
+  // a backlog is just "Submit" repeatedly rather than hunting the right date each time. Stops the moment
+  // the user picks a date themselves (salesUploadDateUserSet, set by the change handler in wire_events.js).
+  if(!salesUploadDateUserSet){
+    const missingDates = salesUploadMissingDates();
+    const defaultDate = missingDates.length ? missingDates[0] : new Date().toISOString().slice(0,10);
+    if(salesUploadDate !== defaultDate) salesUploadDate = defaultDate;
+  }
   const histCount = DATA.salesHistory.length;
   const bothStaged = !!(salesPendingA && salesPendingB);
   const missing = [];
   if(!salesPendingA) missing.push("Pyroca");
   if(!salesPendingB) missing.push("DF Veg");
+  const submittedRows = DATA.salesHistory.slice().sort((a,b)=> b.date.localeCompare(a.date)).map(h=>{
+    const productCount = h.demand ? Object.keys(h.demand).length : 0;
+    return `<tr>
+      <td>${esc(h.date)}</td>
+      <td>${productCount} product${productCount===1?"":"s"}</td>
+      <td style="text-align:right;"><button class="btn small" data-del-saleshistory="${esc(h.date)}" title="Delete this submitted report" style="color:var(--critical);">✕ Delete</button></td>
+    </tr>`;
+  }).join("");
   return `
     <div class="pagehead">
       <div><h2>Item Sales</h2><p>Manual backup for now — this will pull automatically from Sage once the API is connected. Drop each company's "Sales By Item Report" export here as a CSV: Item, Qty Sold, Total Cost, Total Selling. Both companies need a file staged for the report date before Submit goes live.</p></div>
     </div>
     ${renderUploadCoverage()}
     <div class="card">
-      <div class="cardhead"><div><h3>Report date</h3><div class="desc">Which date this upload covers. Defaults to today — wind it back to backdate a historical report into the sales history archive that Calculated Holdings averages over (${histCount} day${histCount===1?"":"s"} archived so far). Upload daily for the fastest, most accurate rolling average.</div></div></div>
+      <div class="cardhead"><div><h3>Report date</h3><div class="desc">Which date this upload covers. Defaults to the oldest date with no submitted report yet — wind it further back, or forward, to cover a different date in the sales history archive that Calculated Holdings averages over (${histCount} day${histCount===1?"":"s"} archived so far). Upload daily for the fastest, most accurate rolling average.</div></div></div>
       <div class="cardbody">
         <div class="formgrid">
           <div class="field"><label>Date</label><input type="date" id="salesUploadDateInput" value="${esc(salesUploadDate)}"></div>
@@ -3130,7 +3162,15 @@ function renderSalesData(){
         <button class="btn primary" id="salesUploadSubmit" ${bothStaged?"":"disabled"}>Submit for ${esc(salesUploadDate)}</button>
       </div>
     </div>
-    <p class="helptext">New items not yet in Item Setup are added automatically (with a blank Base Product) so nothing is silently dropped — you'll see a note after submitting.</p>`;
+    <p class="helptext">New items not yet in Item Setup are added automatically (with a blank Base Product) so nothing is silently dropped — you'll see a note after submitting.</p>
+    <div class="card">
+      <div class="cardhead"><div><h3>Submitted reports</h3><div class="desc">Every date archived into the sales history so far. If the wrong CSV was uploaded for a date, delete it here — it goes back to showing as a gap in the coverage strip above and drops out of Calculated Holdings' averages — then re-upload it for that date.</div></div></div>
+      <div class="cardbody">
+        <div class="tablewrap"><table><thead><tr><th>Date</th><th>Coverage</th><th></th></tr></thead>
+        <tbody>${submittedRows || `<tr class="empty"><td colspan="3">No reports submitted yet.</td></tr>`}</tbody>
+        </table></div>
+      </div>
+    </div>`;
 }
 
 // ---------- Purchase Costs ----------
@@ -4539,6 +4579,7 @@ function wireTabEvents(){
   if(currentTab==="salesdata"){
     document.getElementById("salesUploadDateInput").addEventListener("change", (e)=>{
       salesUploadDate = e.target.value || new Date().toISOString().slice(0,10);
+      salesUploadDateUserSet = true; // stop the oldest-missing-date auto-default from overriding a manual pick
     });
     if(!salesPendingA) wireSalesDropzone("salesA");
     if(!salesPendingB) wireSalesDropzone("salesB");
@@ -4550,6 +4591,14 @@ function wireTabEvents(){
     });
     const submitBtn = document.getElementById("salesUploadSubmit");
     if(submitBtn) submitBtn.addEventListener("click", submitSalesUpload);
+    document.querySelectorAll("[data-del-saleshistory]").forEach(b=>{
+      b.addEventListener("click", ()=>{
+        const date = b.dataset.delSaleshistory;
+        if(!confirm(`Delete the submitted Item Sales report for ${date}?\n\nThis removes it from the sales history archive entirely — Calculated Holdings' averages will stop counting it, and the date goes back to "missing" above. Only do this if the wrong CSV was uploaded for that date.`)) return;
+        DATA.salesHistory = DATA.salesHistory.filter(h=> h.date!==date);
+        persist("Removed Item Sales report for " + date, ["salesHistory"]);
+      });
+    });
   }
 
   if(currentTab==="purchase"){
