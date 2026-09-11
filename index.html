@@ -1862,10 +1862,15 @@ function parseSalesCsvText(text){
 // apart purely by this canned reason string, so no separate "type" column/backend change is needed —
 // a real "unable" reason typed by hand is never going to happen to match it exactly.
 const SUFFICIENT_STOCK_REASON = "Have enough stock till tomorrow";
-function issueChipHtml(issue){
+// opts.showWho (Archive only, same convention as purchaseLineChip above) appends who logged the
+// "have enough stock" call or the "unable to purchase" reason — Shane spotted the Archive showing this
+// chip with no attribution at all, unlike a real purchase line right next to it.
+function issueChipHtml(issue, opts){
   if(!issue) return "";
-  if(issue.reason === SUFFICIENT_STOCK_REASON) return chip("✓ " + SUFFICIENT_STOCK_REASON, "good");
-  return chip("✕ Unable: " + issue.reason, "critical");
+  opts = opts || {};
+  const who = (opts.showWho && issue.loggedBy) ? " — logged by " + esc(issue.loggedBy) : "";
+  if(issue.reason === SUFFICIENT_STOCK_REASON) return chip("✓ " + SUFFICIENT_STOCK_REASON + who, "good");
+  return chip("✕ Unable: " + issue.reason + who, "critical");
 }
 // Renders every purchase LINE logged today for this base product as its own chip (buying the same
 // product from two suppliers on the same day is normal now, not a duplicate) — each showing "Ordered"
@@ -2274,7 +2279,7 @@ function renderShoppingArchive(){
       // the point of the Archive, so who logged the order and who confirmed it goes right on the chip
       // instead of sending someone to Purchase Costs/Receiving to look it up.
       const parts = purchases.map(e=> purchaseLineChip(e, {showWho:true}));
-      if(issue) parts.push(issueChipHtml(issue));
+      if(issue) parts.push(issueChipHtml(issue, {showWho:true}));
       return `
       <tr>
         <td>${esc(r.baseProduct)}</td>
