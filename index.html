@@ -527,6 +527,10 @@ let receivingDateTo = "";
 // status the table is narrowed to. Resets to the 5% default each time the tab is opened fresh.
 let stockVarianceFlagPct = 0.05;
 let stockVarianceStatusFilter = "";
+// "" (default) means each product's window runs up to its own latest stock take, same as before — set
+// this to roll the whole report's closing point back to an earlier stock take date, e.g. when Item Sales
+// hasn't been uploaded yet for the days since the most recent count (see stockVarianceComputed).
+let stockVarianceAsOfDate = "";
 
 const NAV = [
   {group:"Overview", items:[
@@ -939,14 +943,25 @@ function isoDatesBetween(startExclusive, endInclusive){
   return out;
 }
 
-function stockVarianceComputed(){
+// Every distinct date a stock take was recorded on (any product), newest first — feeds the "Closing
+// stock take" selector on Stock Variance so a stuck "Incomplete data" window (Item Sales not uploaded up
+// to the latest count yet) can be rolled back to an earlier date that does have full sales coverage.
+function distinctStockTakeDates(){
+  return Array.from(new Set(DATA.stockTakes.map(r=>r.date))).sort().reverse();
+}
+
+// asOfDate ("" by default): when set, each product's window closes at its latest stock take ON OR BEFORE
+// that date instead of always its single most-recent count — lets the Stock Variance report be pinned to
+// a closing date that Item Sales has actually caught up to (see distinctStockTakeDates/renderStockVariance).
+function stockVarianceComputed(asOfDate){
   // date -> that day's archived per-base-product demand snapshot (see archiveSalesSnapshot) — frozen
   // using whatever conversion factors were set up on the day it was archived.
   const salesByDate = {};
   DATA.salesHistory.forEach(h=>{ salesByDate[h.date] = h.demand || {}; });
 
   const rows = distinctBaseProducts().map(baseProduct=>{
-    const takes = DATA.stockTakes.filter(r=>r.baseProduct===baseProduct).slice().sort((a,b)=> a.date.localeCompare(b.date));
+    let takes = DATA.stockTakes.filter(r=>r.baseProduct===baseProduct).slice().sort((a,b)=> a.date.localeCompare(b.date));
+    if(asOfDate) takes = takes.filter(r=> r.date <= asOfDate);
     if(takes.length < 2){
       return {baseProduct, status:"Not enough stock takes", takesCount: takes.length};
     }
@@ -3584,7 +3599,7 @@ function stockVarianceStatusChip(label){
 }
 function renderStockVariance(){
   const flagPct = (Number(stockVarianceFlagPct)>=0 ? Number(stockVarianceFlagPct) : 0.05);
-  const allRows = stockVarianceComputed().map(r=> Object.assign({}, r, {display: stockVarianceClass(r, flagPct)}));
+  const allRows = stockVarianceComputed(stockVarianceAsOfDate).map(r=> Object.assign({}, r, {display: stockVarianceClass(r, flagPct)}));
 
   const counts = {"Shrinkage":0,"Surplus":0,"Balanced":0,"Incomplete data":0,"Not enough stock takes":0};
   allRows.forEach(r=> counts[r.display] = (counts[r.display]||0)+1);
@@ -3633,9 +3648,13 @@ function renderStockVariance(){
     </tr>`;
   }).join("");
 
+  const stDates = distinctStockTakeDates();
+  const asOfOptions = `<option value="">Latest count for each product</option>` +
+    stDates.map(d=>`<option value="${esc(d)}" ${d===stockVarianceAsOfDate?"selected":""}>${esc(d)}</option>`).join("");
+
   return `
     <div class="pagehead">
-      <div><h2>Stock Variance</h2><p>For each product, compares the two most recent Stock Take counts against what Receiving says came in and what the Item Sales reports say went out in between, to see whether the numbers actually add up. Owner-only — nothing new to enter, it's built entirely from Stock Take, Receiving and Item Sales data already on file. A window with a gap in daily sales report coverage is marked "Incomplete data" rather than guessing.</p></div>
+      <div><h2>Stock Variance</h2><p>For each product, compares two Stock Take counts against what Receiving says came in and what the Item Sales reports say went out in between, to see whether the numbers actually add up. Owner-only — nothing new to enter, it's built entirely from Stock Take, Receiving and Item Sales data already on file. A window with a gap in daily sales report coverage is marked "Incomplete data" rather than guessing — if that's happening because Item Sales hasn't caught up to the latest stock take yet, pick an earlier closing date below that it has caught up to.</p></div>
     </div>
     <div class="cardrow">
       <div class="stat"><div class="label">Shrinkage</div><div class="value" style="color:${counts["Shrinkage"]?'var(--critical)':'var(--good)'}">${counts["Shrinkage"]}</div></div>
@@ -3643,6 +3662,14 @@ function renderStockVariance(){
       <div class="stat"><div class="label">Balanced</div><div class="value" style="color:var(--good)">${counts["Balanced"]}</div></div>
       <div class="stat"><div class="label">Incomplete data</div><div class="value small">${counts["Incomplete data"]}</div></div>
       <div class="stat"><div class="label">Not enough stock takes</div><div class="value small">${counts["Not enough stock takes"]}</div></div>
+    </div>
+    <div class="card">
+      <div class="cardhead"><div><h3>Closing stock take</h3><div class="desc">Which stock take to treat as each product's closing count. Defaults to each product's own latest count — wind it back to an earlier date if Item Sales hasn't been uploaded yet for the days since then, so "Incomplete data" doesn't swallow the whole report while you catch up.</div></div></div>
+      <div class="cardbody">
+        <div class="formgrid">
+          <div class="field"><label>As of</label><select id="stockVarianceAsOfSel">${asOfOptions}</select></div>
+        </div>
+      </div>
     </div>
     <div class="card">
       <div class="cardhead"><div><h3>Flag threshold</h3><div class="desc">How big the gap between expected and actual closing stock has to be, as a % of expected, to count as real shrinkage or surplus rather than normal counting noise. Not saved — resets to 5% next time this tab is opened.</div></div></div>
@@ -3654,7 +3681,7 @@ function renderStockVariance(){
     </div>
     <div class="card">
       <div class="cardhead">
-        <div><h3>Products</h3><div class="desc">${rows.length}${stockVarianceStatusFilter?` of ${allRows.length}`:""} product(s), worst shrinkage first.</div></div>
+        <div><h3>Products</h3><div class="desc">${rows.length}${stockVarianceStatusFilter?` of ${allRows.length}`:""} product(s), worst shrinkage first.${stockVarianceAsOfDate ? ` Closing as of ${esc(stockVarianceAsOfDate)}.` : ""}</div></div>
         <div class="field" style="min-width:200px;"><label>Status</label><select id="stockVarianceStatusFilterSel">${statusOptions}</select></div>
       </div>
       <div class="cardbody" style="padding:0;">
@@ -4769,6 +4796,11 @@ function wireTabEvents(){
     const statusSel = document.getElementById("stockVarianceStatusFilterSel");
     if(statusSel) statusSel.addEventListener("change", (e)=>{
       stockVarianceStatusFilter = e.target.value;
+      render();
+    });
+    const asOfSel = document.getElementById("stockVarianceAsOfSel");
+    if(asOfSel) asOfSel.addEventListener("change", (e)=>{
+      stockVarianceAsOfDate = e.target.value;
       render();
     });
   }
