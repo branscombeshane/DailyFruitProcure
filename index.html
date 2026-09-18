@@ -2311,6 +2311,26 @@ function renderShoppingArchive(){
         <td>${parts.join(" ") || `<span class="helptext">—</span>`}</td>
       </tr>`;
     }).join("");
+    // Procurement sign-off, for this specific archived date — DATA.procurementSignoffs is a plain
+    // synced array (like salesHistory), not part of the daily snapshot itself, so it's just filtered by
+    // shoppingArchiveDate directly rather than needing any backend/snapshot changes. Shane's ask: the
+    // Archive should show WHO signed off and WHEN for a given day, same "✓ Signed off at HH:MM" / "Not
+    // signed off" wording as the live Daily sign-off card on the Dashboard (renderHomeDashboard).
+    const archiveProcurementUsers = (DATA.users||[]).filter(u=>u.role==="procurement");
+    const archiveDateSignoffs = (DATA.procurementSignoffs||[]).filter(s=> s.date===shoppingArchiveDate);
+    const signoffHtml = archiveProcurementUsers.length ? `
+    <div class="card">
+      <div class="cardhead"><div><h3>Procurement sign-off</h3><div class="desc">Whether each procurement user confirmed they'd been through every Critical/Consider Buying item on ${esc(shoppingArchiveDate)}.</div></div></div>
+      <div class="cardbody">
+        <div class="tablewrap"><table>
+          <thead><tr><th>Procurement user</th><th>Status</th></tr></thead>
+          <tbody>${archiveProcurementUsers.map(u=>{
+            const entry = archiveDateSignoffs.find(s=> s.user===u.name);
+            return `<tr><td>${esc(u.name)}</td><td>${entry ? chip("✓ Signed off at " + esc(fmtTime(entry.time)), "good") : chip("Not signed off", "neutral")}</td></tr>`;
+          }).join("")}</tbody>
+        </table></div>
+      </div>
+    </div>` : "";
     bodyHtml = `
     <div class="card">
       <div class="cardhead"><div><h3>${esc(shoppingArchiveDate)}</h3><div class="desc">${search ? `${shownRows.length} of ${shoppingArchiveRows.length}` : shoppingArchiveRows.length} product(s) — exactly as the Shopping List stood that evening, not recalculated with today's settings.</div></div></div>
@@ -2320,7 +2340,8 @@ function renderShoppingArchive(){
           <tbody>${tableRows || `<tr><td colspan="9" class="empty">${search ? `No products match "${esc(shoppingArchiveSearch)}".` : "No products recorded for this date."}</td></tr>`}</tbody>
         </table></div>
       </div>
-    </div>`;
+    </div>
+    ${signoffHtml}`;
   }
 
   return `
