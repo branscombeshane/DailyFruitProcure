@@ -351,6 +351,7 @@ function emptyDataShape(){
     stockTakes: [], shoppingList: {criticalPct:0.25, overstockPct:1.5, priceAlertPct:0.25, buyPct:1},
     users: [{name:"Owner", pin:"1234", role:"owner"}],
     purchaseIssues: [], salesHistory: [],
+    procurementSignoffs: [],
     categoryBuffers: {}, productCycles: {}, productCeilings: {},
     categories: [], categoryCostBuffers: {},
   };
@@ -382,6 +383,7 @@ function applyDataDefaults(d){
   }
   if(!d.purchaseIssues) d.purchaseIssues = []; // backward-compatible default for backups predating "Unable to purchase" reasons
   if(!d.salesHistory) d.salesHistory = []; // backward-compatible default for backups predating automatic sales history archiving
+  if(!d.procurementSignoffs) d.procurementSignoffs = []; // backward-compatible default for backups predating the daily procurement sign-off
   if(!d.categoryBuffers) d.categoryBuffers = {}; // backward-compatible default: per-category safety buffer % overrides (falls back to the global safety buffer when unset)
   if(!d.categoryCostBuffers) d.categoryCostBuffers = {}; // backward-compatible default: per-category cost (wastage) buffer %, Sage CSV only — distinct from categoryBuffers (a demand buffer)
   if(!d.shoppingListSnapshotDates) d.shoppingListSnapshotDates = []; // set by doGet, not saved by the app itself — defaults to empty until the nightly snapshot trigger has run at least once
@@ -2659,6 +2661,26 @@ function renderHomeDashboard(){
 
   const goto = (tabId, label)=> `<button class="btn small" data-goto-tab="${esc(tabId)}">${esc(label)}</button>`;
 
+  // ---- Daily procurement sign-off: each procurement user confirms once a day they've been through
+  // every Critical/Consider Buying item — deliberately reuses needsActionRows above (rather than
+  // recomputing "what's outstanding" a second way) as the single gate, so this can never show "all
+  // clear" while "Needs buying today" still lists something, or vice versa. Resets every new day since
+  // it's keyed on today's date, same convention as archiveSalesSnapshot's DATA.salesHistory.
+  const procurementUsers = (DATA.users||[]).filter(u=>u.role==="procurement");
+  const todaysSignoffs = (DATA.procurementSignoffs||[]).filter(s=> s.date===today);
+  const signoffRows = procurementUsers.map(u=> ({name:u.name, isSelf: !!(currentUser && currentUser.name===u.name), entry: todaysSignoffs.find(s=> s.user===u.name) || null}));
+  const mySignoff = currentUser ? todaysSignoffs.find(s=> s.user===currentUser.name) : null;
+  const canSignOff = !!(currentUser && currentUser.role==="procurement" && !mySignoff);
+  const signoffBlocked = needsActionRows.length > 0;
+  const outstandingNames = needsActionRows.map(r=>r.baseProduct);
+  const shownOutstanding = outstandingNames.slice(0,8).map(esc).join(", ");
+  const moreOutstanding = outstandingNames.length - 8;
+  const signoffTableRows = signoffRows.map(r=>`
+    <tr>
+      <td>${esc(r.name)}${r.isSelf ? ` <span class="helptext">(you)</span>` : ""}</td>
+      <td>${r.entry ? chip("✓ Signed off at " + esc(fmtTime(r.entry.time)), "good") : chip("Not signed off yet", "neutral")}</td>
+    </tr>`).join("");
+
   const needsActionHtml = needsActionRows.slice(0,15).map(r=>`
     <tr>
       <td>${esc(r.baseProduct)}</td>
@@ -2736,6 +2758,22 @@ function renderHomeDashboard(){
           <thead><tr><th>Base product</th><th>Category</th><th>Status</th><th class="num">Current stock</th><th class="num">Suggested buy</th><th>Unit</th></tr></thead>
           <tbody>${needsActionHtml || `<tr><td colspan="6" class="empty">Nothing outstanding — everything Critical or Consider Buying has been logged for today.</td></tr>`}</tbody>
         </table></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="cardhead"><div><h3>Daily sign-off</h3><div class="desc">Each procurement user confirms once a day that they've been through every Critical and Consider Buying item, so nothing slips through unnoticed between the two of you. Resets each new day.</div></div></div>
+      <div class="cardbody">
+        <div class="tablewrap"><table>
+          <thead><tr><th>Procurement user</th><th>Status</th></tr></thead>
+          <tbody>${signoffTableRows || `<tr><td colspan="2" class="empty">No procurement users set up yet.</td></tr>`}</tbody>
+        </table></div>
+        ${canSignOff ? `
+        <div style="margin-top:12px;">
+          ${signoffBlocked
+            ? `<div class="helptext" style="margin-bottom:8px;">Still need action today before you can sign off: ${shownOutstanding}${moreOutstanding>0?` and ${moreOutstanding} more`:""}. ${goto("shoppinglist","Open Shopping List →")}</div>
+               <button class="btn primary" id="signoffBtn" disabled title="Clear every Critical/Consider Buying item first">Sign off for today</button>`
+            : `<button class="btn primary" id="signoffBtn">Sign off for today</button>`}
+        </div>` : (mySignoff ? `<div class="helptext" style="margin-top:12px;">You signed off for today at ${esc(fmtTime(mySignoff.time))}.</div>` : "")}
       </div>
     </div>
     <div class="card">
@@ -3785,6 +3823,15 @@ function wireTabEvents(){
         setCurrentTab(el.dataset.gotoTab);
         render();
       });
+    });
+    const signoffBtn = document.getElementById("signoffBtn");
+    if(signoffBtn) signoffBtn.addEventListener("click", ()=>{
+      if(!currentUser || currentUser.role!=="procurement") return; // defensive — button only ever renders for a procurement user without today's sign-off yet
+      const today = new Date().toISOString().slice(0,10);
+      if(!DATA.procurementSignoffs) DATA.procurementSignoffs = [];
+      if(DATA.procurementSignoffs.some(s=> s.date===today && s.user===currentUser.name)){ render(); return; }
+      DATA.procurementSignoffs.push({date:today, user:currentUser.name, time:new Date().toTimeString().slice(0,8)});
+      persist("Signed off for " + today, ["procurementSignoffs"]);
     });
   }
 
