@@ -3465,13 +3465,23 @@ function renderPriceHistory(){
 function renderSageImport(){
   const all = sageImportComputed(sageDateFilter);
   const rows = sageOnlyPurchasedOnDate ? all.filter(r=>r.purchasedOnDate) : all;
-  const tableRows = rows.map(r=>`
+  // Shane's report: a buy logged with no price, then received with no price too, quietly computes an
+  // "average cost" of R0 (see weightedCostMap_ — a missing receivedCost reads as 0, not unknown) and that
+  // R0 was going straight into Sage as the item's cost price. Rather than trying to guess a real price,
+  // block the export outright and name exactly which item(s) need a real price fixed in Purchase Costs
+  // or Receiving first — a genuinely R0 item never happens in this business, so this is never a false
+  // positive worth working around.
+  const zeroCostRows = rows.filter(r=> r.averageCost === 0);
+  const tableRows = rows.map(r=>{
+    const zeroCost = r.averageCost === 0;
+    return `
     <tr>
       <td>${esc(r.itemCode)}</td>
-      <td class="num" style="font-weight:${r.purchasedOnDate?'600':'400'};">${r.averageCost!==null?money(r.averageCost):"—"}${r.costFromLatest ? ` ${chip("latest known price","neutral")}` : ""}</td>
+      <td class="num" style="font-weight:${r.purchasedOnDate?'600':'400'};${zeroCost?' color:var(--critical);':''}">${r.averageCost!==null?money(r.averageCost):"—"}${r.costFromLatest ? ` ${chip("latest known price","neutral")}` : ""}${zeroCost ? ` ${chip("R0 — no price logged","critical")}` : ""}</td>
       <td class="num">${fmtNum(r.quantityOnHand)}</td>
       <td class="helptext">${esc(r.item)}</td>
-    </tr>`).join("");
+    </tr>`;
+  }).join("");
 
   const bufferCats = distinctCategories();
   const bufferFields = bufferCats.map(c=>`<div class="field"><label>${esc(c)} %</label><input class="rowinput num" data-sagebuffer-input="${esc(c)}" value="${DATA.categoryCostBuffers[c]!==undefined && DATA.categoryCostBuffers[c]!==null ? round2(DATA.categoryCostBuffers[c]*100) : ""}" placeholder="0"></div>`).join("");
@@ -3485,9 +3495,10 @@ function renderSageImport(){
           <input type="date" id="sageDateFilter" value="${esc(sageDateFilter)}">
         </div>
         <label class="btn"><input type="checkbox" id="toggleFilter" ${sageOnlyPurchasedOnDate?"checked":""} style="margin-right:6px;">Only items purchased on this date</label>
-        <button class="btn primary" id="downloadSageCsv">Download CSV</button>
+        <button class="btn primary" id="downloadSageCsv" ${zeroCostRows.length?'disabled title="Fix the R0 cost item(s) below before exporting"':''}>Download CSV</button>
       </div>
     </div>
+    ${zeroCostRows.length ? `<div class="banner critical">⚠ ${zeroCostRows.length} item${zeroCostRows.length===1?"":"s"} would export at R0 — a buy was logged (and received) with no price: ${zeroCostRows.slice(0,6).map(r=>esc(r.item)).join(", ")}${zeroCostRows.length>6?` and ${zeroCostRows.length-6} more`:""}. Download is blocked until the price is fixed in Purchase Costs or Receiving.</div>` : ""}
     <div class="card">
       <div class="cardhead"><div><h3>Category wastage buffers</h3><div class="desc">A % markup added on top of average cost for every product in a category, to account for wastage/shrink — affects only the cost figures shown and exported on this page (Quick Buy, Shopping List and Product Mixes are unaffected). Leave blank for no markup.</div></div><button class="btn primary" id="saveSageBuffers">Save buffers</button></div>
       <div class="cardbody">
@@ -4731,6 +4742,10 @@ function wireTabEvents(){
       const all = sageImportComputed(sageDateFilter);
       const rows = sageOnlyPurchasedOnDate ? all.filter(r=>r.purchasedOnDate) : all;
       if(!rows.length){ toast("Nothing to export yet"); return; }
+      // Defensive re-check even though the button is disabled whenever this is true (see
+      // renderSageImport) — a buy logged with no price and received with no price computes to an
+      // "average cost" of exactly R0, which must never reach Sage as a real cost price.
+      if(rows.some(r=> r.averageCost === 0)){ toast("Can't export — one or more items would show R0 cost. Fix the price first."); return; }
       const csv = "Item Code,Average Cost,Quantity On Hand\n" + rows.map(r=>[toCsvField(r.itemCode), r.averageCost, r.quantityOnHand].join(",")).join("\n");
       browserDownload("sage_import_"+(sageDateFilter||"all")+".csv", csv, "text/csv");
       toast("Download started");
