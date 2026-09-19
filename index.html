@@ -1335,8 +1335,18 @@ async function loadShoppingArchive(date){
 // skipping the ones nothing changed in is a bigger win than anything about the data size itself).
 // Omit it (or pass nothing) for a genuine full save — currently just Restore from backup — where every
 // sheet really does need rewriting.
+// Returns true once the save is CONFIRMED to have actually reached the backend, false otherwise
+// (conflict or network/transport failure) — every existing caller was already fire-and-forget (ignores
+// the return value), so this is purely additive and changes nothing for them. Added so a caller that
+// mutates local DATA optimistically before calling persist() (see the sign-off button in wire_events.js)
+// can detect a failed save and roll its own optimistic change back out, instead of leaving this tab
+// showing a "success" that the rest of the team's copy of the data never actually received — Shane's
+// report: Ricky/Sandile were sure they'd signed off because their own screen said so, but a whole-DATA
+// save silently loses on ANY conflict (someone else saving in between), and nothing before this undid
+// the local change that had already been applied in anticipation of the save succeeding.
 async function persist(successMsg, changedKeys){
   setSyncBusy(true);
+  let ok = false;
   try{
     const payload = changedKeys ? Object.assign({}, DATA, {changedKeys}) : DATA;
     // Content-Type: text/plain keeps this a CORS "simple request" — Apps Script Web Apps don't
@@ -1356,6 +1366,7 @@ async function persist(successMsg, changedKeys){
       // poll doesn't turn around and tell this same tab "newer data is available" about its own write
       if(result.dataVersion){ DATA.dataVersion = result.dataVersion; lastKnownDataVersion = result.dataVersion; }
       toast(successMsg || "Saved");
+      ok = true;
     } else if(result && result.conflict){
       saveConflict = result.error || "This data changed elsewhere since you loaded it — reload before saving again.";
       toast("Not saved — someone else's changes would be overwritten");
@@ -1367,6 +1378,7 @@ async function persist(successMsg, changedKeys){
   }
   setSyncBusy(false);
   render();
+  return ok;
 }
 
 // Purchase logging (Quick Buy, and Shopping List's inline "mark as bought"/delete) — sends just the
@@ -3857,13 +3869,23 @@ function wireTabEvents(){
       });
     });
     const signoffBtn = document.getElementById("signoffBtn");
-    if(signoffBtn) signoffBtn.addEventListener("click", ()=>{
+    if(signoffBtn) signoffBtn.addEventListener("click", async ()=>{
       if(!currentUser || currentUser.role!=="procurement") return; // defensive — button only ever renders for a procurement user without today's sign-off yet
       const today = new Date().toISOString().slice(0,10);
       if(!DATA.procurementSignoffs) DATA.procurementSignoffs = [];
       if(DATA.procurementSignoffs.some(s=> s.date===today && s.user===currentUser.name)){ render(); return; }
-      DATA.procurementSignoffs.push({date:today, user:currentUser.name, time:new Date().toTimeString().slice(0,8)});
-      persist("Signed off for " + today, ["procurementSignoffs"]);
+      const entry = {date:today, user:currentUser.name, time:new Date().toTimeString().slice(0,8)};
+      DATA.procurementSignoffs.push(entry);
+      const saved = await persist("Signed off for " + today, ["procurementSignoffs"]);
+      if(!saved){
+        // persist() already toasted why (a conflict, or a network blip) — but a whole-DATA save can be
+        // silently rejected by someone else saving in between, and without this the entry pushed above
+        // would sit in memory forever looking "signed off" on THIS screen even though the backend (and
+        // everyone else's copy) never got it. Shane's report: Ricky/Sandile were sure they'd signed off
+        // because their own screen said so — roll it back so the button reappears for a genuine retry.
+        DATA.procurementSignoffs = DATA.procurementSignoffs.filter(s=> s !== entry);
+        render();
+      }
     });
   }
 
