@@ -704,6 +704,19 @@ function parseItem(item){
   return {code:item, description:"", unit:""};
 }
 
+// Sage's own item descriptions include the unit suffix (e.g. "Apple Golden Delicious - BOX"), but
+// parseItem() deliberately keeps `description` and `unit`/`sellingUnit` separate (see above — that split
+// is what lets Item Setup show them in their own columns). Shane's report: the Selling Prices Sage CSV
+// export was using the bare `description` alone, so every variant of an item (BOX/KG/EACH) exported with
+// an identical, ambiguous description — this reassembles the two back into the single "Description - UNIT"
+// string Sage actually expects, matching the format of Sage's own item list one-for-one.
+function sageItemDescription(it){
+  const desc = (it.description||"").trim();
+  const unit = (it.sellingUnit||"").trim();
+  if(desc && unit) return desc + " - " + unit;
+  return desc || unit || it.item || "";
+}
+
 // ---------- derived computations (mirror the spreadsheet formulas) ----------
 function combinedSalesMap(){
   const map = {};
@@ -1396,7 +1409,7 @@ function pricingSuggestionsComputed(){
     const exportPrice = currentPrice!==null ? currentPrice : suggestedPrice;
     const exportPriceSource = currentPrice!==null ? "set" : (suggestedPrice!==null ? "suggested" : null);
     return {
-      item: it.item, itemCode: it.itemCode, description: it.description || "", baseProduct: it.baseProduct, category: category || "Uncategorized",
+      item: it.item, itemCode: it.itemCode, description: sageItemDescription(it), baseProduct: it.baseProduct, category: category || "Uncategorized",
       latestCost, trailingCost, costChangePct, isGoodDeal,
       marginPct, marginSource: marginInfo.source,
       suggestedPrice, currentPrice, currentPriceDate: quote?quote.date:null, currentPriceBy: quote?quote.setBy:null,
