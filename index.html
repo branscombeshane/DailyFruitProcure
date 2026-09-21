@@ -1334,6 +1334,14 @@ function trailingPurchaseCostMap(days){
 // cycleFor elsewhere. Margin is expressed as % of SELLING price (standard gross-margin convention), so
 // price = cost / (1 - marginPct); a value at or above 1 would divide by zero or go negative, so callers
 // clamp it (see pricingSuggestionsComputed).
+// Rounds a raw margin-derived price up to the nearest 50c so it reads as a normal retail price instead
+// of an odd decimal like R116.67 — Shane's ask. Always rounds UP (never down) so the rounding itself
+// never eats into the target margin just computed.
+function roundToRetailPrice(price){
+  if(price===null || price===undefined) return null;
+  return Math.ceil(price*2)/2;
+}
+
 function marginFor(item, category){
   const catKey = category || "Uncategorized";
   const itemV = DATA.itemMarginPct ? DATA.itemMarginPct[item] : undefined;
@@ -1369,17 +1377,22 @@ function pricingSuggestionsComputed(){
     const isGoodDeal = goodDealThreshold>0 && costChangePct!==null && costChangePct <= -goodDealThreshold;
     const marginInfo = marginFor(it.item, category);
     const marginPct = Math.max(0, Math.min(0.9, marginInfo.value + (isGoodDeal ? goodDealBonus : 0)));
-    const suggestedPrice = latestCost!==null ? round2(latestCost/(1-marginPct)) : null;
+    const suggestedPrice = latestCost!==null ? roundToRetailPrice(latestCost/(1-marginPct)) : null;
     const quote = latestQuoteByItem[it.item] || null;
     const currentPrice = quote ? Number(quote.price) : null;
     const priceDelta = (suggestedPrice!==null && currentPrice!==null) ? round2(suggestedPrice-currentPrice) : null;
     const priceDeltaPct = (priceDelta!==null && currentPrice>0) ? priceDelta/currentPrice : null;
+    // What the Sage CSV export uses for this item (Shane's call): the price he's actually decided on
+    // and recorded via "Update price", falling back to today's suggestion for anything not priced yet —
+    // never blank, so a newly-added item still exports something sensible.
+    const exportPrice = currentPrice!==null ? currentPrice : suggestedPrice;
+    const exportPriceSource = currentPrice!==null ? "set" : (suggestedPrice!==null ? "suggested" : null);
     return {
       item: it.item, itemCode: it.itemCode, baseProduct: it.baseProduct, category: category || "Uncategorized",
       latestCost, trailingCost, costChangePct, isGoodDeal,
       marginPct, marginSource: marginInfo.source,
       suggestedPrice, currentPrice, currentPriceDate: quote?quote.date:null, currentPriceBy: quote?quote.setBy:null,
-      priceDelta, priceDeltaPct,
+      priceDelta, priceDeltaPct, exportPrice, exportPriceSource,
     };
   }).sort((a,b)=> a.item.localeCompare(b.item));
 }
@@ -3669,6 +3682,8 @@ function renderSellingPrices(){
   const withSuggestion = rows.filter(r=>r.suggestedPrice!==null).length;
   const goodDeals = rows.filter(r=>r.isGoodDeal).length;
   const noCost = rows.length - withSuggestion;
+  const exportableRows = rows.filter(r=> r.exportPrice!==null);
+  const notExportable = rows.length - exportableRows.length;
 
   const marginFields = categories.map(c=> `<div class="field"><label>${esc(c)} %</label><input class="rowinput num" data-catmargin-input="${esc(c)}" value="${DATA.categoryMarginPct[c]!==undefined && DATA.categoryMarginPct[c]!==null ? round2(DATA.categoryMarginPct[c]*100) : ""}" placeholder="${fmtNum((Number(plan.defaultMarginPct)||0)*100,0)}"></div>`).join("");
 
@@ -3725,8 +3740,15 @@ function renderSellingPrices(){
 
   return `
     <div class="pagehead">
-      <div><h2>Selling Prices</h2><p>A suggested selling price per item, built from the latest known cost (Purchase Costs / Receiving) plus a target margin — bumped automatically when the latest cost is running notably below the recent trend ("good deal" below). This builds up smarter over time as more cost and price history accumulates; for now it's a starting point to tweak or override, not a final answer.</p></div>
+      <div><h2>Selling Prices</h2><p>A suggested selling price per item, built from the latest known cost (Purchase Costs / Receiving) plus a target margin — bumped automatically when the latest cost is running notably below the recent trend ("good deal" below). Suggested prices are rounded up to the nearest 50c so they read as normal retail prices. This builds up smarter over time as more cost and price history accumulates; for now it's a starting point to tweak or override, not a final answer.</p></div>
+      <div class="actions">
+        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;">
+          <button class="btn primary" id="downloadSellingPricesCsv" ${exportableRows.length?"":'disabled title="Nothing to export yet — no item has a cost or a recorded price"'}>Download Sage CSV</button>
+          <div class="helptext">Item Code, Selling Price — the price you've set, or today's suggestion if you haven't set one yet</div>
+        </div>
+      </div>
     </div>
+    ${notExportable ? `<div class="banner info">ℹ ${notExportable} item${notExportable===1?"":"s"} skipped from the export — no recorded price and no cost yet to suggest one from.</div>` : ""}
     <div class="cardrow">
       <div class="stat"><div class="label">Items priced</div><div class="value">${withSuggestion} / ${rows.length}</div></div>
       <div class="stat"><div class="label">Good deals right now</div><div class="value" style="color:${goodDeals?'var(--good)':'inherit'}">${goodDeals}</div></div>
@@ -5079,6 +5101,16 @@ function wireTabEvents(){
         persist("Price recorded for " + item, ["priceQuotes"]);
       });
     });
+    const downloadSellingPricesBtn = document.getElementById("downloadSellingPricesCsv");
+    if(downloadSellingPricesBtn){
+      downloadSellingPricesBtn.addEventListener("click", ()=>{
+        const rows = pricingSuggestionsComputed().filter(r=> r.exportPrice!==null);
+        if(!rows.length){ toast("Nothing to export yet"); return; }
+        const csv = "Item Code,Selling Price\n" + rows.map(r=>[toCsvField(r.itemCode), r.exportPrice].join(",")).join("\n");
+        browserDownload("sage_selling_prices_"+new Date().toISOString().slice(0,10)+".csv", csv, "text/csv");
+        toast("Download started");
+      });
+    }
   }
 
   if(currentTab==="stocktake"){
