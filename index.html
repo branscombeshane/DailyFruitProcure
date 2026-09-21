@@ -354,8 +354,13 @@ function emptyDataShape(){
     procurementSignoffs: [],
     categoryBuffers: {}, productCycles: {}, productCeilings: {},
     categories: [], categoryCostBuffers: {},
-    pricingPlan: {defaultMarginPct:0.35, goodDealThresholdPct:0.10, goodDealBonusPct:0.05, trendWindowDays:21},
-    categoryMarginPct: {}, itemMarginPct: {}, priceQuotes: [],
+    // Shane's chosen starting point (2026-09): 32% default margin, with Eggs held lower at 30% and
+    // Herbs/Mixes higher at 35% — set here so a brand-new setup (or a backup predating this feature)
+    // starts from his real preference instead of a generic placeholder. Once he's saved his own
+    // settings from the Selling Prices tab, THAT saved data is what loads from here on — this is only
+    // the cold-start fallback, never something that overwrites a value he's already set.
+    pricingPlan: {defaultMarginPct:0.32, goodDealThresholdPct:0.10, goodDealBonusPct:0.05, trendWindowDays:21},
+    categoryMarginPct: {"Eggs":0.30, "Herbs":0.35, "Mixes":0.35}, itemMarginPct: {}, priceQuotes: [],
   };
 }
 
@@ -399,13 +404,16 @@ function applyDataDefaults(d){
   }
   if(d.syncVersion===undefined) d.syncVersion = null; // backward-compatible default for backups/backends predating the two-tabs-open safety net
   if(d.dataVersion===undefined) d.dataVersion = null; // backward-compatible default for backups/backends predating the stale-tab refresh check
-  // backward-compatible defaults for backups predating Selling Prices — see pricingSuggestionsComputed
+  // backward-compatible defaults for backups predating Selling Prices — see pricingSuggestionsComputed.
+  // Only ever fills in a MISSING value — never touches a figure Shane has already saved from the tab
+  // itself — but the fallback values themselves are his chosen starting point (2026-09: 32% default
+  // margin, Eggs 30%, Herbs/Mixes 35%), so a brand-new setup lands on his real numbers, not a placeholder.
   if(!d.pricingPlan) d.pricingPlan = {};
-  if(d.pricingPlan.defaultMarginPct===undefined || d.pricingPlan.defaultMarginPct===null || d.pricingPlan.defaultMarginPct==="") d.pricingPlan.defaultMarginPct = 0.35;
+  if(d.pricingPlan.defaultMarginPct===undefined || d.pricingPlan.defaultMarginPct===null || d.pricingPlan.defaultMarginPct==="") d.pricingPlan.defaultMarginPct = 0.32;
   if(d.pricingPlan.goodDealThresholdPct===undefined || d.pricingPlan.goodDealThresholdPct===null || d.pricingPlan.goodDealThresholdPct==="") d.pricingPlan.goodDealThresholdPct = 0.10;
   if(d.pricingPlan.goodDealBonusPct===undefined || d.pricingPlan.goodDealBonusPct===null || d.pricingPlan.goodDealBonusPct==="") d.pricingPlan.goodDealBonusPct = 0.05;
   if(d.pricingPlan.trendWindowDays===undefined || d.pricingPlan.trendWindowDays===null || d.pricingPlan.trendWindowDays==="") d.pricingPlan.trendWindowDays = 21;
-  if(!d.categoryMarginPct) d.categoryMarginPct = {};
+  if(!d.categoryMarginPct) d.categoryMarginPct = {"Eggs":0.30, "Herbs":0.35, "Mixes":0.35};
   if(!d.itemMarginPct) d.itemMarginPct = {};
   if(!d.priceQuotes) d.priceQuotes = [];
   return d;
@@ -1388,7 +1396,7 @@ function pricingSuggestionsComputed(){
     const exportPrice = currentPrice!==null ? currentPrice : suggestedPrice;
     const exportPriceSource = currentPrice!==null ? "set" : (suggestedPrice!==null ? "suggested" : null);
     return {
-      item: it.item, itemCode: it.itemCode, baseProduct: it.baseProduct, category: category || "Uncategorized",
+      item: it.item, itemCode: it.itemCode, description: it.description || "", baseProduct: it.baseProduct, category: category || "Uncategorized",
       latestCost, trailingCost, costChangePct, isGoodDeal,
       marginPct, marginSource: marginInfo.source,
       suggestedPrice, currentPrice, currentPriceDate: quote?quote.date:null, currentPriceBy: quote?quote.setBy:null,
@@ -3749,7 +3757,7 @@ function renderSellingPrices(){
       <div class="actions">
         <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;">
           <button class="btn primary" id="downloadSellingPricesCsv" ${exportableRows.length?"":'disabled title="Nothing to export yet — no item has a cost or a recorded price"'}>Download Sage CSV</button>
-          <div class="helptext">Item Code, Selling Price — the price you've set, or today's suggestion if you haven't set one yet</div>
+          <div class="helptext">Item Code, Description, Selling Price — the price you've set, or today's suggestion if you haven't set one yet</div>
         </div>
       </div>
     </div>
@@ -5135,7 +5143,7 @@ function wireTabEvents(){
       downloadSellingPricesBtn.addEventListener("click", ()=>{
         const rows = pricingSuggestionsComputed().filter(r=> r.exportPrice!==null);
         if(!rows.length){ toast("Nothing to export yet"); return; }
-        const csv = "Item Code,Selling Price\n" + rows.map(r=>[toCsvField(r.itemCode), r.exportPrice].join(",")).join("\n");
+        const csv = "Item Code,Description,Selling Price\n" + rows.map(r=>[toCsvField(r.itemCode), toCsvField(r.description), r.exportPrice].join(",")).join("\n");
         browserDownload("sage_selling_prices_"+new Date().toISOString().slice(0,10)+".csv", csv, "text/csv");
         toast("Download started");
       });
