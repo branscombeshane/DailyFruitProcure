@@ -3740,7 +3740,16 @@ function renderSellingPrices(){
     </tr>`;
   }).join("");
 
-  const recentQuotes = (DATA.priceQuotes||[]).slice().sort((a,b)=> (b.date||"").localeCompare(a.date||"") || (b.time||"").localeCompare(a.time||"")).slice(0,40);
+  // Scoped to the same search/category filter as "Suggested prices" above (Shane's report: after
+  // recording a big batch via "Update all shown", the list only showed entries up through "Baby Marrow"
+  // alphabetically — the old fixed 40-row cap was cutting off the rest of that same-timestamp batch).
+  // Filtering by the currently-shown items keeps this usable as the log grows into the hundreds/thousands
+  // over time, and RECENT_QUOTES_LIMIT is raised well past a typical single-item-catalog bulk update so
+  // an unfiltered "Update all shown" is still fully visible (the card already scrolls at 400px tall).
+  const RECENT_QUOTES_LIMIT = 500;
+  const filteredItemNames = new Set(filtered.map(r=>r.item));
+  const matchingQuotes = (DATA.priceQuotes||[]).filter(q=> filteredItemNames.has(q.item));
+  const recentQuotes = matchingQuotes.slice().sort((a,b)=> (b.date||"").localeCompare(a.date||"") || (b.time||"").localeCompare(a.time||"")).slice(0, RECENT_QUOTES_LIMIT);
   const recentRows = recentQuotes.map(q=> `
     <tr>
       <td>${esc(q.date||"")}</td>
@@ -3802,12 +3811,13 @@ function renderSellingPrices(){
       </div>
     </div>
     <div class="card">
-      <div class="cardhead"><div><h3>Recent price changes</h3><div class="desc">Every price recorded via "Update price" above, most recent first — the price history this feature builds up going forward.</div></div></div>
+      <div class="cardhead"><div><h3>Recent price changes</h3><div class="desc">Every price recorded via "Update price" above for the item(s) currently shown, most recent first — the price history this feature builds up going forward. Use the search/category filter above to narrow this down too.</div></div></div>
+      ${matchingQuotes.length > RECENT_QUOTES_LIMIT ? `<div class="helptext" style="padding:0 16px 12px;">Showing the most recent ${RECENT_QUOTES_LIMIT} of ${matchingQuotes.length} matching records — narrow with search or a category filter above to find an older one.</div>` : ""}
       <div class="cardbody" style="padding:0;">
         <div class="tablewrap" style="border:none;border-radius:0;max-height:400px;overflow-y:auto;">
           <table>
             <thead><tr><th>Date</th><th>Item</th><th class="num">Price</th><th class="num">Cost at the time</th><th class="num">Margin</th><th>Set by</th></tr></thead>
-            <tbody>${recentRows || `<tr><td colspan="6" class="empty">No prices recorded yet — use "Update price" above to start building history.</td></tr>`}</tbody>
+            <tbody>${recentRows || `<tr><td colspan="6" class="empty">No prices recorded yet${(sellingPriceCategoryFilter || q) ? " for the current filter" : ""} — use "Update price" above to start building history.</td></tr>`}</tbody>
           </table>
         </div>
       </div>
