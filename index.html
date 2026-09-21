@@ -3678,6 +3678,11 @@ function renderSellingPrices(){
   let filtered = rows;
   if(sellingPriceCategoryFilter) filtered = filtered.filter(r=> r.category===sellingPriceCategoryFilter);
   if(q) filtered = filtered.filter(r=> r.item.toLowerCase().includes(q));
+  // "Update all shown" (Shane's ask): a bulk version of the per-row "Update price" button, scoped to
+  // whatever's currently filtered (search/category) rather than the whole catalog — same scoping
+  // convention as the margin-override inputs above (only visible rows are touched). Only items that
+  // actually have a suggestion, and don't already match it, are worth recording again.
+  const updatableRows = filtered.filter(r=> r.suggestedPrice!==null && r.currentPrice!==r.suggestedPrice);
 
   const withSuggestion = rows.filter(r=>r.suggestedPrice!==null).length;
   const goodDeals = rows.filter(r=>r.isGoodDeal).length;
@@ -3772,11 +3777,13 @@ function renderSellingPrices(){
     <div class="card">
       <div class="cardhead">
         <div><h3>Suggested prices</h3><div class="desc">One row per sellable item. Edit a margin % directly (saved with the settings above) or record the price you're actually going forward with via "Update price" — that builds the price history this gets smarter from over time.</div></div>
-        <div style="display:flex;gap:10px;flex-wrap:wrap;">
+        <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">
           <div class="field" style="min-width:170px;"><label>Search item</label><input type="text" id="sellingPriceSearchBox" placeholder="Search…" value="${esc(sellingPriceSearch)}"></div>
           <div class="field" style="min-width:170px;"><label>Filter by category</label><select id="sellingPriceCategoryFilterSel">${categoryFilterOptions}</select></div>
+          <button class="btn primary" id="updateAllShownPrices" ${updatableRows.length?"":'disabled title="Nothing to update — every item shown already matches its suggested price, or has no suggestion yet"'}>Update all shown (${updatableRows.length})</button>
         </div>
       </div>
+      ${(sellingPriceCategoryFilter || q) ? `<div class="helptext" style="padding:0 16px 12px;">"Update all shown" only applies to the ${filtered.length} item${filtered.length===1?"":"s"} matching your current search/category filter, not the full catalog.</div>` : ""}
       <div class="cardbody" style="padding:0;">
         <div class="tablewrap" style="border:none;border-radius:0;">
           <table>
@@ -5101,6 +5108,28 @@ function wireTabEvents(){
         persist("Price recorded for " + item, ["priceQuotes"]);
       });
     });
+    const updateAllShownBtn = document.getElementById("updateAllShownPrices");
+    if(updateAllShownBtn){
+      updateAllShownBtn.addEventListener("click", ()=>{
+        // same search/category scoping as the table itself (see renderSellingPrices) — only what's
+        // actually shown gets bulk-updated, never the whole catalog behind an active filter.
+        const q = sellingPriceSearch.trim().toLowerCase();
+        let rows = pricingSuggestionsComputed();
+        if(sellingPriceCategoryFilter) rows = rows.filter(r=> r.category===sellingPriceCategoryFilter);
+        if(q) rows = rows.filter(r=> r.item.toLowerCase().includes(q));
+        rows = rows.filter(r=> r.suggestedPrice!==null && r.currentPrice!==r.suggestedPrice);
+        if(!rows.length){ toast("Nothing to update"); return; }
+        if(!confirm(`Set ${rows.length} item price(s) to today's suggested price? This adds a new price record for each — you can always update one individually afterwards.`)) return;
+        const date = new Date().toISOString().slice(0,10);
+        const time = new Date().toTimeString().slice(0,8);
+        const setBy = currentUser ? currentUser.name : "";
+        rows.forEach(r=>{
+          DATA.priceQuotes.push({item:r.item, price:r.suggestedPrice, cost:r.latestCost, marginPct:r.marginPct, date, time, setBy});
+        });
+        sellingPriceEditing.clear();
+        persist("Updated " + rows.length + " price" + (rows.length===1?"":"s"), ["priceQuotes"]);
+      });
+    }
     const downloadSellingPricesBtn = document.getElementById("downloadSellingPricesCsv");
     if(downloadSellingPricesBtn){
       downloadSellingPricesBtn.addEventListener("click", ()=>{
