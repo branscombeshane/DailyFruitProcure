@@ -354,6 +354,8 @@ function emptyDataShape(){
     procurementSignoffs: [],
     categoryBuffers: {}, productCycles: {}, productCeilings: {},
     categories: [], categoryCostBuffers: {},
+    pricingPlan: {defaultMarginPct:0.35, goodDealThresholdPct:0.10, goodDealBonusPct:0.05, trendWindowDays:21},
+    categoryMarginPct: {}, itemMarginPct: {}, priceQuotes: [],
   };
 }
 
@@ -397,6 +399,15 @@ function applyDataDefaults(d){
   }
   if(d.syncVersion===undefined) d.syncVersion = null; // backward-compatible default for backups/backends predating the two-tabs-open safety net
   if(d.dataVersion===undefined) d.dataVersion = null; // backward-compatible default for backups/backends predating the stale-tab refresh check
+  // backward-compatible defaults for backups predating Selling Prices — see pricingSuggestionsComputed
+  if(!d.pricingPlan) d.pricingPlan = {};
+  if(d.pricingPlan.defaultMarginPct===undefined || d.pricingPlan.defaultMarginPct===null || d.pricingPlan.defaultMarginPct==="") d.pricingPlan.defaultMarginPct = 0.35;
+  if(d.pricingPlan.goodDealThresholdPct===undefined || d.pricingPlan.goodDealThresholdPct===null || d.pricingPlan.goodDealThresholdPct==="") d.pricingPlan.goodDealThresholdPct = 0.10;
+  if(d.pricingPlan.goodDealBonusPct===undefined || d.pricingPlan.goodDealBonusPct===null || d.pricingPlan.goodDealBonusPct==="") d.pricingPlan.goodDealBonusPct = 0.05;
+  if(d.pricingPlan.trendWindowDays===undefined || d.pricingPlan.trendWindowDays===null || d.pricingPlan.trendWindowDays==="") d.pricingPlan.trendWindowDays = 21;
+  if(!d.categoryMarginPct) d.categoryMarginPct = {};
+  if(!d.itemMarginPct) d.itemMarginPct = {};
+  if(!d.priceQuotes) d.priceQuotes = [];
   return d;
 }
 
@@ -533,6 +544,12 @@ let stockVarianceStatusFilter = "";
 // this to roll the whole report's closing point back to an earlier stock take date, e.g. when Item Sales
 // hasn't been uploaded yet for the days since the most recent count (see stockVarianceComputed).
 let stockVarianceAsOfDate = "";
+// Selling Prices tab — view-only filters, reset each time the tab opens fresh (same convention as
+// itemSetupCategoryFilter/shoppingCategoryFilter elsewhere), plus which items currently have their
+// inline "Update price" form open (mirrors shoppingIssueEditing's Set-of-keys pattern).
+let sellingPriceCategoryFilter = "";
+let sellingPriceSearch = "";
+let sellingPriceEditing = new Set();
 
 const NAV = [
   {group:"Overview", items:[
@@ -556,6 +573,9 @@ const NAV = [
     {id:"purchase", label:"Purchase Costs"},
     {id:"pricehistory", label:"Price History"},
     {id:"sageimport", label:"Sage CSV"},
+  ]},
+  {group:"Selling", items:[
+    {id:"sellingprices", label:"Selling Prices"},
   ]},
   {group:"Stock Take", items:[
     {id:"stocktake", label:"Input Stock Levels"},
@@ -584,8 +604,8 @@ if(!TABS.some(t=>t.id===currentTab)){
 // "home" (the landing Dashboard) is Owner + Procurement only, by Shane's explicit request — Stock Taker,
 // Receiving and Market stay scoped to their single-purpose tab(s), same as before.
 const ROLE_TABS = {
-  owner: ["home","shoppinglist","quickbuy","shoppingarchive","receiving","dashboard","salesdata","itemsetup","recipes","purchase","pricehistory","sageimport","stocktake","users","stockvariance","backup"],
-  procurement: ["home","shoppinglist","quickbuy","shoppingarchive","receiving","purchase","pricehistory","sageimport","stocktake"],
+  owner: ["home","shoppinglist","quickbuy","shoppingarchive","receiving","dashboard","salesdata","itemsetup","recipes","purchase","pricehistory","sageimport","sellingprices","stocktake","users","stockvariance","backup"],
+  procurement: ["home","shoppinglist","quickbuy","shoppingarchive","receiving","purchase","pricehistory","sageimport","sellingprices","stocktake"],
   stocktaker: ["stocktake","receiving"],
   receiving: ["receiving"],
   market: ["quickbuy"],
@@ -1288,6 +1308,82 @@ function compositeMixCosts(){
   });
 }
 
+// ---------- Selling Prices ----------
+// Shane's ask: something that uses the cost data this system already collects every day to guide
+// competitive selling prices — seasonality and price-jump trends, and "when we get a good deal,
+// increase our margin" rather than just passing the saving straight through. V1 (as scoped): a
+// suggested selling price per sellable item, built from the latest known cost plus a target margin
+// (item override -> category override -> global default), bumped by a "good deal" bonus whenever the
+// latest cost is running notably below the trailing window average. There's no retained history of
+// actual selling prices yet (Item Sales CSVs only carry the current upload's realized figures, not an
+// append-only log — see parseSalesCsvText), so DATA.priceQuotes starts empty and builds up only from
+// here on, the moment someone records a price via "Update price" below.
+
+// Quantity-weighted average RECEIVED cost per base product across only the last `days` days — the
+// trend baseline a "good deal" is measured against. Reuses weightedCostMap_'s per-entry weighting
+// (same math as purchaseCostMap/latestPurchaseCostMap), just scoped to a rolling window instead of one
+// exact date or "whatever's most recent".
+function trailingPurchaseCostMap(days){
+  const cutoff = new Date(Date.now() - days*86400000).toISOString().slice(0,10);
+  const entries = DATA.purchaseCosts.filter(p=> p.baseProduct && isReceived(p) && p.receivedDate >= cutoff);
+  return weightedCostMap_(entries);
+}
+
+// Effective target margin for a sellable item: an item-level override beats a category-level override
+// beats the global default — same "specific beats category beats global" layering as categoryBufferFor/
+// cycleFor elsewhere. Margin is expressed as % of SELLING price (standard gross-margin convention), so
+// price = cost / (1 - marginPct); a value at or above 1 would divide by zero or go negative, so callers
+// clamp it (see pricingSuggestionsComputed).
+function marginFor(item, category){
+  const catKey = category || "Uncategorized";
+  const itemV = DATA.itemMarginPct ? DATA.itemMarginPct[item] : undefined;
+  if(itemV!==undefined && itemV!==null && itemV!=="") return {value:Number(itemV), source:"item"};
+  const catV = DATA.categoryMarginPct ? DATA.categoryMarginPct[catKey] : undefined;
+  if(catV!==undefined && catV!==null && catV!=="") return {value:Number(catV), source:"category"};
+  return {value:Number(DATA.pricingPlan.defaultMarginPct)||0, source:"default"};
+}
+
+// One row per sellable item (Item Setup granularity — e.g. "Banana - BOX" priced separately from
+// "Banana - KG", per Shane's call), each with: the latest known cost, a trailing-window cost to compare
+// it against (the closest thing to "seasonality/trend" this can offer until more price history has
+// built up), whether the latest cost counts as a "good deal" against that trend, the margin actually
+// applied (and where it came from), the resulting suggested price, and — once any prices have been
+// recorded — the last price actually set so it's obvious how far off the current asking price is.
+function pricingSuggestionsComputed(){
+  const plan = DATA.pricingPlan || {};
+  const windowDays = Number(plan.trendWindowDays)>0 ? Math.round(Number(plan.trendWindowDays)) : 21;
+  const goodDealThreshold = Number(plan.goodDealThresholdPct)||0;
+  const goodDealBonus = Number(plan.goodDealBonusPct)||0;
+  const latestPm = latestPurchaseCostMap();
+  const trailingPm = trailingPurchaseCostMap(windowDays);
+  const latestQuoteByItem = {};
+  (DATA.priceQuotes||[]).forEach(q=>{
+    if(!q.item) return;
+    if(!latestQuoteByItem[q.item] || q.date > latestQuoteByItem[q.item].date) latestQuoteByItem[q.item] = q;
+  });
+  return DATA.itemSetup.map(it=>{
+    const category = effectiveCategoryFor(it);
+    const latestCost = itemCostPerUnit(it.item, latestPm);
+    const trailingCost = itemCostPerUnit(it.item, trailingPm);
+    const costChangePct = (latestCost!==null && trailingCost!==null && trailingCost>0) ? (latestCost-trailingCost)/trailingCost : null;
+    const isGoodDeal = goodDealThreshold>0 && costChangePct!==null && costChangePct <= -goodDealThreshold;
+    const marginInfo = marginFor(it.item, category);
+    const marginPct = Math.max(0, Math.min(0.9, marginInfo.value + (isGoodDeal ? goodDealBonus : 0)));
+    const suggestedPrice = latestCost!==null ? round2(latestCost/(1-marginPct)) : null;
+    const quote = latestQuoteByItem[it.item] || null;
+    const currentPrice = quote ? Number(quote.price) : null;
+    const priceDelta = (suggestedPrice!==null && currentPrice!==null) ? round2(suggestedPrice-currentPrice) : null;
+    const priceDeltaPct = (priceDelta!==null && currentPrice>0) ? priceDelta/currentPrice : null;
+    return {
+      item: it.item, itemCode: it.itemCode, baseProduct: it.baseProduct, category: category || "Uncategorized",
+      latestCost, trailingCost, costChangePct, isGoodDeal,
+      marginPct, marginSource: marginInfo.source,
+      suggestedPrice, currentPrice, currentPriceDate: quote?quote.date:null, currentPriceBy: quote?quote.setBy:null,
+      priceDelta, priceDeltaPct,
+    };
+  }).sort((a,b)=> a.item.localeCompare(b.item));
+}
+
 // ---------- persistence ----------
 // Fetches the full shared state from the backend. Uses text/plain-free plain GET (no custom
 // headers) so this never triggers a CORS preflight against the Apps Script endpoint.
@@ -1575,6 +1671,7 @@ function render(){
     else if(currentTab==="purchase") pageHtml = renderPurchase();
     else if(currentTab==="pricehistory") pageHtml = renderPriceHistory();
     else if(currentTab==="sageimport") pageHtml = renderSageImport();
+    else if(currentTab==="sellingprices") pageHtml = renderSellingPrices();
     else if(currentTab==="stocktake") pageHtml = renderStockTake();
     else if(currentTab==="users") pageHtml = renderUsers();
     else if(currentTab==="stockvariance") pageHtml = renderStockVariance();
@@ -3553,6 +3650,133 @@ function renderSageImport(){
     </div>`;
 }
 
+// ---------- Selling Prices ----------
+// Shane's ask: guidance on competitive selling prices, built from the cost data this system already
+// collects every day — see pricingSuggestionsComputed for the math (latest cost + a target margin,
+// bumped when the latest cost is a "good deal" against the trailing trend). Owner + Procurement only
+// (both can see and adjust it — Shane's call, not Owner-only).
+function renderSellingPrices(){
+  const plan = DATA.pricingPlan || {};
+  const rows = pricingSuggestionsComputed();
+  const categories = Array.from(new Set(rows.map(r=>r.category))).sort();
+  const categoryFilterOptions = `<option value="">All categories</option>` +
+    categories.map(c=>`<option value="${esc(c)}" ${c===sellingPriceCategoryFilter?"selected":""}>${esc(c)}</option>`).join("");
+  const q = sellingPriceSearch.trim().toLowerCase();
+  let filtered = rows;
+  if(sellingPriceCategoryFilter) filtered = filtered.filter(r=> r.category===sellingPriceCategoryFilter);
+  if(q) filtered = filtered.filter(r=> r.item.toLowerCase().includes(q));
+
+  const withSuggestion = rows.filter(r=>r.suggestedPrice!==null).length;
+  const goodDeals = rows.filter(r=>r.isGoodDeal).length;
+  const noCost = rows.length - withSuggestion;
+
+  const marginFields = categories.map(c=> `<div class="field"><label>${esc(c)} %</label><input class="rowinput num" data-catmargin-input="${esc(c)}" value="${DATA.categoryMarginPct[c]!==undefined && DATA.categoryMarginPct[c]!==null ? round2(DATA.categoryMarginPct[c]*100) : ""}" placeholder="${fmtNum((Number(plan.defaultMarginPct)||0)*100,0)}"></div>`).join("");
+
+  const trendLabel = (r)=>{
+    if(r.costChangePct===null) return `<span class="helptext">not enough trend data yet</span>`;
+    const pct = Math.abs(round2(r.costChangePct*100));
+    if(r.isGoodDeal) return chip(`▼ ${pct}% — good deal`, "good");
+    if(r.costChangePct < 0) return chip(`▼ ${pct}%`, "neutral");
+    if(r.costChangePct > 0) return chip(`▲ ${pct}%`, "warn");
+    return chip("Flat", "neutral");
+  };
+
+  const tableRows = filtered.map(r=>{
+    const editing = sellingPriceEditing.has(r.item);
+    const marginSourceNote = r.marginSource==="item" ? "" : r.marginSource==="category" ? `<span class="helptext"> (category)</span>` : `<span class="helptext"> (default)</span>`;
+    const deltaHtml = r.priceDelta===null ? "" :
+      r.priceDelta===0 ? `<div class="helptext">matches suggested</div>` :
+      `<div class="helptext" style="color:${r.priceDelta>0?'var(--warn)':'var(--good)'};">${r.priceDelta>0?"▲":"▼"} ${money(Math.abs(r.priceDelta))} (${fmtNum(Math.abs(r.priceDeltaPct*100),1)}%) vs suggested</div>`;
+    return `
+    <tr>
+      <td style="max-width:240px;">${esc(r.item)}</td>
+      <td>${esc(r.category)}</td>
+      <td class="num">${r.latestCost!==null?money(r.latestCost):"—"}</td>
+      <td>${trendLabel(r)}</td>
+      <td>
+        <input class="rowinput num" data-itemmargin-input="${esc(r.item)}" value="${DATA.itemMarginPct[r.item]!==undefined && DATA.itemMarginPct[r.item]!==null ? round2(DATA.itemMarginPct[r.item]*100) : ""}" placeholder="${fmtNum(r.marginPct*100,0)}" style="max-width:70px;">${marginSourceNote}
+      </td>
+      <td class="num" style="font-weight:600;">${r.suggestedPrice!==null?money(r.suggestedPrice):"—"}</td>
+      <td>
+        ${r.currentPrice!==null ? `${money(r.currentPrice)}<div class="helptext">${esc(r.currentPriceDate||"")}${r.currentPriceBy?" — "+esc(r.currentPriceBy):""}</div>` : `<span class="helptext">not set yet</span>`}
+        ${deltaHtml}
+      </td>
+      <td>
+        ${editing ? `
+          <div style="display:flex;align-items:center;gap:4px;white-space:nowrap;">
+            <input type="number" step="0.01" class="pricequote-input" data-pricequote-input="${esc(r.item)}" value="${r.suggestedPrice!==null?r.suggestedPrice:(r.currentPrice!==null?r.currentPrice:"")}" style="width:90px;">
+            <button class="btn primary" data-pricequote-tick="${esc(r.item)}" title="Save" style="padding:2px 10px;font-size:12px;">✓</button>
+            <button class="btn" data-pricequote-cancel="${esc(r.item)}" style="padding:2px 6px;font-size:12px;" title="Close without saving">✕</button>
+          </div>` : `<button class="btn" data-pricequote-addnew="${esc(r.item)}" style="padding:2px 10px;font-size:12px;white-space:nowrap;">Update price</button>`}
+      </td>
+    </tr>`;
+  }).join("");
+
+  const recentQuotes = (DATA.priceQuotes||[]).slice().sort((a,b)=> (b.date||"").localeCompare(a.date||"") || (b.time||"").localeCompare(a.time||"")).slice(0,40);
+  const recentRows = recentQuotes.map(q=> `
+    <tr>
+      <td>${esc(q.date||"")}</td>
+      <td>${esc(q.item||"")}</td>
+      <td class="num">${q.price!==undefined&&q.price!==null?money(q.price):"—"}</td>
+      <td class="num">${q.cost!==undefined&&q.cost!==null?money(q.cost):"—"}</td>
+      <td class="num">${q.marginPct!==undefined&&q.marginPct!==null?fmtNum(q.marginPct*100,0)+"%":"—"}</td>
+      <td>${esc(q.setBy||"")}</td>
+    </tr>`).join("");
+
+  return `
+    <div class="pagehead">
+      <div><h2>Selling Prices</h2><p>A suggested selling price per item, built from the latest known cost (Purchase Costs / Receiving) plus a target margin — bumped automatically when the latest cost is running notably below the recent trend ("good deal" below). This builds up smarter over time as more cost and price history accumulates; for now it's a starting point to tweak or override, not a final answer.</p></div>
+    </div>
+    <div class="cardrow">
+      <div class="stat"><div class="label">Items priced</div><div class="value">${withSuggestion} / ${rows.length}</div></div>
+      <div class="stat"><div class="label">Good deals right now</div><div class="value" style="color:${goodDeals?'var(--good)':'inherit'}">${goodDeals}</div></div>
+      <div class="stat"><div class="label">Missing a cost</div><div class="value small" style="color:${noCost?'var(--warn)':'inherit'}">${noCost}</div></div>
+    </div>
+    <div class="card">
+      <div class="cardhead"><div><h3>Target margin settings</h3><div class="desc">Margin is % of selling price (e.g. 35% margin on R10 cost suggests ~R15.38). "Good deal" bumps the margin further whenever the latest cost is down at least the threshold % against the trailing window average — the saving goes partly to margin instead of straight through to price.</div></div><button class="btn primary" id="saveSellingPriceSettings">Save settings</button></div>
+      <div class="cardbody">
+        <div class="formgrid">
+          <div class="field"><label>Default target margin %</label><input type="number" step="1" min="0" max="90" id="defaultMarginPct" value="${round2((Number(plan.defaultMarginPct)||0)*100)}"></div>
+          <div class="field"><label>Trend window (days)</label><input type="number" step="1" min="3" id="marginTrendWindow" value="${Number(plan.trendWindowDays)||21}"></div>
+          <div class="field"><label>Good deal threshold (% cost drop)</label><input type="number" step="1" min="0" id="goodDealThresholdPct" value="${round2((Number(plan.goodDealThresholdPct)||0)*100)}"></div>
+          <div class="field"><label>Good deal margin bonus %</label><input type="number" step="1" min="0" id="goodDealBonusPct" value="${round2((Number(plan.goodDealBonusPct)||0)*100)}"></div>
+        </div>
+        <div class="helptext" style="margin-top:10px;">Category overrides below (leave blank to use the default above); each item's row further down can override its category too.</div>
+        <div class="formgrid" style="margin-top:10px;">
+          ${marginFields || `<div class="empty">No categories set up yet.</div>`}
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="cardhead">
+        <div><h3>Suggested prices</h3><div class="desc">One row per sellable item. Edit a margin % directly (saved with the settings above) or record the price you're actually going forward with via "Update price" — that builds the price history this gets smarter from over time.</div></div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;">
+          <div class="field" style="min-width:170px;"><label>Search item</label><input type="text" id="sellingPriceSearchBox" placeholder="Search…" value="${esc(sellingPriceSearch)}"></div>
+          <div class="field" style="min-width:170px;"><label>Filter by category</label><select id="sellingPriceCategoryFilterSel">${categoryFilterOptions}</select></div>
+        </div>
+      </div>
+      <div class="cardbody" style="padding:0;">
+        <div class="tablewrap" style="border:none;border-radius:0;">
+          <table>
+            <thead><tr><th>Item</th><th>Category</th><th class="num">Latest cost</th><th>Trend (${Number(plan.trendWindowDays)||21}d)</th><th>Margin</th><th class="num">Suggested price</th><th>Current price</th><th></th></tr></thead>
+            <tbody>${tableRows || `<tr><td colspan="8" class="empty">No items match.</td></tr>`}</tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="cardhead"><div><h3>Recent price changes</h3><div class="desc">Every price recorded via "Update price" above, most recent first — the price history this feature builds up going forward.</div></div></div>
+      <div class="cardbody" style="padding:0;">
+        <div class="tablewrap" style="border:none;border-radius:0;max-height:400px;overflow-y:auto;">
+          <table>
+            <thead><tr><th>Date</th><th>Item</th><th class="num">Price</th><th class="num">Cost at the time</th><th class="num">Margin</th><th>Set by</th></tr></thead>
+            <tbody>${recentRows || `<tr><td colspan="6" class="empty">No prices recorded yet — use "Update price" above to start building history.</td></tr>`}</tbody>
+          </table>
+        </div>
+      </div>
+    </div>`;
+}
+
 // ---------- Stock Take ----------
 function renderStockTake(){
   const byCat = {};
@@ -4792,6 +5016,68 @@ function wireTabEvents(){
       const csv = "Item Code,Average Cost,Quantity On Hand\n" + rows.map(r=>[toCsvField(r.itemCode), r.averageCost, r.quantityOnHand].join(",")).join("\n");
       browserDownload("sage_import_"+(sageDateFilter||"all")+".csv", csv, "text/csv");
       toast("Download started");
+    });
+  }
+
+  if(currentTab==="sellingprices"){
+    document.getElementById("sellingPriceSearchBox").addEventListener("input", (e)=>{ sellingPriceSearch = e.target.value; render(); });
+    document.getElementById("sellingPriceCategoryFilterSel").addEventListener("change", (e)=>{ sellingPriceCategoryFilter = e.target.value; render(); });
+    document.getElementById("saveSellingPriceSettings").addEventListener("click", ()=>{
+      const defRaw = Number(document.getElementById("defaultMarginPct").value);
+      DATA.pricingPlan.defaultMarginPct = (defRaw>=0 && defRaw<90) ? defRaw/100 : 0.35;
+      const winRaw = Number(document.getElementById("marginTrendWindow").value);
+      DATA.pricingPlan.trendWindowDays = (winRaw>=3) ? Math.round(winRaw) : 21;
+      const threshRaw = Number(document.getElementById("goodDealThresholdPct").value);
+      DATA.pricingPlan.goodDealThresholdPct = (threshRaw>=0) ? threshRaw/100 : 0;
+      const bonusRaw = Number(document.getElementById("goodDealBonusPct").value);
+      DATA.pricingPlan.goodDealBonusPct = (bonusRaw>=0) ? bonusRaw/100 : 0;
+      document.querySelectorAll("[data-catmargin-input]").forEach(inp=>{
+        const cat = inp.dataset.catmarginInput;
+        const v = inp.value.trim();
+        if(v==="") delete DATA.categoryMarginPct[cat];
+        else DATA.categoryMarginPct[cat] = (Number(v)||0)/100;
+      });
+      // only the currently-visible (search/category-filtered) rows are in the DOM — untouched items keep
+      // whatever override they already had, same convention as the cycle/ceiling inputs on Calculated Holdings.
+      document.querySelectorAll("[data-itemmargin-input]").forEach(inp=>{
+        const item = inp.dataset.itemmarginInput;
+        const v = inp.value.trim();
+        if(v==="") delete DATA.itemMarginPct[item];
+        else DATA.itemMarginPct[item] = (Number(v)||0)/100;
+      });
+      persist("Pricing settings saved", ["pricingPlan","categoryMarginPct","itemMarginPct"]);
+    });
+    document.querySelectorAll("[data-pricequote-addnew]").forEach(b=>{
+      b.addEventListener("click", ()=>{
+        sellingPriceEditing.add(b.dataset.pricequoteAddnew);
+        render();
+      });
+    });
+    document.querySelectorAll("[data-pricequote-cancel]").forEach(b=>{
+      b.addEventListener("click", ()=>{
+        sellingPriceEditing.delete(b.dataset.pricequoteCancel);
+        render();
+      });
+    });
+    document.querySelectorAll("[data-pricequote-tick]").forEach(b=>{
+      b.addEventListener("click", ()=>{
+        const item = b.dataset.pricequoteTick;
+        const row = document.querySelector(`[data-pricequote-input="${CSS.escape(item)}"]`);
+        const price = row ? Number(row.value) : NaN;
+        if(!row || row.value==="" || isNaN(price) || price<0){ toast("Enter a valid price first"); return; }
+        const suggestion = (pricingSuggestionsComputed().find(r=>r.item===item)) || {};
+        const entry = {
+          item, price: round2(price),
+          cost: suggestion.latestCost!==undefined ? suggestion.latestCost : null,
+          marginPct: suggestion.marginPct!==undefined ? suggestion.marginPct : null,
+          date: new Date().toISOString().slice(0,10),
+          time: new Date().toTimeString().slice(0,8),
+          setBy: currentUser ? currentUser.name : "",
+        };
+        DATA.priceQuotes.push(entry);
+        sellingPriceEditing.delete(item);
+        persist("Price recorded for " + item, ["priceQuotes"]);
+      });
     });
   }
 
