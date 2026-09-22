@@ -2559,12 +2559,13 @@ function receivingStatBlock(label, filterValue, currentFilter, count, color, sma
 }
 function renderReceiving(){
   const manage = canManageReceiving();
-  // Marking a delivery "Not received" (and seeing the history of what's been marked that way) is an
-  // Owner/Procurement call — Shane's ask: the Receiving role logs what physically arrives, full stop,
-  // and doesn't get a say in resolving an order that never showed up. Owner/Procurement still see and
-  // use it exactly as before. Stock Taker was given the rest of Receiving's functions (Shane's ask: same
-  // as Receiving) so it's excluded here too — same restriction, for the same reason.
-  const canMarkNotReceived = manage && currentUser.role !== "receiving" && currentUser.role !== "stocktaker";
+  // Marking a delivery "Not received" (and seeing the history of what's been marked that way) was
+  // originally an Owner/Procurement-only call. Shane's ask (2026-09-22): the Receiving role needs it too
+  // — stock sometimes arrives in bad condition, and whoever's physically receiving it needs to reject it
+  // on the spot rather than confirm a delivery that shouldn't be accepted, or wait on Owner/Procurement to
+  // do it later. Stock Taker was never given this specifically (it was excluded for the same original
+  // reason as Receiving) and stays excluded for now — Shane's request was scoped to the Receiving role.
+  const canMarkNotReceived = manage && currentUser.role !== "stocktaker";
   // Defends against a stale filter from a different role/session — e.g. Owner had "notreceived" toggled
   // on, then a Receiving-role user (who never sees that tile at all) picks up the same browser tab.
   const tileFilter = (receivingTileFilter === "notreceived" && !canMarkNotReceived) ? "" : receivingTileFilter;
@@ -4107,8 +4108,8 @@ function renderUsers(){
       <div class="cardbody helptext">
         <strong>Owner</strong> — everything, including Users. Lands on the Dashboard when logging in.<br>
         <strong>Procurement</strong> — Dashboard, Shopping List, Quick Buy, Shopping List Archive, Purchase Costs, Sage CSV, Input Stock Levels, and Receiving (can confirm deliveries too, not just see what's outstanding). Lands on the Dashboard when logging in.<br>
-        <strong>Stock Taker</strong> — Input Stock Levels, and the same Receiving access as the Receiving role (can confirm deliveries, log stock with no order on file, correct received figures — but, same as Receiving, can't mark a delivery "Not received"). No Shopping List, no Dashboard.<br>
-        <strong>Receiving</strong> — only the Receiving tab, to log stock as it's counted in. For staff whose only job is receiving deliveries (e.g. a night-shift hand) — they don't need or see anything else. No Dashboard. Can't mark a delivery "Not received" — that stays an Owner/Procurement call.<br>
+        <strong>Stock Taker</strong> — Input Stock Levels, and the same Receiving access as the Receiving role (can confirm deliveries, log stock with no order on file, correct received figures) — but, unlike Receiving, can't mark a delivery "Not received". No Shopping List, no Dashboard.<br>
+        <strong>Receiving</strong> — only the Receiving tab, to log stock as it's counted in, confirm deliveries, and mark a delivery "Not received" (e.g. rejecting stock that arrives in bad condition). For staff whose only job is receiving deliveries (e.g. a night-shift hand) — they don't need or see anything else. No Dashboard.<br>
         <strong>Market</strong> — only Quick Buy, to log what's bought at the market. For staff whose only job is buying — they don't need or see anything else. No Dashboard.
       </div>
     </div>`;
