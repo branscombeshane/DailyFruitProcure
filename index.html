@@ -591,7 +591,6 @@ const NAV = [
   {group:"Admin", items:[
     {id:"users", label:"Users"},
     {id:"stockvariance", label:"Stock Variance"},
-    {id:"backup", label:"Backup & Restore"},
   ]},
 ];
 const TABS = NAV.flatMap(section=>section.items);
@@ -612,7 +611,7 @@ if(!TABS.some(t=>t.id===currentTab)){
 // "home" (the landing Dashboard) is Owner + Procurement only, by Shane's explicit request — Stock Taker,
 // Receiving and Market stay scoped to their single-purpose tab(s), same as before.
 const ROLE_TABS = {
-  owner: ["home","shoppinglist","quickbuy","shoppingarchive","receiving","dashboard","salesdata","itemsetup","recipes","purchase","pricehistory","sageimport","sellingprices","stocktake","users","stockvariance","backup"],
+  owner: ["home","shoppinglist","quickbuy","shoppingarchive","receiving","dashboard","salesdata","itemsetup","recipes","purchase","pricehistory","sageimport","sellingprices","stocktake","users","stockvariance"],
   procurement: ["home","shoppinglist","quickbuy","shoppingarchive","receiving","purchase","pricehistory","sageimport","sellingprices","stocktake"],
   stocktaker: ["stocktake","receiving"],
   receiving: ["receiving"],
@@ -1709,7 +1708,6 @@ function render(){
     else if(currentTab==="stocktake") pageHtml = renderStockTake();
     else if(currentTab==="users") pageHtml = renderUsers();
     else if(currentTab==="stockvariance") pageHtml = renderStockVariance();
-    else if(currentTab==="backup") pageHtml = renderBackup();
     // shown above whichever page is current, on every tab, until reloaded — a bulk save (Item Setup /
     // Product Mixes / Settings / Users) can be refused from any of those pages, and this needs to stay
     // visible regardless of which one the user wanders to afterward. saveConflict (an actually-rejected
@@ -4107,7 +4105,7 @@ function renderUsers(){
     <div class="card">
       <div class="cardhead"><div><h3>What each role can access</h3></div></div>
       <div class="cardbody helptext">
-        <strong>Owner</strong> — everything, including Users and Backup &amp; Restore. Lands on the Dashboard when logging in.<br>
+        <strong>Owner</strong> — everything, including Users. Lands on the Dashboard when logging in.<br>
         <strong>Procurement</strong> — Dashboard, Shopping List, Quick Buy, Shopping List Archive, Purchase Costs, Sage CSV, Input Stock Levels, and Receiving (can confirm deliveries too, not just see what's outstanding). Lands on the Dashboard when logging in.<br>
         <strong>Stock Taker</strong> — Input Stock Levels, and the same Receiving access as the Receiving role (can confirm deliveries, log stock with no order on file, correct received figures — but, same as Receiving, can't mark a delivery "Not received"). No Shopping List, no Dashboard.<br>
         <strong>Receiving</strong> — only the Receiving tab, to log stock as it's counted in. For staff whose only job is receiving deliveries (e.g. a night-shift hand) — they don't need or see anything else. No Dashboard. Can't mark a delivery "Not received" — that stays an Owner/Procurement call.<br>
@@ -4117,31 +4115,16 @@ function renderUsers(){
 }
 
 // ---------- Backup & Restore ----------
-function renderBackup(){
-  return `
-    <div class="pagehead">
-      <div><h2>Backup &amp; Restore</h2><p>Download a full snapshot of everything in this app, and restore from one if you ever need to. Worth doing before any big edit.</p></div>
-    </div>
-    <div class="card">
-      <div class="cardhead">
-        <div><h3>Download a backup</h3><div class="desc">Saves every tab's data — sales, item setup, recipes, calculated holdings, purchase costs, categories, stock levels — as one JSON file.</div></div>
-      </div>
-      <div class="cardbody">
-        <button class="btn primary" id="downloadBackup">Download backup (JSON)</button>
-      </div>
-    </div>
-    <div class="card">
-      <div class="cardhead">
-        <div><h3>Restore from a backup</h3><div class="desc">Replaces everything currently in the app with the contents of the backup file you choose. Use this if an update ever overwrites something.</div></div>
-      </div>
-      <div class="cardbody">
-        <div class="formgrid">
-          <div class="field"><label>Backup file</label><input type="file" id="restoreFileInput" accept="application/json,.json"></div>
-          <div><button class="btn" id="restoreBackup">Restore from file</button></div>
-        </div>
-      </div>
-    </div>`;
-}
+// Removed (Sep 2026): "Restore from a backup" was the app's only code path that could overwrite every
+// sheet in one shot with whatever was in a chosen file, with no scoping and no server-side conflict
+// check (see the comment on handleFullSave_/writeAllData_ in Code.gs — a full save with no changedKeys
+// goes straight to writeAllData_, which clears and rewrites every sheet). That's exactly what wiped
+// Shane's data on 2026-09-22: a restore ran against a backup file that was effectively empty (most
+// likely downloaded before a page load had actually finished pulling real data), and every LIST_SHEETS/
+// DICT_SHEETS/Settings-covered sheet got blanked. Shane has Google Sheets' own version history as his
+// backup/restore mechanism now (Google Sheet → File → Version history), which doesn't have this
+// single-click, unscoped-overwrite failure mode, so this feature (and its "Download backup" counterpart)
+// isn't coming back — don't re-add it without a hard rethink of that write path first.
 
 
 function wireTabEvents(){
@@ -5230,43 +5213,6 @@ function wireTabEvents(){
         toast("Download started");
       });
     }
-  }
-
-  if(currentTab==="backup"){
-    document.getElementById("downloadBackup").addEventListener("click", ()=>{
-      const stamp = new Date().toISOString().slice(0,19).replace(/[:T]/g,"-");
-      const data = JSON.stringify(DATA, null, 2);
-      browserDownload("daily_fruit_backup_"+stamp+".json", data, "application/json");
-      toast("Backup downloaded");
-    });
-    document.getElementById("restoreBackup").addEventListener("click", ()=>{
-      const input = document.getElementById("restoreFileInput");
-      const file = input.files && input.files[0];
-      if(!file){ toast("Choose a backup file first"); return; }
-      const reader = new FileReader();
-      reader.onload = ()=>{
-        let parsed;
-        try{ parsed = JSON.parse(reader.result); }
-        catch(e){ toast("That file isn't valid JSON"); return; }
-        const required = ["salesA","salesB","itemSetup","recipes","procurementPlan","purchaseCosts","baseProductCategories"];
-        const missing = required.filter(k=> !(k in parsed));
-        if(missing.length){ toast("That file is missing: " + missing.join(", ")); return; }
-        DATA = applyDataDefaults(parsed);
-        // A restore is a deliberate "overwrite everything with this file" action — it must never be
-        // blocked by the two-tabs-open conflict check just because the backup's own syncVersion (from
-        // whenever it was downloaded) doesn't match whatever's current now. Clearing it here is exactly
-        // what tells the backend to skip that check for this save (see handleFullSave_ in Code.gs).
-        DATA.syncVersion = null;
-        // if the logged-in user doesn't exist (or has a different role) in the restored data, log out rather than keep stale access
-        if(currentUser && !DATA.users.some(u=>u.name===currentUser.name && u.role===currentUser.role)){
-          currentUser = null;
-          try{ sessionStorage.removeItem("dailyFruitUser"); }catch(e){}
-        }
-        persist("Restored from backup");
-      };
-      reader.onerror = ()=> toast("Could not read that file");
-      reader.readAsText(file);
-    });
   }
 
   if(currentTab==="stockvariance"){
