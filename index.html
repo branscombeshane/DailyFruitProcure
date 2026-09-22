@@ -945,11 +945,26 @@ function shoppingListComputed(){
   // the most urgent restocking is always what you see first. A row with no computable % at all (no
   // stock take yet, or missing setup) can't be placed on that scale, so those sit at the very top,
   // above 0%, since not even knowing the stock level is at least as urgent as being empty.
+  //
+  // A ZERO-target row (recommended===0 above — "OK" or "Overstocked", no demand right now) also has no
+  // `ratio` — dividing by a zero target isn't meaningful, and leaving it null is what makes it correctly
+  // show "—" instead of a percentage (see statusChip/stockLine in render_functions.js, which key off
+  // `ratio===null` for that same "—"). But sorting directly on `ratio` meant THIS null was
+  // indistinguishable from the genuinely-unknown rows above, so a zero-target row was wrongly pinned to
+  // the very top too — Shane found this, 2026-09-22: Mushroom Portabellini (target 0, 32 in stock,
+  // Overstocked) sat above 35 real Critical rows. Fix: sort by a separate rank that tells the two
+  // "null ratio" cases apart — genuinely unknown stays at the top as before, but a zero-target row now
+  // ranks by what it actually is (Overstocked = least urgent of anything on the page; OK = with the
+  // rest of the OK band) — while `ratio` itself stays untouched so the "—" display is unaffected.
+  function shoppingRowSortRank(r){
+    if(r.status==="Missing setup" || r.status==="No stock take") return -Infinity;
+    if(r.ratio!==null && r.ratio!==undefined) return r.ratio;
+    return r.status==="Overstocked" ? Infinity : 1; // zero-target: Overstocked sinks to the bottom, OK sits mid-band
+  }
   rows.sort((a,b)=>{
-    const aHas = a.ratio!==null && a.ratio!==undefined;
-    const bHas = b.ratio!==null && b.ratio!==undefined;
-    if(aHas !== bHas) return aHas ? 1 : -1;
-    if(aHas && a.ratio !== b.ratio) return a.ratio - b.ratio;
+    const ra = shoppingRowSortRank(a), rb = shoppingRowSortRank(b);
+    if(ra < rb) return -1;
+    if(ra > rb) return 1;
     return a.baseProduct.localeCompare(b.baseProduct);
   });
   return rows;
