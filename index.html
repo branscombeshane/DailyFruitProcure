@@ -3812,7 +3812,7 @@ function renderSellingPrices(){
       <div class="actions">
         <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;">
           <button class="btn primary" id="downloadSellingPricesCsv" ${exportableRows.length?"":'disabled title="Nothing to export yet — no item has a cost or a recorded price"'}>Download Sage CSV</button>
-          <div class="helptext">Item Code, Description, Selling Price — the price you've set, or today's suggestion if you haven't set one yet</div>
+          <div class="helptext">Code, Description, Default Price List - Exclusive — the price you've set, or today's suggestion if you haven't set one yet</div>
         </div>
       </div>
     </div>
@@ -5192,7 +5192,7 @@ function wireTabEvents(){
       downloadSellingPricesBtn.addEventListener("click", ()=>{
         const rows = pricingSuggestionsComputed().filter(r=> r.exportPrice!==null);
         if(!rows.length){ toast("Nothing to export yet"); return; }
-        const csv = "Item Code,Description,Selling Price\n" + rows.map(r=>[toCsvField(r.itemCode), toCsvField(r.description), r.exportPrice].join(",")).join("\n");
+        const csv = "Code,Description,Default Price List - Exclusive\n" + rows.map(r=>[toCsvField(r.itemCode), toCsvField(r.description), r.exportPrice].join(",")).join("\n");
         browserDownload("sage_selling_prices_"+new Date().toISOString().slice(0,10)+".csv", csv, "text/csv");
         toast("Download started");
       });
