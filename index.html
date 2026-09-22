@@ -360,7 +360,7 @@ function emptyDataShape(){
     // settings from the Selling Prices tab, THAT saved data is what loads from here on — this is only
     // the cold-start fallback, never something that overwrites a value he's already set.
     pricingPlan: {defaultMarginPct:0.32, goodDealThresholdPct:0.10, goodDealBonusPct:0.05, trendWindowDays:21},
-    categoryMarginPct: {"Eggs":0.30, "Herbs":0.35, "Mixes":0.35}, itemMarginPct: {}, priceQuotes: [],
+    categoryMarginPct: {"Eggs":0.30, "Herbs":0.35, "Mixes":0.35}, itemMarginPct: {}, itemMinPrice: {}, priceQuotes: [],
   };
 }
 
@@ -415,6 +415,11 @@ function applyDataDefaults(d){
   if(d.pricingPlan.trendWindowDays===undefined || d.pricingPlan.trendWindowDays===null || d.pricingPlan.trendWindowDays==="") d.pricingPlan.trendWindowDays = 21;
   if(!d.categoryMarginPct) d.categoryMarginPct = {"Eggs":0.30, "Herbs":0.35, "Mixes":0.35};
   if(!d.itemMarginPct) d.itemMarginPct = {};
+  // Never-go-below price per item (Shane's ask, 2026-09-22): a floor under the SUGGESTED price only, so
+  // a really good deal on cost never drags the suggestion down further than this — see
+  // pricingSuggestionsComputed. Blank/unset for an item means no floor, same "missing = no override"
+  // convention as itemMarginPct/categoryMarginPct above.
+  if(!d.itemMinPrice) d.itemMinPrice = {};
   if(!d.priceQuotes) d.priceQuotes = [];
   return d;
 }
@@ -1412,7 +1417,17 @@ function pricingSuggestionsComputed(){
     const isGoodDeal = goodDealThreshold>0 && costChangePct!==null && costChangePct <= -goodDealThreshold;
     const marginInfo = marginFor(it.item, category);
     const marginPct = Math.max(0, Math.min(0.9, marginInfo.value + (isGoodDeal ? goodDealBonus : 0)));
-    const suggestedPrice = latestCost!==null ? roundToRetailPrice(latestCost/(1-marginPct)) : null;
+    const marginPrice = latestCost!==null ? roundToRetailPrice(latestCost/(1-marginPct)) : null;
+    // Never-go-below price (Shane's ask): a per-item floor under the SUGGESTION only — so a really good
+    // deal on cost (a big isGoodDeal drop, or just a naturally cheap buy) never pushes the suggested
+    // price lower than this, even though the margin math alone would happily let it. Does NOT touch a
+    // price Shane has actually recorded via "Update price" (currentPrice/exportPrice below) — if he
+    // deliberately sets something lower than the floor himself, that's his call, not something to
+    // silently override.
+    const minPriceRaw = DATA.itemMinPrice ? DATA.itemMinPrice[it.item] : undefined;
+    const minPrice = (minPriceRaw!==undefined && minPriceRaw!==null && minPriceRaw!=="") ? Number(minPriceRaw) : null;
+    const priceFloored = marginPrice!==null && minPrice!==null && marginPrice < minPrice;
+    const suggestedPrice = marginPrice!==null ? (priceFloored ? minPrice : marginPrice) : null;
     const quote = latestQuoteByItem[it.item] || null;
     const currentPrice = quote ? Number(quote.price) : null;
     const priceDelta = (suggestedPrice!==null && currentPrice!==null) ? round2(suggestedPrice-currentPrice) : null;
@@ -1426,6 +1441,7 @@ function pricingSuggestionsComputed(){
       item: it.item, itemCode: it.itemCode, description: sageItemDescription(it), baseProduct: it.baseProduct, category: category || "Uncategorized",
       latestCost, trailingCost, costChangePct, isGoodDeal,
       marginPct, marginSource: marginInfo.source,
+      minPrice, priceFloored,
       suggestedPrice, currentPrice, currentPriceDate: quote?quote.date:null, currentPriceBy: quote?quote.setBy:null,
       priceDelta, priceDeltaPct, exportPrice, exportPriceSource,
     };
@@ -3751,7 +3767,10 @@ function renderSellingPrices(){
       <td>
         <input class="rowinput num" data-itemmargin-input="${esc(r.item)}" value="${DATA.itemMarginPct[r.item]!==undefined && DATA.itemMarginPct[r.item]!==null ? round2(DATA.itemMarginPct[r.item]*100) : ""}" placeholder="${fmtNum(r.marginPct*100,0)}" style="max-width:70px;">${marginSourceNote}
       </td>
-      <td class="num" style="font-weight:600;">${r.suggestedPrice!==null?money(r.suggestedPrice):"—"}</td>
+      <td>
+        <input class="rowinput num" data-itemminprice-input="${esc(r.item)}" value="${DATA.itemMinPrice[r.item]!==undefined && DATA.itemMinPrice[r.item]!==null ? round2(DATA.itemMinPrice[r.item]) : ""}" placeholder="none" style="max-width:80px;">
+      </td>
+      <td class="num" style="font-weight:600;">${r.suggestedPrice!==null?money(r.suggestedPrice):"—"}${r.priceFloored ? `<div class="helptext" style="color:var(--warn);">held at floor</div>` : ""}</td>
       <td>
         ${r.currentPrice!==null ? `${money(r.currentPrice)}<div class="helptext">${esc(r.currentPriceDate||"")}${r.currentPriceBy?" — "+esc(r.currentPriceBy):""}</div>` : `<span class="helptext">not set yet</span>`}
         ${deltaHtml}
@@ -3820,7 +3839,7 @@ function renderSellingPrices(){
     </div>
     <div class="card">
       <div class="cardhead">
-        <div><h3>Suggested prices</h3><div class="desc">One row per sellable item. Edit a margin % directly (saved with the settings above) or record the price you're actually going forward with via "Update price" — that builds the price history this gets smarter from over time.</div></div>
+        <div><h3>Suggested prices</h3><div class="desc">One row per sellable item. Edit a margin % or a "Min price" floor directly (both saved with the settings above) — a floor stops the suggestion from dropping below it even on a really good cost deal, without limiting how low you can set an actual price by hand. Or record the price you're actually going forward with via "Update price" — that builds the price history this gets smarter from over time.</div></div>
         <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">
           <div class="field" style="min-width:170px;"><label>Search item</label><input type="text" id="sellingPriceSearchBox" placeholder="Search…" value="${esc(sellingPriceSearch)}"></div>
           <div class="field" style="min-width:170px;"><label>Filter by category</label><select id="sellingPriceCategoryFilterSel">${categoryFilterOptions}</select></div>
@@ -3831,8 +3850,8 @@ function renderSellingPrices(){
       <div class="cardbody" style="padding:0;">
         <div class="tablewrap" style="border:none;border-radius:0;">
           <table>
-            <thead><tr><th>Item</th><th>Category</th><th class="num">Latest cost</th><th>Trend (${Number(plan.trendWindowDays)||21}d)</th><th>Margin</th><th class="num">Suggested price</th><th>Current price</th><th></th></tr></thead>
-            <tbody>${tableRows || `<tr><td colspan="8" class="empty">No items match.</td></tr>`}</tbody>
+            <thead><tr><th>Item</th><th>Category</th><th class="num">Latest cost</th><th>Trend (${Number(plan.trendWindowDays)||21}d)</th><th>Margin</th><th>Min price</th><th class="num">Suggested price</th><th>Current price</th><th></th></tr></thead>
+            <tbody>${tableRows || `<tr><td colspan="9" class="empty">No items match.</td></tr>`}</tbody>
           </table>
         </div>
       </div>
@@ -5104,7 +5123,15 @@ function wireTabEvents(){
         if(v==="") delete DATA.itemMarginPct[item];
         else DATA.itemMarginPct[item] = (Number(v)||0)/100;
       });
-      persist("Pricing settings saved", ["pricingPlan","categoryMarginPct","itemMarginPct"]);
+      // Never-go-below price per item (Shane's ask) — same "blank = no override, only visible rows are
+      // touched" convention as the margin inputs above.
+      document.querySelectorAll("[data-itemminprice-input]").forEach(inp=>{
+        const item = inp.dataset.itemminpriceInput;
+        const v = inp.value.trim();
+        if(v==="") delete DATA.itemMinPrice[item];
+        else DATA.itemMinPrice[item] = Math.max(0, Number(v)||0);
+      });
+      persist("Pricing settings saved", ["pricingPlan","categoryMarginPct","itemMarginPct","itemMinPrice"]);
     });
     document.querySelectorAll("[data-pricequote-addnew]").forEach(b=>{
       b.addEventListener("click", ()=>{
