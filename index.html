@@ -2536,6 +2536,16 @@ function renderShoppingArchive(){
 // someone having actually laid eyes on the delivery. Owner, Receiving, Procurement and Stock Taker can
 // all confirm (see canManageReceiving) — Market is the only role that can't even see this tab (ROLE_TABS).
 const RECEIVING_RECENT_DAYS = 7;
+// How long a "Not received" line stays on that list (by its notReceivedDate — when it was MARKED not
+// received, not the original order date) before it drops out of view — Shane's call, 2026-09-23: beyond
+// a week it's no longer actionable, so it's just noise. Deliberately its own constant, not a reuse of
+// RECEIVING_RECENT_DAYS above, even though both start at 7 — they answer different questions (how far
+// back to review recent deliveries vs. how long a rejected order stays worth looking at) and Shane may
+// want to change one without the other later. This only affects what's SHOWN — the underlying
+// PurchaseCosts row is never touched or deleted, so nothing here is destructive; an old "not received"
+// line is still in Purchase Costs and Google Sheets if it's ever needed, it just stops cluttering this
+// list once it's a week old.
+const NOT_RECEIVED_RETENTION_DAYS = 7;
 // Spells out the actual ordered vs. received figures on a discrepancy flag, rather than a bare "qty
 // differs" — the original ordered qty/cost is otherwise invisible once a line is received (it's
 // deliberately hidden pre-receipt too, per Shane's blind-count request), so without this there's no way
@@ -2619,7 +2629,8 @@ function renderReceiving(){
     .slice().sort((a,b)=> (a.date||"").localeCompare(b.date||"") || a.baseProduct.localeCompare(b.baseProduct));
   const recentlyReceived = DATA.purchaseCosts.filter(p=> p.baseProduct && isReceived(p) && p.receivedDate >= dateFrom && p.receivedDate <= dateTo)
     .slice().sort((a,b)=> (b.receivedDate||"").localeCompare(a.receivedDate||""));
-  const notReceived = DATA.purchaseCosts.filter(p=> p.baseProduct && isNotReceived(p))
+  const notReceivedCutoff = new Date(Date.now() - NOT_RECEIVED_RETENTION_DAYS*86400000).toISOString().slice(0,10);
+  const notReceived = DATA.purchaseCosts.filter(p=> p.baseProduct && isNotReceived(p) && p.notReceivedDate >= notReceivedCutoff)
     .slice().sort((a,b)=> (b.notReceivedDate||"").localeCompare(a.notReceivedDate||""));
   const discrepancyCount = recentlyReceived.filter(p=> receivingDiscrepancy(p)).length;
   const rangeLabel = customRange ? `${dateFrom} to ${dateTo}` : `the last ${RECEIVING_RECENT_DAYS} days`;
@@ -2741,7 +2752,7 @@ function renderReceiving(){
       ${receivingStatBlock("Pending delivery", "pending", tileFilter, pending.length, pending.length?'var(--warn)':'var(--good)')}
       ${receivingStatBlock(rangeStatLabel, "received", tileFilter, recentlyReceived.length, undefined, true)}
       ${receivingStatBlock(rangeDiscStatLabel, "discrepancy", tileFilter, discrepancyCount, discrepancyCount?'var(--warn)':'var(--good)')}
-      ${canMarkNotReceived ? receivingStatBlock("Not received", "notreceived", tileFilter, notReceived.length, notReceived.length?'var(--critical)':'var(--good)') : ""}
+      ${canMarkNotReceived ? receivingStatBlock(`Not received (last ${NOT_RECEIVED_RETENTION_DAYS}d)`, "notreceived", tileFilter, notReceived.length, notReceived.length?'var(--critical)':'var(--good)') : ""}
     </div>
     ${manage ? `
     <div class="card">
@@ -2770,11 +2781,11 @@ function renderReceiving(){
     </div>` : ""}
     ${showNotReceivedCard ? `
     <div class="card">
-      <div class="cardhead"><div><h3>Not received</h3><div class="desc">${search ? `${notReceivedShown.length} of ${notReceived.length}` : notReceived.length} order(s) confirmed as NOT arriving, with a reason on file. Reopen sends one back to Pending delivery.</div></div></div>
+      <div class="cardhead"><div><h3>Not received</h3><div class="desc">${search ? `${notReceivedShown.length} of ${notReceived.length}` : notReceived.length} order(s) confirmed as NOT arriving in the last ${NOT_RECEIVED_RETENTION_DAYS} days, with a reason on file. Reopen sends one back to Pending delivery. Older than ${NOT_RECEIVED_RETENTION_DAYS} days just drops off this list — it's still on record in Purchase Costs, it's just no longer shown here.</div></div></div>
       <div class="cardbody" style="padding:0;">
         <div class="tablewrap" style="border:none;border-radius:0;"><table>
           <thead><tr><th>Base product</th><th>Ordered</th><th>Supplier</th><th>Reason</th><th>Marked by</th><th></th></tr></thead>
-          <tbody>${notReceivedRows || (search ? `<tr><td colspan="6" class="empty">No "not received" lines match "${esc(receivingSearch)}".</td></tr>` : `<tr><td colspan="6" class="empty">Nothing marked not received.</td></tr>`)}</tbody>
+          <tbody>${notReceivedRows || (search ? `<tr><td colspan="6" class="empty">No "not received" lines match "${esc(receivingSearch)}".</td></tr>` : `<tr><td colspan="6" class="empty">Nothing marked not received in the last ${NOT_RECEIVED_RETENTION_DAYS} days.</td></tr>`)}</tbody>
         </table></div>
       </div>
     </div>` : ""}
