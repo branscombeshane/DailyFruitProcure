@@ -1439,6 +1439,7 @@ function pricingSuggestionsComputed(){
     const exportPriceSource = currentPrice!==null ? "set" : (suggestedPrice!==null ? "suggested" : null);
     return {
       item: it.item, itemCode: it.itemCode, description: sageItemDescription(it), baseProduct: it.baseProduct, category: category || "Uncategorized",
+      vatable: !!it.vatable,
       latestCost, trailingCost, costChangePct, isGoodDeal,
       marginPct, marginSource: marginInfo.source,
       minPrice, priceFloored,
@@ -3172,6 +3173,7 @@ function renderItemSetup(){
       <td class="num">${it.recipeQty ? fmtNum(it.recipeQty) : "—"}</td>
       <td><input class="rowinput" data-field="baseProduct" data-idx="${idx}" value="${isMix?"":esc(it.baseProduct||"")}" list="baseProductsDL" ${isMix?"disabled":""}></td>
       <td><input class="rowinput" data-field="category" data-idx="${idx}" value="${esc(effectiveCategoryFor(it))}" list="categoriesDL" placeholder="e.g. Veg or Mixes"></td>
+      <td style="text-align:center;"><input type="checkbox" data-field="vatable" data-idx="${idx}" ${it.vatable?"checked":""}></td>
       <td><input class="rowinput" data-field="procurementUnit" data-idx="${idx}" value="${isMix?"":esc(it.procurementUnit||"")}" ${isMix?"disabled":""}></td>
       <td><input class="rowinput num" data-field="conversionFactor" data-idx="${idx}" value="${isMix||it.conversionFactor===null||it.conversionFactor===undefined?"":it.conversionFactor}" style="max-width:90px;" ${isMix?"disabled":""}></td>
       <td class="num">${it.rawNeeded!==null ? fmtNum(it.rawNeeded) : "—"}</td>
@@ -3204,7 +3206,7 @@ function renderItemSetup(){
     ${renderManageCategories()}
     <div class="card">
       <div class="cardhead">
-        <div><h3>Items</h3><div class="desc">Edit the input columns, then Save changes once. Category applies to every variant of that Base Product. For a Product Mix (assembled from other stock, not bought directly), set Category to "Mixes" — Base Product, Procurement Unit and Qty per Unit don't apply and blank out automatically.</div></div>
+        <div><h3>Items</h3><div class="desc">Edit the input columns, then Save changes once. Category applies to every variant of that Base Product. For a Product Mix (assembled from other stock, not bought directly), set Category to "Mixes" — Base Product, Procurement Unit and Qty per Unit don't apply and blank out automatically. Tick Vatable for a product that carries standard-rate VAT (most fresh produce is zero-rated, so this stays unticked by default) — feeds the VAT Type columns on the Selling Prices Sage CSV export.</div></div>
         <div class="field" style="min-width:180px;">
           <label>Filter by category</label>
           <select id="itemSetupCategoryFilterSel">${categoryFilterOptions}</select>
@@ -3213,8 +3215,8 @@ function renderItemSetup(){
       </div>
       <div class="cardbody" style="padding:0;">
         <div class="tablewrap" style="border:none;border-radius:0;max-height:640px;overflow-y:auto;"><table>
-          <thead><tr><th>Item</th><th class="num">Qty sold</th><th class="num">From mixes</th><th>Base product</th><th>Category</th><th>Procurement unit</th><th>Qty per unit</th><th class="num">Units needed</th><th></th></tr></thead>
-          <tbody>${rows || `<tr><td colspan="9" class="empty">No items match your search/filter.</td></tr>`}</tbody>
+          <thead><tr><th>Item</th><th class="num">Qty sold</th><th class="num">From mixes</th><th>Base product</th><th>Category</th><th>Vatable</th><th>Procurement unit</th><th>Qty per unit</th><th class="num">Units needed</th><th></th></tr></thead>
+          <tbody>${rows || `<tr><td colspan="10" class="empty">No items match your search/filter.</td></tr>`}</tbody>
         </table></div>
       </div>
     </div>`;
@@ -3823,7 +3825,7 @@ function renderSellingPrices(){
       <div class="actions">
         <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;">
           <button class="btn primary" id="downloadSellingPricesCsv" ${exportableRows.length?"":'disabled title="Nothing to export yet — no item has a cost or a recorded price"'}>Download Sage CSV</button>
-          <div class="helptext">Code, Description, Default Price List - Exclusive — the price you've set, or today's suggestion if you haven't set one yet</div>
+          <div class="helptext">Code, Description, Default Price List - Exclusive, VAT Type Sales, VAT Type Purchases — the price you've set (or today's suggestion if you haven't set one yet), and the VAT rate from that item's Vatable tick box on Item Setup</div>
         </div>
       </div>
     </div>
@@ -4832,7 +4834,7 @@ function wireTabEvents(){
       if(!text){ toast("Enter an item name first"); return; }
       if(DATA.itemSetup.some(it=>it.item===text)){ toast("That item already exists"); return; }
       const p = parseItem(text);
-      DATA.itemSetup.push({item:text, itemCode:p.code, description:p.description, sellingUnit:p.unit, baseProduct:null, procurementUnit:null, conversionFactor:null});
+      DATA.itemSetup.push({item:text, itemCode:p.code, description:p.description, sellingUnit:p.unit, baseProduct:null, procurementUnit:null, conversionFactor:null, vatable:false});
       DATA.itemSetup.sort((a,b)=> a.item.localeCompare(b.item));
       persist("Added " + text, ["itemSetup"]);
     });
@@ -4861,6 +4863,10 @@ function wireTabEvents(){
         const idx = Number(inp.dataset.idx);
         const field = inp.dataset.field;
         let val = inp.value;
+        if(field==="vatable"){
+          DATA.itemSetup[idx].vatable = inp.checked;
+          return;
+        }
         if(field==="category"){
           const val2 = val.trim();
           const bp = DATA.itemSetup[idx].baseProduct;
@@ -5203,7 +5209,10 @@ function wireTabEvents(){
       downloadSellingPricesBtn.addEventListener("click", ()=>{
         const rows = pricingSuggestionsComputed().filter(r=> r.exportPrice!==null);
         if(!rows.length){ toast("Nothing to export yet"); return; }
-        const csv = "Code,Description,Default Price List - Exclusive\n" + rows.map(r=>[toCsvField(r.itemCode), toCsvField(r.description), r.exportPrice].join(",")).join("\n");
+        const csv = "Code,Description,Default Price List - Exclusive,VAT Type Sales,VAT Type Purchases\n" + rows.map(r=>{
+          const vatType = r.vatable ? "Standard Rate (15.00%)" : "Zero Rate (0.00%)";
+          return [toCsvField(r.itemCode), toCsvField(r.description), r.exportPrice, toCsvField(vatType), toCsvField(vatType)].join(",");
+        }).join("\n");
         browserDownload("sage_selling_prices_"+new Date().toISOString().slice(0,10)+".csv", csv, "text/csv");
         toast("Download started");
       });
