@@ -1914,6 +1914,29 @@ function distinctBaseProducts(){
   for(const it of DATA.itemSetup) if(it.baseProduct) set.add(it.baseProduct);
   return Array.from(set).sort();
 }
+// Surfaces base products that are almost certainly the same item typed two different ways — a
+// capitalization or whitespace slip that got past the (merely suggestive) datalist on Item Setup's Base
+// Product field or the "Log stock with no order on file" form before the guard on those two forms was
+// added. Each such spelling silently tracks its own separate Price History line and purchase history
+// instead of the one it should belong to. Groups every distinct spelling seen anywhere (Item Setup rows
+// and anything ever logged on a purchase) by trimmed-and-lowercased text; a group with more than one
+// actual spelling is a likely duplicate. Deliberately does NOT try to catch things like "Dill" vs
+// "Dill - KG" — different text, not just different case/spacing — since that split is often a real,
+// separate SKU (loose vs. by-the-kilo) that needs a person's judgment, not an automatic merge.
+function findLikelyDuplicateBaseProducts(){
+  const groups = {};
+  const seen = new Set();
+  const record = (name)=>{
+    if(!name || seen.has(name)) return;
+    seen.add(name);
+    const key = name.trim().toLowerCase();
+    if(!groups[key]) groups[key] = [];
+    groups[key].push(name);
+  };
+  DATA.itemSetup.forEach(it=> record(it.baseProduct));
+  DATA.purchaseCosts.forEach(p=> record(p.baseProduct));
+  return Object.values(groups).filter(g=>g.length>1).map(g=>g.slice().sort());
+}
 function categoryFor(baseProduct){
   if(!baseProduct) return "";
   return DATA.baseProductCategories[baseProduct] || "";
@@ -3658,6 +3681,13 @@ function renderPriceHistory(){
       <td><button class="btn small" data-select-product="${esc(a.baseProduct)}">View chart</button></td>
     </tr>`).join("");
 
+  const dupGroups = findLikelyDuplicateBaseProducts();
+  const dupRows = dupGroups.map(g=>`
+    <tr>
+      <td>${g.map(n=>chip(n, "warn")).join(" ")}</td>
+      <td class="helptext">Rename the wrong spelling(s) to match one, in Item Setup — or, if it's a genuinely different item (e.g. sold loose vs. by the kilo), leave as is.</td>
+    </tr>`).join("");
+
   const points = priceHistorySelectedProduct ? priceHistoryForProduct(priceHistorySelectedProduct) : [];
   const tableRows = points.slice().reverse().map(p=>`
     <tr>
@@ -3684,6 +3714,15 @@ function renderPriceHistory(){
           <div class="field"><label>Alert threshold %</label><input type="number" step="1" min="1" id="priceAlertPctInput" value="${round2(alertPct*100)}"></div>
           <div><button class="btn primary" id="savePriceAlertPct">Save</button></div>
         </div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="cardhead"><div><h3>Possible duplicate base products</h3><div class="desc">${dupGroups.length} name${dupGroups.length===1?"":"s"} that show up spelled more than one way — same product typed with different capitalization or spacing tracks a separate Price History line and purchase record for each spelling instead of one combined one.</div></div></div>
+      <div class="cardbody" style="padding:0;">
+        <div class="tablewrap" style="border:none;border-radius:0;"><table>
+          <thead><tr><th>Spellings in use</th><th>What to do</th></tr></thead>
+          <tbody>${dupRows || `<tr><td colspan="2" class="empty">None found — every base product name is spelled consistently.</td></tr>`}</tbody>
+        </table></div>
       </div>
     </div>
     <div class="card">
@@ -4796,11 +4835,32 @@ function wireTabEvents(){
     const directReceiptBtn = document.getElementById("logDirectReceipt");
     if(directReceiptBtn){
       directReceiptBtn.addEventListener("click", ()=>{
-        const bp = document.getElementById("directReceiveBase").value.trim();
+        const bpTyped = document.getElementById("directReceiveBase").value.trim();
         const qtyVal = document.getElementById("directReceiveQty").value;
         const costVal = document.getElementById("directReceiveCost").value;
         const supplierVal = document.getElementById("directReceiveSupplier").value.trim();
-        if(!bp){ toast("Enter a base product"); return; }
+        if(!bpTyped){ toast("Enter a base product"); return; }
+        // This form receives stock against an item that should already exist in Item Setup — Procurement
+        // Unit, Conversion Factor, VAT and category all come from that record, so a base product that
+        // isn't set up there has nothing to hang those numbers off and would just quietly start its own
+        // untracked, unconfigured line. The suggestion dropdown on this field only suggests — it never
+        // stopped someone typing something slightly different, and that's exactly how "DILL" / "Dill" /
+        // "Dill - KG" ended up as separate, permanent entries in Price History (each is its own distinct
+        // string the moment it's used on one received purchase). Matching case/whitespace-insensitively
+        // against Item Setup's real list catches that and snaps it back to the real spelling; if it
+        // genuinely matches nothing, this is the wrong screen for a new product — send them to Item Setup
+        // first instead of inventing one here.
+        let bp = bpTyped;
+        const knownBaseProducts = distinctBaseProducts();
+        if(!knownBaseProducts.includes(bp)){
+          const canonical = knownBaseProducts.find(n=> n.toLowerCase()===bp.toLowerCase());
+          if(canonical){
+            bp = canonical;
+          } else {
+            toast(`"${bpTyped}" isn't a Base Product in Item Setup yet — add it there first, then log this receipt.`);
+            return;
+          }
+        }
         if(!qtyVal){ toast("Enter the quantity received"); return; }
         const today = new Date().toISOString().slice(0,10);
         // Deliberately no entry.qty/entry.cost — there was never an order logged for this delivery, so
@@ -4909,6 +4969,32 @@ function wireTabEvents(){
         let val = inp.value;
         if(field==="vatable"){
           DATA.itemSetup[idx].vatable = inp.checked;
+          return;
+        }
+        if(field==="baseProduct"){
+          const typed = val.trim();
+          if(typed){
+            // Two items whose Base Product is typed with different capitalization or spacing (e.g.
+            // "Dill" vs "DILL") end up as two unrelated records everywhere downstream — separate
+            // purchase history, its own Price History line, its own shopping list row — since every
+            // lookup keys off the exact string. This is exactly how "DILL" / "Dill" / "Dill - KG" piled
+            // up as separate entries in Price History (Shane's report). Matching case/whitespace-
+            // insensitively against every OTHER base product already in use (other Item Setup rows, plus
+            // anything ever logged on a purchase) snaps a near-duplicate back to however that name is
+            // already spelled. An exact match, or a name nothing else is using yet, is left alone —
+            // that's either already correct or a genuinely new product.
+            const known = new Set();
+            DATA.itemSetup.forEach((it,i)=>{ if(i!==idx && it.baseProduct) known.add(it.baseProduct); });
+            DATA.purchaseCosts.forEach(p=>{ if(p.baseProduct) known.add(p.baseProduct); });
+            if(!known.has(typed)){
+              const canonical = Array.from(known).find(n=> n.toLowerCase()===typed.toLowerCase());
+              if(canonical){
+                toast(`"${typed}" matches an existing Base Product, "${canonical}" — using that spelling so it doesn't split into a separate item.`);
+                val = canonical;
+              }
+            }
+          }
+          DATA.itemSetup[idx].baseProduct = val;
           return;
         }
         if(field==="category"){
