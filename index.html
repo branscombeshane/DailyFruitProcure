@@ -2674,10 +2674,21 @@ function renderReceiving(){
 
   // Search filters BOTH tables below by base product or supplier — the stat tiles above stay as
   // totals regardless (same convention as Shopping List's category/status filters vs. its stat tiles).
+  // Fix (Shane's report, confirmed via console error): a Supplier value that's purely digits (e.g. a
+  // supplier entered/known by a numeric code) comes back from the sheet as a real Number, not a string —
+  // the exact same Sheets auto-conversion gotcha documented elsewhere in this project (see the "Google
+  // Sheets silently converts a numeric-looking string to a real Number" lesson). `p.supplier||""` only
+  // guards against a MISSING value; a truthy Number sails straight through and `.toLowerCase()` throws
+  // ("is not a function"), which aborts renderReceiving() entirely — matching exactly what was reported:
+  // typing anything into Search did nothing (the re-render throws before main.innerHTML is ever
+  // reassigned), and once receivingSearch was left non-empty, even navigating back to this tab from
+  // elsewhere kept throwing on every attempt (nav highlights, but the page never actually switches,
+  // since renderNav() runs before this crashes). String(...) coerces whatever type comes back before
+  // calling a string method on it, same as baseProduct is defensively wrapped here too.
   const search = receivingSearch.trim().toLowerCase();
   const matchesReceivingSearch = (p)=> !search
-    || (p.baseProduct||"").toLowerCase().includes(search)
-    || (p.supplier||"").toLowerCase().includes(search);
+    || String(p.baseProduct||"").toLowerCase().includes(search)
+    || String(p.supplier||"").toLowerCase().includes(search);
   const pendingShown = pending.filter(matchesReceivingSearch);
   const recentlyReceivedShown = recentlyReceived.filter(matchesReceivingSearch).filter(p=> !discrepancyOnly || receivingDiscrepancy(p));
   const notReceivedShown = notReceived.filter(matchesReceivingSearch);
