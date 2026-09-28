@@ -506,6 +506,7 @@ function setCurrentTab(tabId){
 let itemSearch = "";
 let itemSetupCategoryFilter = "";
 let dashboardCategoryFilter = "";
+let dashboardSearch = ""; // filters Calculated Holdings' Base products table by name, ANDs with the category filter above — same convention as Item Setup's search box
 let salesUploadDate = new Date().toISOString().slice(0,10); // date the Item Sales upload covers — auto-defaulted to the oldest missing report date each render (see salesUploadMissingDates) until the user picks one themselves, then it stays put
 let salesUploadDateUserSet = false; // true once the user manually changes the Report date field — stops the auto-default from overriding their choice
 let salesPendingA = null; // {filename, rows} staged Pyroca file for the current report date, awaiting Submit
@@ -3126,7 +3127,9 @@ function renderDashboard(){
   const categoryFilterOptions = `<option value="">All categories</option>` +
     categories.map(c=>`<option value="${esc(c)}" ${c===dashboardCategoryFilter?"selected":""}>${esc(c)}</option>`).join("");
 
-  const rows = dashboardCategoryFilter ? allRows.filter(r=> (r.category||"Uncategorized")===dashboardCategoryFilter) : allRows;
+  let rows = dashboardCategoryFilter ? allRows.filter(r=> (r.category||"Uncategorized")===dashboardCategoryFilter) : allRows;
+  const search = dashboardSearch.trim().toLowerCase();
+  if(search) rows = rows.filter(r=> String(r.baseProduct||"").toLowerCase().includes(search));
 
   const tableRows = rows.map(r=>`
     <tr>
@@ -3203,11 +3206,12 @@ function renderDashboard(){
           <label>Filter by category</label>
           <select id="dashboardCategoryFilter">${categoryFilterOptions}</select>
         </div>
+        <div class="searchbar">🔍 <input type="text" id="dashboardSearchBox" placeholder="Search base product…" value="${esc(dashboardSearch)}"></div>
       </div>
       <div class="cardbody">
         <div class="tablewrap"><table>
           <thead><tr><th>Base product</th><th>Category</th><th>Procurement unit</th><th class="num">History</th><th class="num">Avg demand/day</th><th>Cycle (x)</th><th>Max hold</th><th class="num">Recommended qty</th><th>Consistency</th><th>Missing setup</th></tr></thead>
-          <tbody>${tableRows || `<tr><td colspan="10" class="empty">No base products set up yet — add some in Item Setup first.</td></tr>`}</tbody>
+          <tbody>${tableRows || (allRows.length===0 ? `<tr><td colspan="10" class="empty">No base products set up yet — add some in Item Setup first.</td></tr>` : `<tr><td colspan="10" class="empty">No base products match your search/filter.</td></tr>`)}</tbody>
         </table></div>
       </div>
     </div>
@@ -4921,6 +4925,7 @@ function wireTabEvents(){
       dashboardCategoryFilter = e.target.value;
       render();
     });
+    document.getElementById("dashboardSearchBox").addEventListener("input", (e)=>{ dashboardSearch = e.target.value; render(); });
     document.querySelectorAll("[data-del-history]").forEach(b=>{
       b.addEventListener("click", ()=>{
         const date = b.dataset.delHistory;
