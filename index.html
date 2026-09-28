@@ -668,6 +668,15 @@ function hasUnsavedInlineEdit(){
     // silent refresh on this tab even when nobody's touched anything.
     for(const el of document.querySelectorAll(".receive-qty, .notreceived-reason")){ if(el.value !== "") return true; }
     for(const el of document.querySelectorAll(".receive-cost")){ if(el.value !== (el.dataset.default||"")) return true; }
+    // Fix (Shane's report): the Receiving search box was never checked here, so the 20s silent poll
+    // (see checkForUpdates) could — and on a tab this busy, reliably would — blow away #main mid-search,
+    // destroying and recreating the search <input> under someone's fingers. The typed text itself
+    // survives (receivingSearch is a plain JS variable, restored into the new input's value), but focus
+    // and cursor position don't, so typing further did nothing until they noticed and clicked back in —
+    // exactly Shane's "search function doesn't work". Treat an active search the same as any other
+    // unsaved edit above: defer to the stale-data banner instead of silently swapping underneath them.
+    const searchEl = document.getElementById("receivingSearchInput");
+    if(searchEl && searchEl.value !== "") return true;
   }
   return false;
 }
@@ -1085,10 +1094,20 @@ function stockVarianceClass(row, flagPct){
 // Only RECEIVED lines count, and only their RECEIVED figures — an order still awaiting delivery (see
 // isReceived below) doesn't have final numbers yet (cost especially: often genuinely unknown until
 // Receiving fills it in), so it's excluded entirely rather than costed on a provisional/blank figure.
+// Fix (Shane's report): a line CAN be received with its cost still genuinely pending (e.g. an invoice
+// that hasn't arrived yet — see "cost pending" in purchaseLineChip) — the comment above always intended
+// that case to be excluded too, but the code was only checking isReceived, not whether a cost was
+// actually logged. Number(undefined)||0 silently turned a pending cost into a real R0, which then
+// dragged the whole weighted average (and Selling Prices' suggestion) down to R0 the moment a
+// cost-pending delivery became a base product's most recent one. A cost-pending line is now skipped
+// entirely here, same as an unreceived one — see latestPurchaseCostMap()'s matching fix so a pending
+// delivery doesn't shadow the last date that actually had a real price, either.
 function weightedCostMap_(entries){
   const sums = {}; // baseProduct -> {costQty, qty, fallbackCost}
   for(const p of entries){
     if(!p.baseProduct || !isReceived(p)) continue;
+    const hasCost = p.receivedCost!==undefined && p.receivedCost!==null && p.receivedCost!=="";
+    if(!hasCost) continue; // cost pending — nothing usable to weight in yet
     const qty = Number(p.receivedQty)||0;
     const cost = Number(p.receivedCost)||0;
     if(!sums[p.baseProduct]) sums[p.baseProduct] = {costQty:0, qty:0, fallbackCost:cost};
@@ -1181,9 +1200,17 @@ function printReceivingSlip(id){
 // arbitrarily). Used to keep a Product Mix's cost current any time an ingredient's price changes — not
 // tied to any single day's Sage export.
 function latestPurchaseCostMap(){
-  const latestDate = {}; // baseProduct -> most recent RECEIVED date seen
+  const latestDate = {}; // baseProduct -> most recent RECEIVED date that actually has a real cost logged
   for(const p of DATA.purchaseCosts){
     if(!p.baseProduct || !isReceived(p)) continue; // an order still awaiting delivery has no final cost yet — skip it so an OLDER received price isn't shadowed by a pending one with nothing to offer
+    // Fix (Shane's report): a RECEIVED line can still have its cost genuinely pending (invoice not in
+    // yet). That used to still win as "the latest date" for its base product, so weightedCostMap_ had
+    // nothing real to average for that date and Selling Prices' suggestion collapsed to R0 instead of
+    // just keeping the last price that was actually known. Skip a cost-pending line here too, so the
+    // latest date picked is the latest one that can actually offer a price — see weightedCostMap_'s
+    // matching fix for the case where that same date also has a real-cost line from another supplier.
+    const hasCost = p.receivedCost!==undefined && p.receivedCost!==null && p.receivedCost!=="";
+    if(!hasCost) continue;
     if(!latestDate[p.baseProduct] || (p.date||"") >= latestDate[p.baseProduct]) latestDate[p.baseProduct] = p.date||"";
   }
   const entries = DATA.purchaseCosts.filter(p=> p.baseProduct && (p.date||"")===latestDate[p.baseProduct]);
