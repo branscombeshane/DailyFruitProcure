@@ -3893,11 +3893,21 @@ function renderSageImport(){
 
 // ---------- Market Statements ----------
 // Auto-imported (MarketStatementImport.gs, a separate standalone Apps Script watching a dedicated
-// inbox — see its header comment) from the JHB Fresh Produce Market's daily "Buyer Statement" PDF.
-// Shane's ask, 29 Sep 2026: browse the raw statement data day by day, and manage a pallet tally from
-// its PALLETS section — BEFORE any of it is used to create a real Purchase Cost, which is why this is
-// entirely separate from (and doesn't touch) Purchase Costs. See Admin > Market Product Mapping for
-// linking a raw commodity string to a real Base Product.
+// inbox — see its header comment) from each market's daily "Buyer Statement" PDF. Two markets feed
+// this today — JHB Fresh Produce Market and Tshwane Market — with completely different statement
+// layouts, so every row carries an explicit "market" field (see marketMapKey below for why the
+// product-mapping key is namespaced by it too) and every table here shows which market a line came
+// from. Shane's ask, 29 Sep 2026: browse the raw statement data day by day, and manage a pallet tally
+// from each statement's own pallet section — BEFORE any of it is used to create a real Purchase Cost,
+// which is why this is entirely separate from (and doesn't touch) Purchase Costs. See Admin > Market
+// Product Mapping for linking a raw commodity string to a real Base Product.
+
+// Namespaces a raw market commodity/pallet-type string by which market it came from, since the same
+// literal text from two different markets is not the same thing — used everywhere DATA.marketProductMap
+// is read or written (must match the "<MARKET>::<raw>" convention MarketStatementImport.gs and Code.gs
+// use for the same dictionary).
+function marketMapKey(market, raw){ return (market||"Unknown market") + "::" + raw; }
+
 function distinctMarketStatementDates(){
   const set = new Set();
   (DATA.marketStatementLines||[]).forEach(r=> r.statementDate && set.add(r.statementDate));
@@ -3905,30 +3915,33 @@ function distinctMarketStatementDates(){
   return Array.from(set).sort().reverse(); // most recent first
 }
 
-// Running tally of pallets currently held, by pallet type — built from the FULL pallet history (every
-// imported statement), not just the one date being viewed above.
+// Running tally of pallets currently held, by (market, pallet type) — built from the FULL pallet
+// history (every imported statement), not just the one date being viewed above. Grouped by market as
+// well as type because e.g. JHB's "JHB BROWN PALLET" and Tshwane's "4 WAY PALLET" are unrelated
+// physical pallet pools even if a name ever happened to collide.
 //
-// ASSUMPTION (flagged plainly since no real refund line has been seen yet to confirm it): a
-// "Deposit" line with a NEGATIVE total is a deposit charged — a pallet taken, added to the tally; a
-// "Deposit" line with a POSITIVE total is a deposit refunded — a pallet returned, subtracted from the
-// tally. Any other DESCRIPTION (so far, just "CHEP Adv Rental") is a pure usage fee, not a deposit —
-// it never changes how many pallets are held, and is tallied separately below as a fee total instead.
-// If a refund ever shows up worded or signed differently than this, this is the function to fix.
+// Each pallet line's own "direction" field (computed once, per market, by MarketStatementImport.gs —
+// see its long comment on why each market's own numbers are the authoritative signal rather than
+// guessing from a label or a sign here) means the same thing regardless of market: "out" = a pallet
+// went out to the buyer (added to the tally, deposit paid), "in" = a pallet came back (subtracted,
+// deposit refunded), "fee" = a pure usage/rental charge that doesn't change how many pallets are held
+// at all. Tshwane's own return line has confirmed this sign-based direction detection is right; JHB's
+// side of it (Deposit-charged vs Deposit-refunded) hasn't yet been checked against a real JHB refund
+// example — flag it if a JHB pallet return line ever produces a tally that looks wrong.
 function marketPalletTallyComputed(){
   const map = {};
   (DATA.palletLedger||[]).forEach(r=>{
+    const market = r.market || "Unknown market";
     const type = r.palletType || "Unknown pallet type";
-    if(!map[type]) map[type] = {held:0, depositsPaid:0, depositsRefunded:0, feesPaid:0};
+    const key = market + "::" + type;
+    if(!map[key]) map[key] = {market, palletType:type, held:0, depositsPaid:0, depositsRefunded:0, feesPaid:0};
     const qty = Number(r.qty)||0;
     const total = Number(r.total)||0;
-    if(r.transactionType === "Deposit"){
-      if(total < 0){ map[type].held += qty; map[type].depositsPaid += Math.abs(total); }
-      else if(total > 0){ map[type].held -= qty; map[type].depositsRefunded += total; }
-    } else {
-      map[type].feesPaid += Math.abs(total);
-    }
+    if(r.direction === "out"){ map[key].held += qty; map[key].depositsPaid += Math.abs(total); }
+    else if(r.direction === "in"){ map[key].held -= qty; map[key].depositsRefunded += Math.abs(total); }
+    else { map[key].feesPaid += Math.abs(total); }
   });
-  return Object.keys(map).sort().map(type=> Object.assign({palletType:type}, map[type]));
+  return Object.keys(map).sort().map(key=> map[key]);
 }
 
 function renderMarketStatements(){
@@ -3945,10 +3958,11 @@ function renderMarketStatements(){
   const dayTotal = round2(dayLines.reduce((s,r)=> s + (Number(r.total)||0), 0));
 
   const lineRows = dayLines.map(r=>{
-    const mapped = (DATA.marketProductMap||{})[r.commodity];
+    const mapped = (DATA.marketProductMap||{})[marketMapKey(r.market, r.commodity)];
     return `
     <tr>
-      <td class="helptext">${esc(r.invoice)}</td>
+      <td>${chip(r.market||"—","neutral")}</td>
+      <td class="helptext">${esc(r.invoice||"—")}</td>
       <td>${esc(r.agent)}</td>
       <td>${mapped ? esc(mapped) : `<span class="helptext">${esc(r.commodity)}</span> ${chip("unmapped","warn")}`}</td>
       <td class="num">${fmtNum(r.qty,0)}</td>
@@ -3959,19 +3973,21 @@ function renderMarketStatements(){
 
   const palletRows = dayPallets.map(r=>`
     <tr>
-      <td class="helptext">${esc(r.invoice)}</td>
-      <td>${esc(r.agent)}</td>
+      <td>${chip(r.market||"—","neutral")}</td>
+      <td class="helptext">${esc(r.invoice||"—")}</td>
+      <td>${esc(r.agent||"—")}</td>
       <td>${esc(r.palletType)}</td>
-      <td>${esc(r.transactionType)}</td>
+      <td>${esc(r.transactionType||r.direction)}</td>
       <td class="num">${fmtNum(r.qty,0)}</td>
-      <td class="num">${money(r.unitDeposit)}</td>
-      <td class="num">${money(r.usageFee)}</td>
+      <td class="num">${r.unitDeposit!=null ? money(r.unitDeposit) : (r.unitPrice!=null ? money(r.unitPrice) : "—")}</td>
+      <td class="num">${r.usageFee!=null ? money(r.usageFee) : "—"}</td>
       <td class="num">${money(r.total)}</td>
     </tr>`).join("");
 
   const tally = marketPalletTallyComputed();
   const tallyRows = tally.map(t=>`
     <tr>
+      <td>${chip(t.market||"—","neutral")}</td>
       <td>${esc(t.palletType)}</td>
       <td class="num">${fmtNum(t.held,0)}</td>
       <td class="num">${money(t.depositsPaid)}</td>
@@ -3979,11 +3995,11 @@ function renderMarketStatements(){
       <td class="num">${money(t.feesPaid)}</td>
     </tr>`).join("");
 
-  const unmappedCount = dayLines.filter(r=> !(DATA.marketProductMap||{})[r.commodity]).length;
+  const unmappedCount = dayLines.filter(r=> !(DATA.marketProductMap||{})[marketMapKey(r.market, r.commodity)]).length;
 
   return `
     <div class="pagehead">
-      <div><h2>Market Statements</h2><p>Raw line items imported automatically from the JHB Fresh Produce Market's daily statement — for review only, nothing here creates or confirms a Purchase Cost yet. Map raw commodity names to real Base Products under Admin &gt; Market Product Mapping.</p></div>
+      <div><h2>Market Statements</h2><p>Raw line items imported automatically from each market's daily buyer statement (JHB Fresh Produce Market and Tshwane Market so far) — for review only, nothing here creates or confirms a Purchase Cost yet. Map raw commodity names to real Base Products under Admin &gt; Market Product Mapping.</p></div>
       <div class="actions">
         <div class="field" style="min-width:170px;"><label>Statement date</label><select id="marketStatementDateSel">${dateOptions}</select></div>
       </div>
@@ -3994,26 +4010,26 @@ function renderMarketStatements(){
       <div class="cardhead"><div><h3>Purchases — ${esc(marketStatementSelectedDate||"—")}</h3><div class="desc">${dayLines.length} line(s), total R${fmtNum(dayTotal,2)}.</div></div></div>
       <div class="cardbody" style="padding:0;">
         <div class="tablewrap" style="border:none;border-radius:0;"><table>
-          <thead><tr><th>Invoice</th><th>Agent</th><th>Product</th><th class="num">Qty</th><th class="num">Unit price</th><th class="num">Total</th></tr></thead>
-          <tbody>${lineRows || `<tr><td colspan="6" class="empty">No purchase lines for this date.</td></tr>`}</tbody>
+          <thead><tr><th>Market</th><th>Invoice</th><th>Agent</th><th>Product</th><th class="num">Qty</th><th class="num">Unit price</th><th class="num">Total</th></tr></thead>
+          <tbody>${lineRows || `<tr><td colspan="7" class="empty">No purchase lines for this date.</td></tr>`}</tbody>
         </table></div>
       </div>
     </div>
     <div class="card">
-      <div class="cardhead"><div><h3>Pallets — ${esc(marketStatementSelectedDate||"—")}</h3><div class="desc">${dayPallets.length} line(s) from this statement's PALLETS section.</div></div></div>
+      <div class="cardhead"><div><h3>Pallets — ${esc(marketStatementSelectedDate||"—")}</h3><div class="desc">${dayPallets.length} line(s) from this statement's own pallet section.</div></div></div>
       <div class="cardbody" style="padding:0;">
         <div class="tablewrap" style="border:none;border-radius:0;"><table>
-          <thead><tr><th>Invoice</th><th>Agent</th><th>Pallet type</th><th>Description</th><th class="num">Qty</th><th class="num">Deposit</th><th class="num">Usage fee</th><th class="num">Total</th></tr></thead>
-          <tbody>${palletRows || `<tr><td colspan="8" class="empty">No pallet lines for this date.</td></tr>`}</tbody>
+          <thead><tr><th>Market</th><th>Invoice</th><th>Agent</th><th>Pallet type</th><th>Description</th><th class="num">Qty</th><th class="num">Deposit/price</th><th class="num">Usage fee</th><th class="num">Total</th></tr></thead>
+          <tbody>${palletRows || `<tr><td colspan="9" class="empty">No pallet lines for this date.</td></tr>`}</tbody>
         </table></div>
       </div>
     </div>
     <div class="card">
-      <div class="cardhead"><div><h3>Pallet tally (all time)</h3><div class="desc">Running count of pallets currently held, across every statement imported so far. A Deposit charge adds to the tally (a pallet taken); a Deposit refund subtracts (a pallet returned) — a usage/rental fee alone doesn't change the count. This is a best-effort read of the statement's wording/sign and hasn't yet been checked against a real refund — flag it if a count here ever looks wrong.</div></div></div>
+      <div class="cardhead"><div><h3>Pallet tally (all time)</h3><div class="desc">Running count of pallets currently held, per market and pallet type, across every statement imported so far. A pallet going out to the buyer adds to the tally; a pallet coming back subtracts — a usage/rental fee alone doesn't change the count. See the note on marketPalletTallyComputed for how "out"/"in" is worked out per market — flag it if a count here ever looks wrong.</div></div></div>
       <div class="cardbody" style="padding:0;">
         <div class="tablewrap" style="border:none;border-radius:0;"><table>
-          <thead><tr><th>Pallet type</th><th class="num">Currently held</th><th class="num">Deposits paid</th><th class="num">Deposits refunded</th><th class="num">Fees paid</th></tr></thead>
-          <tbody>${tallyRows || `<tr><td colspan="5" class="empty">No pallet activity imported yet.</td></tr>`}</tbody>
+          <thead><tr><th>Market</th><th>Pallet type</th><th class="num">Currently held</th><th class="num">Deposits paid</th><th class="num">Deposits refunded</th><th class="num">Fees paid</th></tr></thead>
+          <tbody>${tallyRows || `<tr><td colspan="6" class="empty">No pallet activity imported yet.</td></tr>`}</tbody>
         </table></div>
       </div>
     </div>`;
@@ -4461,19 +4477,22 @@ function renderUsers(){
 // on Market Statements or (eventually) Purchase Costs treats a raw commodity as usable until it's
 // mapped here. Saved as a normal DICT_SHEETS full save (like Base Product Categories) — see persist().
 function distinctRawMarketCommodities(){
-  const seen = new Map(); // commodity -> {count, lastDate, lastUnitPrice}
+  const seen = new Map(); // "<MARKET>::<raw>" -> {market, commodity, count, lastDate, lastUnitPrice}
   (DATA.marketStatementLines||[]).forEach(r=>{
     if(!r.commodity) return;
-    const cur = seen.get(r.commodity) || {count:0, lastDate:"", lastUnitPrice:null};
+    const market = r.market || "Unknown market";
+    const key = marketMapKey(market, r.commodity);
+    const cur = seen.get(key) || {market, commodity:r.commodity, count:0, lastDate:"", lastUnitPrice:null};
     cur.count++;
     if(!cur.lastDate || (r.statementDate||"") >= cur.lastDate){ cur.lastDate = r.statementDate||""; cur.lastUnitPrice = r.unitPrice; }
-    seen.set(r.commodity, cur);
+    seen.set(key, cur);
   });
-  return Array.from(seen.entries()).map(([commodity, info])=> Object.assign({commodity}, info));
+  return Array.from(seen.values());
 }
 
 // Best-effort human-readable name from the raw string, purely for display next to the real mapping
-// input — the raw string itself stays the actual key in marketProductMap either way.
+// input — the raw string itself stays part of the actual key in marketProductMap either way (see
+// marketMapKey, which namespaces it by market too).
 function describeRawCommodity(raw){
   const parts = String(raw).split(",").map(p=>p.trim());
   const name = parts[0] || raw;
@@ -4486,25 +4505,27 @@ function renderMarketMapping(){
   const baseProducts = distinctBaseProducts();
   const search = marketMappingSearch.trim().toLowerCase();
   let commodities = distinctRawMarketCommodities();
-  if(marketMappingOnlyUnmapped) commodities = commodities.filter(c=> !(DATA.marketProductMap||{})[c.commodity]);
-  if(search) commodities = commodities.filter(c=> c.commodity.toLowerCase().includes(search) || describeRawCommodity(c.commodity).toLowerCase().includes(search));
-  commodities.sort((a,b)=> describeRawCommodity(a.commodity).localeCompare(describeRawCommodity(b.commodity)));
+  if(marketMappingOnlyUnmapped) commodities = commodities.filter(c=> !(DATA.marketProductMap||{})[marketMapKey(c.market, c.commodity)]);
+  if(search) commodities = commodities.filter(c=> c.commodity.toLowerCase().includes(search) || describeRawCommodity(c.commodity).toLowerCase().includes(search) || (c.market||"").toLowerCase().includes(search));
+  commodities.sort((a,b)=> (a.market||"").localeCompare(b.market||"") || describeRawCommodity(a.commodity).localeCompare(describeRawCommodity(b.commodity)));
 
-  const totalUnmapped = distinctRawMarketCommodities().filter(c=> !(DATA.marketProductMap||{})[c.commodity]).length;
+  const totalUnmapped = distinctRawMarketCommodities().filter(c=> !(DATA.marketProductMap||{})[marketMapKey(c.market, c.commodity)]).length;
 
   const rows = commodities.map((c,i)=>{
-    const mapped = (DATA.marketProductMap||{})[c.commodity] || "";
+    const key = marketMapKey(c.market, c.commodity);
+    const mapped = (DATA.marketProductMap||{})[key] || "";
     return `
     <tr>
+      <td>${chip(c.market||"—","neutral")}</td>
       <td>${esc(describeRawCommodity(c.commodity))}<div class="helptext">${esc(c.commodity)}</div></td>
       <td class="helptext">${c.count} line(s), last ${esc(c.lastDate||"—")}${c.lastUnitPrice!=null ? `, ${money(c.lastUnitPrice)}` : ""}</td>
-      <td><input class="rowinput" data-mapping-idx="${i}" data-raw="${esc(c.commodity)}" list="baseProductsDL" value="${esc(mapped)}" placeholder="Not mapped yet"></td>
+      <td><input class="rowinput" data-mapping-idx="${i}" data-mapkey="${esc(key)}" list="baseProductsDL" value="${esc(mapped)}" placeholder="Not mapped yet"></td>
     </tr>`;
   }).join("");
 
   return `
     <div class="pagehead">
-      <div><h2>Market Product Mapping</h2><p>Links the market statement's raw commodity text to your real Base Products, so Market Statements (and, later, Purchase Costs) know what was actually bought. A blank row hasn't been mapped yet — nothing uses it until it is.</p></div>
+      <div><h2>Market Product Mapping</h2><p>Links each market's raw commodity text to your real Base Products, so Market Statements (and, later, Purchase Costs) know what was actually bought. Two markets feed this today — JHB and Tshwane — mapped separately, since the same commodity name from a different market isn't the same mapping. A blank row hasn't been mapped yet — nothing uses it until it is.</p></div>
       <div class="actions">
         <button class="btn primary" id="saveMarketMappingBtn">Save mapping</button>
       </div>
@@ -4513,14 +4534,14 @@ function renderMarketMapping(){
     <div class="card">
       <div class="cardhead">
         <div class="formgrid" style="flex:1;">
-          <div class="field"><label>Search</label><input type="text" id="marketMappingSearchInput" value="${esc(marketMappingSearch)}" placeholder="Search raw or mapped name…"></div>
+          <div class="field"><label>Search</label><input type="text" id="marketMappingSearchInput" value="${esc(marketMappingSearch)}" placeholder="Search market, raw, or mapped name…"></div>
           <label class="btn" style="align-self:flex-end;"><input type="checkbox" id="marketMappingOnlyUnmappedToggle" ${marketMappingOnlyUnmapped?"checked":""} style="margin-right:6px;">Only unmapped</label>
         </div>
       </div>
       <div class="cardbody" style="padding:0;">
         <div class="tablewrap" style="border:none;border-radius:0;"><table>
-          <thead><tr><th>Market commodity</th><th>Seen</th><th>Maps to Base Product</th></tr></thead>
-          <tbody>${rows || `<tr><td colspan="3" class="empty">${marketMappingOnlyUnmapped && totalUnmapped===0 ? "Nothing unmapped." : "No market statement data imported yet."}</td></tr>`}</tbody>
+          <thead><tr><th>Market</th><th>Market commodity</th><th>Seen</th><th>Maps to Base Product</th></tr></thead>
+          <tbody>${rows || `<tr><td colspan="4" class="empty">${marketMappingOnlyUnmapped && totalUnmapped===0 ? "Nothing unmapped." : "No market statement data imported yet."}</td></tr>`}</tbody>
         </table></div>
       </div>
     </div>
@@ -5815,11 +5836,11 @@ function wireTabEvents(){
     const saveBtn = document.getElementById("saveMarketMappingBtn");
     if(saveBtn) saveBtn.addEventListener("click", ()=>{
       if(!DATA.marketProductMap) DATA.marketProductMap = {};
-      document.querySelectorAll("#main [data-mapping-idx]").forEach(inp=>{
-        const raw = inp.dataset.raw;
+      document.querySelectorAll("#main [data-mapkey]").forEach(inp=>{
+        const key = inp.dataset.mapkey; // "<MARKET>::<raw commodity>" — see marketMapKey
         const val = inp.value.trim();
-        if(val) DATA.marketProductMap[raw] = val;
-        else delete DATA.marketProductMap[raw]; // cleared back out — goes back to "not yet mapped"
+        if(val) DATA.marketProductMap[key] = val;
+        else delete DATA.marketProductMap[key]; // cleared back out — goes back to "not yet mapped"
       });
       persist("Mapping saved", ["marketProductMap"]);
     });
