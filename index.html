@@ -570,6 +570,15 @@ let stockVarianceAsOfDate = "";
 let sellingPriceCategoryFilter = "";
 let sellingPriceSearch = "";
 let sellingPriceEditing = new Set();
+// Market Statements (Costings) — which imported statement date is currently showing. Defaults to the
+// most recent date with data each time the tab is opened fresh (see renderMarketStatements()); "" only
+// means nothing has ever been imported yet.
+let marketStatementSelectedDate = "";
+// Admin > Market Product Mapping — free-text filter, and whether to show every raw commodity string
+// seen so far or just the ones still waiting on a mapping (the far more common thing to want open,
+// since a raw commodity is written once and then never needs touching again once mapped).
+let marketMappingSearch = "";
+let marketMappingOnlyUnmapped = true;
 
 const NAV = [
   {group:"Overview", items:[
@@ -593,6 +602,7 @@ const NAV = [
     {id:"purchase", label:"Purchase Costs"},
     {id:"pricehistory", label:"Price History"},
     {id:"sageimport", label:"Sage CSV"},
+    {id:"marketstatements", label:"Market Statements"},
   ]},
   {group:"Selling", items:[
     {id:"sellingprices", label:"Selling Prices"},
@@ -603,6 +613,7 @@ const NAV = [
   {group:"Admin", items:[
     {id:"users", label:"Users"},
     {id:"stockvariance", label:"Stock Variance"},
+    {id:"marketmapping", label:"Market Product Mapping"},
   ]},
 ];
 const TABS = NAV.flatMap(section=>section.items);
@@ -623,8 +634,8 @@ if(!TABS.some(t=>t.id===currentTab)){
 // "home" (the landing Dashboard) is Owner + Procurement only, by Shane's explicit request — Stock Taker,
 // Receiving and Market stay scoped to their single-purpose tab(s), same as before.
 const ROLE_TABS = {
-  owner: ["home","shoppinglist","quickbuy","shoppingarchive","receiving","dashboard","salesdata","itemsetup","recipes","purchase","pricehistory","sageimport","sellingprices","stocktake","users","stockvariance"],
-  procurement: ["home","shoppinglist","quickbuy","shoppingarchive","receiving","purchase","pricehistory","sageimport","sellingprices","stocktake"],
+  owner: ["home","shoppinglist","quickbuy","shoppingarchive","receiving","dashboard","salesdata","itemsetup","recipes","purchase","pricehistory","sageimport","marketstatements","sellingprices","stocktake","users","stockvariance","marketmapping"],
+  procurement: ["home","shoppinglist","quickbuy","shoppingarchive","receiving","purchase","pricehistory","sageimport","marketstatements","sellingprices","stocktake"],
   stocktaker: ["stocktake","receiving"],
   receiving: ["receiving"],
   market: ["quickbuy"],
@@ -1770,10 +1781,12 @@ function render(){
     else if(currentTab==="purchase") pageHtml = renderPurchase();
     else if(currentTab==="pricehistory") pageHtml = renderPriceHistory();
     else if(currentTab==="sageimport") pageHtml = renderSageImport();
+    else if(currentTab==="marketstatements") pageHtml = renderMarketStatements();
     else if(currentTab==="sellingprices") pageHtml = renderSellingPrices();
     else if(currentTab==="stocktake") pageHtml = renderStockTake();
     else if(currentTab==="users") pageHtml = renderUsers();
     else if(currentTab==="stockvariance") pageHtml = renderStockVariance();
+    else if(currentTab==="marketmapping") pageHtml = renderMarketMapping();
     // shown above whichever page is current, on every tab, until reloaded — a bulk save (Item Setup /
     // Product Mixes / Settings / Users) can be refused from any of those pages, and this needs to stay
     // visible regardless of which one the user wanders to afterward. saveConflict (an actually-rejected
@@ -2059,7 +2072,11 @@ function purchaseLineChip(e, opts){
     if(e.loggedBy) core += " — logged by " + esc(e.loggedBy);
     if(received && e.receivedBy) core += ", received by " + esc(e.receivedBy);
   }
-  return received ? chip("✓ " + core, "good") : chip("📦 Ordered: " + core, "warn");
+  const line = received ? chip("✓ " + core, "good") : chip("📦 Ordered: " + core, "warn");
+  // Surfaces everywhere a purchase line shows up (Shopping List, Quick Buy, Receiving, Purchase Costs) —
+  // one place to flag it rather than teaching every table about it separately. See OVER_SUGGESTED_BUY_MULTIPLIER.
+  const overFlag = e.overBuyReason ? " " + chip(`⚠ ${fmtNum(e.qty,0)} vs. ${fmtNum(e.overBuySuggested,0)} suggested: ${e.overBuyReason}`, "critical") : "";
+  return line + overFlag;
 }
 function csvParseLine(line){
   const out=[]; let cur=""; let inQ=false;
@@ -2186,12 +2203,18 @@ function renderBuyCell(r, today){
   const prefillQty = editingExisting && editingExisting.qty!==undefined && editingExisting.qty!==null ? editingExisting.qty : "";
   const prefillCost = editingExisting && editingExisting.cost!==undefined && editingExisting.cost!==null ? editingExisting.cost : "";
   const prefillSupplier = editingExisting ? (editingExisting.supplier||"") : "";
+  // Hidden until it's actually needed — Save reveals it in place (and blocks the first click) the moment
+  // the typed qty crosses OVER_SUGGESTED_BUY_MULTIPLIER, rather than cluttering every ordinary buy row
+  // that never runs into it. Already shown, pre-filled, if this line was flagged when it was originally
+  // logged, so correcting it doesn't lose the reason that was already on record.
+  const prefillOverReason = editingExisting ? (editingExisting.overBuyReason||"") : "";
   return `<div style="display:flex;flex-direction:column;gap:6px;align-items:flex-start;">
     ${lineChips ? `<div style="display:flex;gap:6px;flex-wrap:wrap;">${lineChips}</div>` : ""}
     <div class="buyrow" data-buy-row="${esc(bp)}" data-buy-editid="${esc(editingExisting?editingVal:"")}" style="display:flex;align-items:center;gap:4px;white-space:nowrap;">
       <input type="number" step="0.01" class="buy-qty" placeholder="Qty*" value="${esc(prefillQty)}" style="width:56px;">
       <input type="number" step="0.01" class="buy-cost" placeholder="Price/u (if known)" value="${esc(prefillCost)}" style="width:110px;">
       <input type="text" class="buy-supplier" placeholder="Supplier" value="${esc(prefillSupplier)}" style="width:90px;">
+      <input type="text" class="buy-overreason" placeholder="Reason for exceeding suggested buy*" value="${esc(prefillOverReason)}" style="width:190px;${prefillOverReason?"":"display:none;"}">
       <button class="btn primary" data-buy-tick="${esc(bp)}" title="Save" style="padding:2px 10px;font-size:12px;">✓</button>
       <button class="btn" data-buy-cancel="${esc(bp)}" style="padding:2px 6px;font-size:12px;" title="Close without saving">✕</button>
     </div>
@@ -2335,6 +2358,9 @@ function renderQuickBuy(){
     const prefillCost = editingLine && editingLine.cost!==undefined && editingLine.cost!==null ? editingLine.cost : "";
     const prefillSupplier = editingLine ? (editingLine.supplier||"") : "";
     const prefillReason = existingIssue ? existingIssue.reason : "";
+    // Hidden until it's actually needed (see the matching Shopping List comment) — already shown,
+    // pre-filled, if this line was flagged when it was originally logged.
+    const prefillOverBuyReason = editingLine ? (editingLine.overBuyReason||"") : "";
     const stockLine = row.ratio!==null && row.ratio!==undefined
       ? `${Math.round(row.ratio*100)}% of target (${fmtNum(row.currentStock,0)} on hand / ${fmtNum(row.recommended,0)} target)`
       : (row.currentStock===null ? "no stock take yet" : "");
@@ -2363,6 +2389,10 @@ function renderQuickBuy(){
         <div class="field"><label>Quantity (what you're ordering)</label><input type="number" inputmode="decimal" step="0.01" id="quickBuyQty" value="${esc(prefillQty)}" style="font-size:20px;padding:13px;"></div>
         <div class="field"><label>Price per unit (if known)</label><input type="number" inputmode="decimal" step="0.01" id="quickBuyCost" value="${esc(prefillCost)}" style="font-size:20px;padding:13px;" placeholder="leave blank if not invoiced yet"></div>
         <div class="field"><label>Supplier</label><input type="text" id="quickBuySupplier" value="${esc(prefillSupplier)}" style="font-size:20px;padding:13px;" placeholder="optional"></div>
+      </div>
+      <div class="field" id="quickBuyOverReasonField" style="margin-top:10px;${prefillOverBuyReason?"":"display:none;"}">
+        <label>Reason for exceeding suggested buy</label>
+        <input type="text" id="quickBuyOverReason" value="${esc(prefillOverBuyReason)}" placeholder="e.g. bulk discount, upcoming event" style="font-size:16px;padding:13px;">
       </div>
       <div class="helptext" style="margin-top:8px;">This logs it as ordered — it'll show as "Ordered" until someone in Receiving confirms it's arrived.</div>
       <button class="btn primary" id="quickBuyConfirm" style="width:100%;font-size:16px;padding:15px;margin-top:14px;">${editingLine ? "✓ Save changes" : "✓ Confirm order"}</button>`;
@@ -2604,6 +2634,22 @@ const RECEIVING_RECENT_DAYS = 7;
 // line is still in Purchase Costs and Google Sheets if it's ever needed, it just stops cluttering this
 // list once it's a week old.
 const NOT_RECEIVED_RETENTION_DAYS = 7;
+// Shane's ask, 2026-09-29: buying meaningfully more than what's actually suggested shouldn't just sail
+// through unremarked — a 20%+ overshoot needs a reason on record and a flag Owner/Procurement can see, so
+// a pattern of over-buying (bulk deals, someone's own judgment call, or a mistake) shows up rather than
+// hiding inside an otherwise-ordinary-looking order. Applies at the moment a buy is LOGGED (Shopping List
+// and Quick Buy, where "suggested buy" is the number actually being decided against) — not to Receiving,
+// which is just confirming what physically arrived against an order already placed.
+const OVER_SUGGESTED_BUY_MULTIPLIER = 1.2;
+// The suggested buy a new order is checked against — the same number Shopping List's "Suggested buy"
+// column and Quick Buy's "suggested buy: X" line both already show, recomputed fresh at the moment of
+// logging (rather than trusted from whatever was on screen) since stock counts/targets can change anytime.
+// null means there's nothing computable to compare against (e.g. no stock take yet, missing setup) — in
+// that case there's no basis for an "over suggested" flag, so it's skipped rather than guessed at.
+function suggestedBuyFor(baseProduct){
+  const row = shoppingListComputed().find(r=>r.baseProduct===baseProduct);
+  return (row && row.toBuy!==null && row.toBuy!==undefined) ? row.toBuy : null;
+}
 // Spells out the actual ordered vs. received figures on a discrepancy flag, rather than a bare "qty
 // differs" — the original ordered qty/cost is otherwise invisible once a line is received (it's
 // deliberately hidden pre-receipt too, per Shane's blind-count request), so without this there's no way
@@ -2920,6 +2966,12 @@ function renderHomeDashboard(){
   const recentlyReceived = DATA.purchaseCosts.filter(p=> p.baseProduct && isReceived(p) && p.receivedDate >= recentCutoff);
   const discrepancyRows = recentlyReceived.filter(p=> receivingDiscrepancy(p));
 
+  // ---- Over-suggested buys: orders logged more than 20% over the suggested buy (see
+  // OVER_SUGGESTED_BUY_MULTIPLIER) — the whole point of flagging these is that Owner and Procurement see
+  // them without having to go looking, so this is on Home, the one tab both roles land on.
+  const overBuyRows = DATA.purchaseCosts.filter(p=> p.overBuyReason && p.date >= recentCutoff)
+    .slice().sort((a,b)=> (b.date||"").localeCompare(a.date||""));
+
   // ---- Calculated Holdings: consistency/missing-data flags ----
   const planRows = procurementPlanComputed();
   const flaggedRows = planRows.filter(r=> r.consistency!=="OK" || r.missing!=="OK");
@@ -2983,6 +3035,15 @@ function renderHomeDashboard(){
       <td>${discrepancyChipHtml(p)}</td>
     </tr>`).join("");
 
+  const overBuyHtml = overBuyRows.slice(0,10).map(p=>`
+    <tr>
+      <td>${esc(p.baseProduct)}</td>
+      <td class="helptext">${esc(p.date||"—")}</td>
+      <td class="num">${fmtNum(p.qty,0)} vs. ${fmtNum(p.overBuySuggested,0)} suggested</td>
+      <td>${esc(p.overBuyReason)}</td>
+      <td class="helptext">${esc(p.loggedBy||"—")}</td>
+    </tr>`).join("");
+
   const flaggedHtml = flaggedRows.slice(0,10).map(r=>`
     <tr>
       <td>${esc(r.baseProduct)}</td>
@@ -3016,6 +3077,7 @@ function renderHomeDashboard(){
     </div>
     <div class="cardrow">
       ${navStat("Receiving discrepancies ("+RECEIVING_RECENT_DAYS+"d)", discrepancyRows.length, discrepancyRows.length?'var(--warn)':'var(--good)', "receiving")}
+      ${navStat("Over-suggested buys ("+RECEIVING_RECENT_DAYS+"d)", overBuyRows.length, overBuyRows.length?'var(--critical)':'var(--good)', "purchase")}
       ${navStat("Price alerts ("+RECEIVING_RECENT_DAYS+"d)", priceAlerts.length, priceAlerts.length?'var(--warn)':'var(--good)', "pricehistory")}
       ${canSeeHoldings
         ? navStat("Flagged in Calculated Holdings", flaggedRows.length, flaggedRows.length?'var(--warn)':'var(--good)', "dashboard")
@@ -3031,6 +3093,18 @@ function renderHomeDashboard(){
         <div class="tablewrap" style="border:none;border-radius:0;"><table>
           <thead><tr><th>Base product</th><th>Category</th><th>Status</th><th class="num">Current stock</th><th class="num">Suggested buy</th><th>Unit</th></tr></thead>
           <tbody>${needsActionHtml || `<tr><td colspan="6" class="empty">Nothing outstanding — everything Critical or Consider Buying has been logged for today.</td></tr>`}</tbody>
+        </table></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="cardhead">
+        <div><h3>Over-suggested buys</h3><div class="desc">${overBuyRows.length} order${overBuyRows.length===1?"":"s"} logged more than ${Math.round((OVER_SUGGESTED_BUY_MULTIPLIER-1)*100)}% over the suggested buy in the last ${RECEIVING_RECENT_DAYS} days.</div></div>
+        ${goto("purchase","Open Purchase Costs →")}
+      </div>
+      <div class="cardbody" style="padding:0;">
+        <div class="tablewrap" style="border:none;border-radius:0;"><table>
+          <thead><tr><th>Base product</th><th>Date</th><th class="num">Ordered vs. suggested</th><th>Reason</th><th>Logged by</th></tr></thead>
+          <tbody>${overBuyHtml || `<tr><td colspan="5" class="empty">Nothing over the suggested buy in the last ${RECEIVING_RECENT_DAYS} days.</td></tr>`}</tbody>
         </table></div>
       </div>
     </div>
@@ -3549,9 +3623,12 @@ function renderPurchase(){
       // first). Shane's "fix the layout" ask: always stack it on its own line below the name, so the
       // product name is never in doubt and every row keeps the same shape whether it has a tag or not.
       const statusTag = notReceived ? chip("Not received" + (p.notReceivedReason?": "+p.notReceivedReason:""), "critical") : (!received ? chip("Ordered","neutral") : "");
+      // See OVER_SUGGESTED_BUY_MULTIPLIER — this table builds its own row markup rather than going through
+      // purchaseLineChip, so it needs its own copy of the same flag.
+      const overBuyTag = p.overBuyReason ? chip(`⚠ ${fmtNum(p.qty,0)} vs. ${fmtNum(p.overBuySuggested,0)} suggested: ${p.overBuyReason}`, "critical") : "";
       return `
       <tr>
-        <td>${esc(p.baseProduct)}${statusTag ? `<div style="margin-top:4px;">${statusTag}</div>` : ""}</td>
+        <td>${esc(p.baseProduct)}${statusTag ? `<div style="margin-top:4px;">${statusTag}</div>` : ""}${overBuyTag ? `<div style="margin-top:4px;">${overBuyTag}</div>` : ""}</td>
         <td class="num">${hasQty ? fmtNum(displayQty) : "—"}</td>
         <td class="num">${hasCost ? money(displayCost) : "—"}</td>
         <td class="num">${total!==null ? money(total) : "—"}</td>
@@ -3810,6 +3887,134 @@ function renderSageImport(){
             <tbody>${tableRows || `<tr><td colspan="4" class="empty">No purchases logged for this date yet — log one in Purchase Costs.</td></tr>`}</tbody>
           </table>
         </div>
+      </div>
+    </div>`;
+}
+
+// ---------- Market Statements ----------
+// Auto-imported (MarketStatementImport.gs, a separate standalone Apps Script watching a dedicated
+// inbox — see its header comment) from the JHB Fresh Produce Market's daily "Buyer Statement" PDF.
+// Shane's ask, 29 Sep 2026: browse the raw statement data day by day, and manage a pallet tally from
+// its PALLETS section — BEFORE any of it is used to create a real Purchase Cost, which is why this is
+// entirely separate from (and doesn't touch) Purchase Costs. See Admin > Market Product Mapping for
+// linking a raw commodity string to a real Base Product.
+function distinctMarketStatementDates(){
+  const set = new Set();
+  (DATA.marketStatementLines||[]).forEach(r=> r.statementDate && set.add(r.statementDate));
+  (DATA.palletLedger||[]).forEach(r=> r.statementDate && set.add(r.statementDate));
+  return Array.from(set).sort().reverse(); // most recent first
+}
+
+// Running tally of pallets currently held, by pallet type — built from the FULL pallet history (every
+// imported statement), not just the one date being viewed above.
+//
+// ASSUMPTION (flagged plainly since no real refund line has been seen yet to confirm it): a
+// "Deposit" line with a NEGATIVE total is a deposit charged — a pallet taken, added to the tally; a
+// "Deposit" line with a POSITIVE total is a deposit refunded — a pallet returned, subtracted from the
+// tally. Any other DESCRIPTION (so far, just "CHEP Adv Rental") is a pure usage fee, not a deposit —
+// it never changes how many pallets are held, and is tallied separately below as a fee total instead.
+// If a refund ever shows up worded or signed differently than this, this is the function to fix.
+function marketPalletTallyComputed(){
+  const map = {};
+  (DATA.palletLedger||[]).forEach(r=>{
+    const type = r.palletType || "Unknown pallet type";
+    if(!map[type]) map[type] = {held:0, depositsPaid:0, depositsRefunded:0, feesPaid:0};
+    const qty = Number(r.qty)||0;
+    const total = Number(r.total)||0;
+    if(r.transactionType === "Deposit"){
+      if(total < 0){ map[type].held += qty; map[type].depositsPaid += Math.abs(total); }
+      else if(total > 0){ map[type].held -= qty; map[type].depositsRefunded += total; }
+    } else {
+      map[type].feesPaid += Math.abs(total);
+    }
+  });
+  return Object.keys(map).sort().map(type=> Object.assign({palletType:type}, map[type]));
+}
+
+function renderMarketStatements(){
+  const dates = distinctMarketStatementDates();
+  if(!marketStatementSelectedDate || !dates.includes(marketStatementSelectedDate)){
+    marketStatementSelectedDate = dates[0] || "";
+  }
+  const dateOptions = dates.length
+    ? dates.map(d=>`<option value="${esc(d)}" ${d===marketStatementSelectedDate?"selected":""}>${esc(d)}</option>`).join("")
+    : `<option value="">No statements imported yet</option>`;
+
+  const dayLines = marketStatementSelectedDate ? (DATA.marketStatementLines||[]).filter(r=> r.statementDate===marketStatementSelectedDate) : [];
+  const dayPallets = marketStatementSelectedDate ? (DATA.palletLedger||[]).filter(r=> r.statementDate===marketStatementSelectedDate) : [];
+  const dayTotal = round2(dayLines.reduce((s,r)=> s + (Number(r.total)||0), 0));
+
+  const lineRows = dayLines.map(r=>{
+    const mapped = (DATA.marketProductMap||{})[r.commodity];
+    return `
+    <tr>
+      <td class="helptext">${esc(r.invoice)}</td>
+      <td>${esc(r.agent)}</td>
+      <td>${mapped ? esc(mapped) : `<span class="helptext">${esc(r.commodity)}</span> ${chip("unmapped","warn")}`}</td>
+      <td class="num">${fmtNum(r.qty,0)}</td>
+      <td class="num">${money(r.unitPrice)}</td>
+      <td class="num">${money(r.total)}</td>
+    </tr>`;
+  }).join("");
+
+  const palletRows = dayPallets.map(r=>`
+    <tr>
+      <td class="helptext">${esc(r.invoice)}</td>
+      <td>${esc(r.agent)}</td>
+      <td>${esc(r.palletType)}</td>
+      <td>${esc(r.transactionType)}</td>
+      <td class="num">${fmtNum(r.qty,0)}</td>
+      <td class="num">${money(r.unitDeposit)}</td>
+      <td class="num">${money(r.usageFee)}</td>
+      <td class="num">${money(r.total)}</td>
+    </tr>`).join("");
+
+  const tally = marketPalletTallyComputed();
+  const tallyRows = tally.map(t=>`
+    <tr>
+      <td>${esc(t.palletType)}</td>
+      <td class="num">${fmtNum(t.held,0)}</td>
+      <td class="num">${money(t.depositsPaid)}</td>
+      <td class="num">${money(t.depositsRefunded)}</td>
+      <td class="num">${money(t.feesPaid)}</td>
+    </tr>`).join("");
+
+  const unmappedCount = dayLines.filter(r=> !(DATA.marketProductMap||{})[r.commodity]).length;
+
+  return `
+    <div class="pagehead">
+      <div><h2>Market Statements</h2><p>Raw line items imported automatically from the JHB Fresh Produce Market's daily statement — for review only, nothing here creates or confirms a Purchase Cost yet. Map raw commodity names to real Base Products under Admin &gt; Market Product Mapping.</p></div>
+      <div class="actions">
+        <div class="field" style="min-width:170px;"><label>Statement date</label><select id="marketStatementDateSel">${dateOptions}</select></div>
+      </div>
+    </div>
+    ${!dates.length ? `<div class="banner warn">No statements imported yet — check that MarketStatementImport.gs's 5-minute trigger is running and market@dailyfruit.co.za's forwarding is set up.</div>` : ""}
+    ${unmappedCount ? `<div class="banner warn">⚠ ${unmappedCount} line${unmappedCount===1?"":"s"} on this date ${unmappedCount===1?"isn't":"aren't"} mapped to a Base Product yet — see Admin &gt; Market Product Mapping.</div>` : ""}
+    <div class="card">
+      <div class="cardhead"><div><h3>Purchases — ${esc(marketStatementSelectedDate||"—")}</h3><div class="desc">${dayLines.length} line(s), total R${fmtNum(dayTotal,2)}.</div></div></div>
+      <div class="cardbody" style="padding:0;">
+        <div class="tablewrap" style="border:none;border-radius:0;"><table>
+          <thead><tr><th>Invoice</th><th>Agent</th><th>Product</th><th class="num">Qty</th><th class="num">Unit price</th><th class="num">Total</th></tr></thead>
+          <tbody>${lineRows || `<tr><td colspan="6" class="empty">No purchase lines for this date.</td></tr>`}</tbody>
+        </table></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="cardhead"><div><h3>Pallets — ${esc(marketStatementSelectedDate||"—")}</h3><div class="desc">${dayPallets.length} line(s) from this statement's PALLETS section.</div></div></div>
+      <div class="cardbody" style="padding:0;">
+        <div class="tablewrap" style="border:none;border-radius:0;"><table>
+          <thead><tr><th>Invoice</th><th>Agent</th><th>Pallet type</th><th>Description</th><th class="num">Qty</th><th class="num">Deposit</th><th class="num">Usage fee</th><th class="num">Total</th></tr></thead>
+          <tbody>${palletRows || `<tr><td colspan="8" class="empty">No pallet lines for this date.</td></tr>`}</tbody>
+        </table></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="cardhead"><div><h3>Pallet tally (all time)</h3><div class="desc">Running count of pallets currently held, across every statement imported so far. A Deposit charge adds to the tally (a pallet taken); a Deposit refund subtracts (a pallet returned) — a usage/rental fee alone doesn't change the count. This is a best-effort read of the statement's wording/sign and hasn't yet been checked against a real refund — flag it if a count here ever looks wrong.</div></div></div>
+      <div class="cardbody" style="padding:0;">
+        <div class="tablewrap" style="border:none;border-radius:0;"><table>
+          <thead><tr><th>Pallet type</th><th class="num">Currently held</th><th class="num">Deposits paid</th><th class="num">Deposits refunded</th><th class="num">Fees paid</th></tr></thead>
+          <tbody>${tallyRows || `<tr><td colspan="5" class="empty">No pallet activity imported yet.</td></tr>`}</tbody>
+        </table></div>
       </div>
     </div>`;
 }
@@ -4249,6 +4454,79 @@ function renderUsers(){
     </div>`;
 }
 
+// ---------- Market Product Mapping ----------
+// Shane's ask, 29 Sep 2026: link the market statement's raw commodity strings ("BUTTERNUT,10KG
+// POCKE,*,1,L,*,*") to this app's real Base Products himself, in-app — replacing the external Google
+// Sheet mapping the first version of this feature used. A blank mapping means "not yet mapped"; nothing
+// on Market Statements or (eventually) Purchase Costs treats a raw commodity as usable until it's
+// mapped here. Saved as a normal DICT_SHEETS full save (like Base Product Categories) — see persist().
+function distinctRawMarketCommodities(){
+  const seen = new Map(); // commodity -> {count, lastDate, lastUnitPrice}
+  (DATA.marketStatementLines||[]).forEach(r=>{
+    if(!r.commodity) return;
+    const cur = seen.get(r.commodity) || {count:0, lastDate:"", lastUnitPrice:null};
+    cur.count++;
+    if(!cur.lastDate || (r.statementDate||"") >= cur.lastDate){ cur.lastDate = r.statementDate||""; cur.lastUnitPrice = r.unitPrice; }
+    seen.set(r.commodity, cur);
+  });
+  return Array.from(seen.entries()).map(([commodity, info])=> Object.assign({commodity}, info));
+}
+
+// Best-effort human-readable name from the raw string, purely for display next to the real mapping
+// input — the raw string itself stays the actual key in marketProductMap either way.
+function describeRawCommodity(raw){
+  const parts = String(raw).split(",").map(p=>p.trim());
+  const name = parts[0] || raw;
+  const pack = parts[1] || "";
+  const titled = name.toLowerCase().replace(/\b\w/g, c=>c.toUpperCase());
+  return pack ? `${titled} (${pack})` : titled;
+}
+
+function renderMarketMapping(){
+  const baseProducts = distinctBaseProducts();
+  const search = marketMappingSearch.trim().toLowerCase();
+  let commodities = distinctRawMarketCommodities();
+  if(marketMappingOnlyUnmapped) commodities = commodities.filter(c=> !(DATA.marketProductMap||{})[c.commodity]);
+  if(search) commodities = commodities.filter(c=> c.commodity.toLowerCase().includes(search) || describeRawCommodity(c.commodity).toLowerCase().includes(search));
+  commodities.sort((a,b)=> describeRawCommodity(a.commodity).localeCompare(describeRawCommodity(b.commodity)));
+
+  const totalUnmapped = distinctRawMarketCommodities().filter(c=> !(DATA.marketProductMap||{})[c.commodity]).length;
+
+  const rows = commodities.map((c,i)=>{
+    const mapped = (DATA.marketProductMap||{})[c.commodity] || "";
+    return `
+    <tr>
+      <td>${esc(describeRawCommodity(c.commodity))}<div class="helptext">${esc(c.commodity)}</div></td>
+      <td class="helptext">${c.count} line(s), last ${esc(c.lastDate||"—")}${c.lastUnitPrice!=null ? `, ${money(c.lastUnitPrice)}` : ""}</td>
+      <td><input class="rowinput" data-mapping-idx="${i}" data-raw="${esc(c.commodity)}" list="baseProductsDL" value="${esc(mapped)}" placeholder="Not mapped yet"></td>
+    </tr>`;
+  }).join("");
+
+  return `
+    <div class="pagehead">
+      <div><h2>Market Product Mapping</h2><p>Links the market statement's raw commodity text to your real Base Products, so Market Statements (and, later, Purchase Costs) know what was actually bought. A blank row hasn't been mapped yet — nothing uses it until it is.</p></div>
+      <div class="actions">
+        <button class="btn primary" id="saveMarketMappingBtn">Save mapping</button>
+      </div>
+    </div>
+    ${totalUnmapped ? `<div class="banner warn">⚠ ${totalUnmapped} raw commodity name${totalUnmapped===1?"":"s"} not mapped yet.</div>` : `<div class="banner good">Everything seen so far is mapped.</div>`}
+    <div class="card">
+      <div class="cardhead">
+        <div class="formgrid" style="flex:1;">
+          <div class="field"><label>Search</label><input type="text" id="marketMappingSearchInput" value="${esc(marketMappingSearch)}" placeholder="Search raw or mapped name…"></div>
+          <label class="btn" style="align-self:flex-end;"><input type="checkbox" id="marketMappingOnlyUnmappedToggle" ${marketMappingOnlyUnmapped?"checked":""} style="margin-right:6px;">Only unmapped</label>
+        </div>
+      </div>
+      <div class="cardbody" style="padding:0;">
+        <div class="tablewrap" style="border:none;border-radius:0;"><table>
+          <thead><tr><th>Market commodity</th><th>Seen</th><th>Maps to Base Product</th></tr></thead>
+          <tbody>${rows || `<tr><td colspan="3" class="empty">${marketMappingOnlyUnmapped && totalUnmapped===0 ? "Nothing unmapped." : "No market statement data imported yet."}</td></tr>`}</tbody>
+        </table></div>
+      </div>
+    </div>
+    ${datalistOptions("baseProductsDL", baseProducts)}`;
+}
+
 // ---------- Backup & Restore ----------
 // Removed (Sep 2026): "Restore from a backup" was the app's only code path that could overwrite every
 // sheet in one shot with whatever was in a chosen file, with no scoping and no server-side conflict
@@ -4331,6 +4609,26 @@ function wireTabEvents(){
         // (e.g. herbs invoiced later) — leave it blank and it'll show as "Ordered" until Receiving fills
         // it in when the delivery is confirmed.
         if(!qtyVal){ toast("Enter a quantity to log this order"); return; }
+        // Shane's ask: ordering more than OVER_SUGGESTED_BUY_MULTIPLIER above the suggested buy needs a
+        // reason on record before it can go through, and gets flagged for Owner/Procurement everywhere
+        // this purchase line shows up (see purchaseLineChip). The reason field is hidden until it's
+        // actually needed — the first Save reveals it in place and stops there rather than saving blind.
+        const suggested = suggestedBuyFor(bp);
+        const overThreshold = suggested!==null && Number(qtyVal) > suggested*OVER_SUGGESTED_BUY_MULTIPLIER;
+        const overReasonInput = container.querySelector(".buy-overreason");
+        if(overThreshold){
+          if(overReasonInput.style.display==="none"){
+            overReasonInput.style.display = "";
+            toast(`${fmtNum(Number(qtyVal),0)} is more than ${Math.round((OVER_SUGGESTED_BUY_MULTIPLIER-1)*100)}% over the suggested buy of ${fmtNum(suggested,0)} — add a reason to log it.`);
+            overReasonInput.focus();
+            return;
+          }
+          if(!overReasonInput.value.trim()){
+            toast("Enter a reason for exceeding the suggested buy");
+            overReasonInput.focus();
+            return;
+          }
+        }
         const today = new Date().toISOString().slice(0,10);
         const id = editId || newId();
         // logPurchase overwrites the WHOLE row on the backend (see Code.gs's upsertListRow_) — editing an
@@ -4347,6 +4645,7 @@ function wireTabEvents(){
         if(costVal!==""){ entry.cost = Number(costVal); } // left blank when not yet invoiced — see the comment above
         if(supplierVal.trim()) entry.supplier = supplierVal.trim();
         if(currentUser) entry.loggedBy = currentUser.name;
+        if(overThreshold){ entry.overBuyReason = overReasonInput.value.trim(); entry.overBuySuggested = suggested; }
         if(existingRow && existingRow.receivedDate){
           entry.receivedQty = existingRow.receivedQty;
           entry.receivedCost = existingRow.receivedCost;
@@ -4524,8 +4823,28 @@ function wireTabEvents(){
           // (e.g. herbs invoiced later) — leave it blank and it'll show as "Ordered" until Receiving fills
           // it in when the delivery is confirmed.
           if(!qtyVal){ toast("Enter a quantity to confirm"); return; }
-          const today = new Date().toISOString().slice(0,10);
           const bp = quickBuySelected;
+          // Shane's ask: ordering more than OVER_SUGGESTED_BUY_MULTIPLIER above the suggested buy needs a
+          // reason on record before it can go through — same rule and same "reveal the field, then
+          // require it filled" flow as the matching Shopping List buy row.
+          const suggested = suggestedBuyFor(bp);
+          const overThreshold = suggested!==null && Number(qtyVal) > suggested*OVER_SUGGESTED_BUY_MULTIPLIER;
+          const overReasonField = document.getElementById("quickBuyOverReasonField");
+          const overReasonInput = document.getElementById("quickBuyOverReason");
+          if(overThreshold){
+            if(overReasonField.style.display==="none"){
+              overReasonField.style.display = "";
+              toast(`${fmtNum(Number(qtyVal),0)} is more than ${Math.round((OVER_SUGGESTED_BUY_MULTIPLIER-1)*100)}% over the suggested buy of ${fmtNum(suggested,0)} — add a reason to confirm it.`);
+              overReasonInput.focus();
+              return;
+            }
+            if(!overReasonInput.value.trim()){
+              toast("Enter a reason for exceeding the suggested buy");
+              overReasonInput.focus();
+              return;
+            }
+          }
+          const today = new Date().toISOString().slice(0,10);
           const id = quickBuyEditingId || newId();
           // logPurchase overwrites the WHOLE row on the backend — editing an order that's already been
           // confirmed received must carry its receivedQty/receivedCost/receivedBy/receivedDate forward,
@@ -4537,6 +4856,7 @@ function wireTabEvents(){
           if(costVal!==""){ entry.cost = Number(costVal); } // left blank when not yet invoiced — see the comment above
           if(supplierVal.trim()) entry.supplier = supplierVal.trim();
           if(currentUser) entry.loggedBy = currentUser.name;
+          if(overThreshold){ entry.overBuyReason = overReasonInput.value.trim(); entry.overBuySuggested = suggested; }
           if(existingRow && existingRow.receivedDate){
             entry.receivedQty = existingRow.receivedQty;
             entry.receivedCost = existingRow.receivedCost;
@@ -5470,6 +5790,38 @@ function wireTabEvents(){
         DATA.users.splice(i,1);
         persist("User removed", ["users"]);
       });
+    });
+  }
+
+  if(currentTab==="marketstatements"){
+    const dateSel = document.getElementById("marketStatementDateSel");
+    if(dateSel) dateSel.addEventListener("change", (e)=>{
+      marketStatementSelectedDate = e.target.value;
+      render();
+    });
+  }
+
+  if(currentTab==="marketmapping"){
+    const searchInput = document.getElementById("marketMappingSearchInput");
+    if(searchInput) searchInput.addEventListener("input", (e)=>{
+      marketMappingSearch = e.target.value;
+      render();
+    });
+    const unmappedToggle = document.getElementById("marketMappingOnlyUnmappedToggle");
+    if(unmappedToggle) unmappedToggle.addEventListener("change", (e)=>{
+      marketMappingOnlyUnmapped = e.target.checked;
+      render();
+    });
+    const saveBtn = document.getElementById("saveMarketMappingBtn");
+    if(saveBtn) saveBtn.addEventListener("click", ()=>{
+      if(!DATA.marketProductMap) DATA.marketProductMap = {};
+      document.querySelectorAll("#main [data-mapping-idx]").forEach(inp=>{
+        const raw = inp.dataset.raw;
+        const val = inp.value.trim();
+        if(val) DATA.marketProductMap[raw] = val;
+        else delete DATA.marketProductMap[raw]; // cleared back out — goes back to "not yet mapped"
+      });
+      persist("Mapping saved", ["marketProductMap"]);
     });
   }
 
