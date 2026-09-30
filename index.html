@@ -5912,18 +5912,34 @@ function wireTabEvents(){
       // as unmapped" after a save.
       const byKey = new Map();
       (DATA.marketProductMap||[]).forEach(r=> r.rawCommodity && byKey.set(r.rawCommodity, Object.assign({}, r)));
+      // The Base Product field's datalist only suggests — it never stopped someone typing something
+      // that isn't a real Base Product at all (e.g. a half-typed "mar"), which used to save a phantom
+      // mapping to a product that doesn't exist anywhere in Item Setup. Same rule as Receiving's direct
+      // receipt form (see logDirectReceipt above): match case/whitespace-insensitively against Item
+      // Setup's real list and snap to the canonical spelling; if it genuinely matches nothing, refuse
+      // that one field and leave whatever was mapped there before untouched, rather than inventing one.
+      const knownBaseProducts = distinctBaseProducts();
+      const rejectedTyped = new Set();
       document.querySelectorAll("#main [data-mapkey]").forEach(inp=>{
         const key = inp.dataset.mapkey; // "<MARKET>::<raw commodity>" — see marketMapKey
         const field = inp.dataset.mapfield;
         if(!byKey.has(key)) byKey.set(key, {rawCommodity:key});
         const row = byKey.get(key);
         const val = inp.value.trim();
-        if(field==="packSize") row.packSize = val==="" ? null : Number(val);
-        else row.baseProduct = val;
+        if(field==="packSize"){ row.packSize = val==="" ? null : Number(val); return; }
+        if(val===""){ row.baseProduct = ""; return; }
+        if(knownBaseProducts.includes(val)){ row.baseProduct = val; return; }
+        const canonical = knownBaseProducts.find(n=> n.toLowerCase()===val.toLowerCase());
+        if(canonical){ row.baseProduct = canonical; return; }
+        rejectedTyped.add(val);
       });
       // A row with no Base Product goes back to "not yet mapped" entirely (drop it, same as the old
       // delete-the-dict-entry behavior) — a pack size with no Base Product means nothing on its own.
       DATA.marketProductMap = Array.from(byKey.values()).filter(r=> r.baseProduct);
+      if(rejectedTyped.size){
+        const list = Array.from(rejectedTyped).slice(0,3).map(v=>`"${v}"`).join(", ");
+        toast(`Didn't save ${list}${rejectedTyped.size>3?" and others":""} — not an existing Base Product. Add it in Item Setup first, or pick one from the list.`);
+      }
       persist("Mapping saved", ["marketProductMap"]);
     });
   }
