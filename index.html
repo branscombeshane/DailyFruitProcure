@@ -174,6 +174,7 @@
   .formgrid{display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:12px; align-items:end;}
   .empty{padding:30px 10px; text-align:center; color:var(--muted); font-size:13px;}
   .helptext{font-size:12px; color:var(--muted); line-height:1.6;}
+  .unit-tag{display:inline-block; max-width:100px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; vertical-align:bottom; font-size:11px; color:var(--muted); margin-left:4px;}
   .kbd{font-family:"IBM Plex Mono",monospace; background:var(--surface-2); border:1px solid var(--line); border-radius:4px; padding:1px 5px; font-size:11px;}
   .tabsec{display:none;}
   .tabsec.active{display:block;}
@@ -4005,8 +4006,8 @@ function renderMarketStatements(){
       <td class="num">${fmtNum(r.qty,0)}</td>
       <td class="num">${money(r.unitPrice)}</td>
       <td class="num">${money(r.total)}</td>
-      <td class="num">${baseQty!=null ? fmtNum(baseQty,2)+(unit?` ${esc(unit)}`:"") : "—"}</td>
-      <td class="num">${baseUnitPrice!=null ? money(baseUnitPrice)+(unit?`/${esc(unit)}`:"") : "—"}</td>
+      <td class="num">${baseQty!=null ? fmtNum(baseQty,2)+(unit?`<span class="unit-tag" title="${esc(unit)}">${esc(unit)}</span>`:"") : "—"}</td>
+      <td class="num">${baseUnitPrice!=null ? money(baseUnitPrice)+(unit?`<span class="unit-tag" title="${esc(unit)}">/${esc(unit)}</span>`:"") : "—"}</td>
     </tr>`;
   }).join("");
 
@@ -5901,7 +5902,16 @@ function wireTabEvents(){
       // marketProductMap is now a real list (rawCommodity, baseProduct, packSize), not a flat dict — see
       // marketProductMapLookup — so collect both inputs per row (each row's two fields share the same
       // data-mapkey) into one row object per key, rather than one dict entry per input.
+      //
+      // IMPORTANT: the table on screen is filtered (by the search box and/or "Only unmapped"), so
+      // #main only ever contains inputs for the rows currently matching that filter — never all of
+      // them. Seed byKey from the mappings already in DATA first, so anything filtered out of view
+      // right now survives the save untouched; only rows actually rendered get added, changed, or
+      // cleared. Without this seed, saving while a search term (or "Only unmapped") was active wiped
+      // out every mapping not currently on screen — reported by Shane as mapped products "coming back
+      // as unmapped" after a save.
       const byKey = new Map();
+      (DATA.marketProductMap||[]).forEach(r=> r.rawCommodity && byKey.set(r.rawCommodity, Object.assign({}, r)));
       document.querySelectorAll("#main [data-mapkey]").forEach(inp=>{
         const key = inp.dataset.mapkey; // "<MARKET>::<raw commodity>" — see marketMapKey
         const field = inp.dataset.mapfield;
