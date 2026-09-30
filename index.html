@@ -3903,10 +3903,37 @@ function renderSageImport(){
 // Product Mapping for linking a raw commodity string to a real Base Product.
 
 // Namespaces a raw market commodity/pallet-type string by which market it came from, since the same
-// literal text from two different markets is not the same thing — used everywhere DATA.marketProductMap
-// is read or written (must match the "<MARKET>::<raw>" convention MarketStatementImport.gs and Code.gs
-// use for the same dictionary).
+// literal text from two different markets is not the same thing — used everywhere a marketProductMap
+// row is looked up or written (must match the "<MARKET>::<raw>" convention MarketStatementImport.gs and
+// Code.gs use for the same rawCommodity key).
 function marketMapKey(market, raw){ return (market||"Unknown market") + "::" + raw; }
+
+// marketProductMap moved from a flat "raw -> Base Product name" dict to a real list (rawCommodity,
+// baseProduct, packSize) — see its LIST_SHEETS comment in Code.gs — so this builds the same kind of
+// fast key->row lookup a dict gave for free. packSize (Shane's ask, 30 Sep 2026: "products are bought
+// in pack and sometimes in box etc.") is how many of the Base Product's OWN procurement unit (whatever
+// Item Setup already says it's held/costed in — see procurementUnitForBaseProduct below) one raw pack
+// actually is — e.g. "ONIONS,10KG POCKE,..." -> Base Product "Onions", packSize 10, because Onions'
+// own procurement unit (from Item Setup) is "kg". Deliberately NOT a second, separate conversion
+// concept: it reuses whatever unit Item Setup already established for that Base Product, it just fills
+// in the one number Item Setup was never asked to hold — how big THIS particular market pack is in that
+// unit — since the same Base Product can (and does) show up in more than one pack size across raw
+// commodity variants, so the number has to live per-mapping, not on the Base Product itself.
+function marketProductMapLookup(){
+  const map = new Map();
+  (DATA.marketProductMap||[]).forEach(r=> r.rawCommodity && map.set(r.rawCommodity, r));
+  return map;
+}
+
+// First Item Setup row for a Base Product tells us what unit it's actually procured/costed in (e.g.
+// "kg", "each") — reused here purely for display, so a pack-size number always shows next to the unit
+// it's counted in rather than a bare, ambiguous figure. Blank if the Base Product isn't set up yet, or
+// has no procurement unit recorded.
+function procurementUnitForBaseProduct(baseProduct){
+  if(!baseProduct) return "";
+  const it = (DATA.itemSetup||[]).find(x=> x.baseProduct===baseProduct && x.procurementUnit);
+  return it ? it.procurementUnit : "";
+}
 
 function distinctMarketStatementDates(){
   const set = new Set();
@@ -3957,17 +3984,29 @@ function renderMarketStatements(){
   const dayPallets = marketStatementSelectedDate ? (DATA.palletLedger||[]).filter(r=> r.statementDate===marketStatementSelectedDate) : [];
   const dayTotal = round2(dayLines.reduce((s,r)=> s + (Number(r.total)||0), 0));
 
+  const mapLookup = marketProductMapLookup();
   const lineRows = dayLines.map(r=>{
-    const mapped = (DATA.marketProductMap||{})[marketMapKey(r.market, r.commodity)];
+    const mapping = mapLookup.get(marketMapKey(r.market, r.commodity));
+    const baseProduct = mapping && mapping.baseProduct;
+    const packSize = mapping && mapping.packSize!=null && mapping.packSize!=="" ? Number(mapping.packSize) : null;
+    const unit = baseProduct ? procurementUnitForBaseProduct(baseProduct) : "";
+    const baseQty = (packSize && r.qty!=null) ? Number(r.qty)*packSize : null;
+    const baseUnitPrice = (packSize && r.unitPrice!=null) ? Number(r.unitPrice)/packSize : null;
+    let productCell;
+    if(!baseProduct) productCell = `<span class="helptext">${esc(r.commodity)}</span> ${chip("unmapped","warn")}`;
+    else if(!packSize) productCell = `${esc(baseProduct)} ${chip("no pack size","warn")}`;
+    else productCell = esc(baseProduct);
     return `
     <tr>
       <td>${chip(r.market||"—","neutral")}</td>
       <td class="helptext">${esc(r.invoice||"—")}</td>
       <td>${esc(r.agent)}</td>
-      <td>${mapped ? esc(mapped) : `<span class="helptext">${esc(r.commodity)}</span> ${chip("unmapped","warn")}`}</td>
+      <td>${productCell}</td>
       <td class="num">${fmtNum(r.qty,0)}</td>
       <td class="num">${money(r.unitPrice)}</td>
       <td class="num">${money(r.total)}</td>
+      <td class="num">${baseQty!=null ? fmtNum(baseQty,2)+(unit?` ${esc(unit)}`:"") : "—"}</td>
+      <td class="num">${baseUnitPrice!=null ? money(baseUnitPrice)+(unit?`/${esc(unit)}`:"") : "—"}</td>
     </tr>`;
   }).join("");
 
@@ -3995,7 +4034,11 @@ function renderMarketStatements(){
       <td class="num">${money(t.feesPaid)}</td>
     </tr>`).join("");
 
-  const unmappedCount = dayLines.filter(r=> !(DATA.marketProductMap||{})[marketMapKey(r.market, r.commodity)]).length;
+  const unmappedCount = dayLines.filter(r=> !(mapLookup.get(marketMapKey(r.market, r.commodity))||{}).baseProduct).length;
+  const missingPackSizeCount = dayLines.filter(r=>{
+    const m = mapLookup.get(marketMapKey(r.market, r.commodity));
+    return m && m.baseProduct && (m.packSize==null || m.packSize==="");
+  }).length;
 
   return `
     <div class="pagehead">
@@ -4006,12 +4049,13 @@ function renderMarketStatements(){
     </div>
     ${!dates.length ? `<div class="banner warn">No statements imported yet — check that MarketStatementImport.gs's 5-minute trigger is running and market@dailyfruit.co.za's forwarding is set up.</div>` : ""}
     ${unmappedCount ? `<div class="banner warn">⚠ ${unmappedCount} line${unmappedCount===1?"":"s"} on this date ${unmappedCount===1?"isn't":"aren't"} mapped to a Base Product yet — see Admin &gt; Market Product Mapping.</div>` : ""}
+    ${missingPackSizeCount ? `<div class="banner warn">⚠ ${missingPackSizeCount} line${missingPackSizeCount===1?"":"s"} on this date ${missingPackSizeCount===1?"is":"are"} mapped to a Base Product but ${missingPackSizeCount===1?"has":"have"} no pack size set, so Base qty/price below can't be worked out yet — see Admin &gt; Market Product Mapping.</div>` : ""}
     <div class="card">
-      <div class="cardhead"><div><h3>Purchases — ${esc(marketStatementSelectedDate||"—")}</h3><div class="desc">${dayLines.length} line(s), total R${fmtNum(dayTotal,2)}.</div></div></div>
+      <div class="cardhead"><div><h3>Purchases — ${esc(marketStatementSelectedDate||"—")}</h3><div class="desc">${dayLines.length} line(s), total R${fmtNum(dayTotal,2)}. "Base qty"/"Base unit price" convert each line's raw market pack into the Base Product's own procurement unit, once it's mapped with a pack size (Admin &gt; Market Product Mapping) — the raw columns are always the market statement's own real figures.</div></div></div>
       <div class="cardbody" style="padding:0;">
         <div class="tablewrap" style="border:none;border-radius:0;"><table>
-          <thead><tr><th>Market</th><th>Invoice</th><th>Agent</th><th>Product</th><th class="num">Qty</th><th class="num">Unit price</th><th class="num">Total</th></tr></thead>
-          <tbody>${lineRows || `<tr><td colspan="7" class="empty">No purchase lines for this date.</td></tr>`}</tbody>
+          <thead><tr><th>Market</th><th>Invoice</th><th>Agent</th><th>Product</th><th class="num">Qty</th><th class="num">Unit price</th><th class="num">Total</th><th class="num">Base qty</th><th class="num">Base unit price</th></tr></thead>
+          <tbody>${lineRows || `<tr><td colspan="9" class="empty">No purchase lines for this date.</td></tr>`}</tbody>
         </table></div>
       </div>
     </div>
@@ -4475,7 +4519,12 @@ function renderUsers(){
 // POCKE,*,1,L,*,*") to this app's real Base Products himself, in-app — replacing the external Google
 // Sheet mapping the first version of this feature used. A blank mapping means "not yet mapped"; nothing
 // on Market Statements or (eventually) Purchase Costs treats a raw commodity as usable until it's
-// mapped here. Saved as a normal DICT_SHEETS full save (like Base Product Categories) — see persist().
+// mapped here.
+// Extended 30 Sep 2026 (Shane's ask: "sometimes products are bought in pack and sometimes in box etc.
+// ... then it can calc the base product price") with a per-mapping pack size, so marketProductMap moved
+// from a flat "raw -> Base Product name" dict to a real list (rawCommodity, baseProduct, packSize) — see
+// its LIST_SHEETS comment in Code.gs and marketProductMapLookup above. Saved as a normal LIST_SHEETS
+// changed-keys save (like MarketStatementLines) — see persist().
 function distinctRawMarketCommodities(){
   const seen = new Map(); // "<MARKET>::<raw>" -> {market, commodity, count, lastDate, lastUnitPrice}
   (DATA.marketStatementLines||[]).forEach(r=>{
@@ -4504,33 +4553,47 @@ function describeRawCommodity(raw){
 function renderMarketMapping(){
   const baseProducts = distinctBaseProducts();
   const search = marketMappingSearch.trim().toLowerCase();
+  const mapLookup = marketProductMapLookup();
   let commodities = distinctRawMarketCommodities();
-  if(marketMappingOnlyUnmapped) commodities = commodities.filter(c=> !(DATA.marketProductMap||{})[marketMapKey(c.market, c.commodity)]);
+  if(marketMappingOnlyUnmapped) commodities = commodities.filter(c=> !(mapLookup.get(marketMapKey(c.market, c.commodity))||{}).baseProduct);
   if(search) commodities = commodities.filter(c=> c.commodity.toLowerCase().includes(search) || describeRawCommodity(c.commodity).toLowerCase().includes(search) || (c.market||"").toLowerCase().includes(search));
   commodities.sort((a,b)=> (a.market||"").localeCompare(b.market||"") || describeRawCommodity(a.commodity).localeCompare(describeRawCommodity(b.commodity)));
 
-  const totalUnmapped = distinctRawMarketCommodities().filter(c=> !(DATA.marketProductMap||{})[marketMapKey(c.market, c.commodity)]).length;
+  const allCommodities = distinctRawMarketCommodities();
+  const totalUnmapped = allCommodities.filter(c=> !(mapLookup.get(marketMapKey(c.market, c.commodity))||{}).baseProduct).length;
+  const totalMissingPackSize = allCommodities.filter(c=>{
+    const m = mapLookup.get(marketMapKey(c.market, c.commodity));
+    return m && m.baseProduct && (m.packSize==null || m.packSize==="");
+  }).length;
 
   const rows = commodities.map((c,i)=>{
     const key = marketMapKey(c.market, c.commodity);
-    const mapped = (DATA.marketProductMap||{})[key] || "";
+    const m = mapLookup.get(key) || {};
+    const mappedProduct = m.baseProduct || "";
+    const packSize = m.packSize!=null ? m.packSize : "";
+    const unit = mappedProduct ? procurementUnitForBaseProduct(mappedProduct) : "";
     return `
     <tr>
       <td>${chip(c.market||"—","neutral")}</td>
       <td>${esc(describeRawCommodity(c.commodity))}<div class="helptext">${esc(c.commodity)}</div></td>
       <td class="helptext">${c.count} line(s), last ${esc(c.lastDate||"—")}${c.lastUnitPrice!=null ? `, ${money(c.lastUnitPrice)}` : ""}</td>
-      <td><input class="rowinput" data-mapping-idx="${i}" data-mapkey="${esc(key)}" list="baseProductsDL" value="${esc(mapped)}" placeholder="Not mapped yet"></td>
+      <td><input class="rowinput" data-mapping-idx="${i}" data-mapkey="${esc(key)}" data-mapfield="baseProduct" list="baseProductsDL" value="${esc(mappedProduct)}" placeholder="Not mapped yet"></td>
+      <td>
+        <input class="rowinput num" data-mapping-idx="${i}" data-mapkey="${esc(key)}" data-mapfield="packSize" type="number" step="any" min="0" style="max-width:110px;" value="${esc(packSize)}" placeholder="e.g. 10">
+        ${mappedProduct ? `<div class="helptext">${unit ? `in ${esc(unit)}` : "set a procurement unit on this Base Product in Item Setup"}</div>` : `<div class="helptext">map a Base Product first</div>`}
+      </td>
     </tr>`;
   }).join("");
 
   return `
     <div class="pagehead">
-      <div><h2>Market Product Mapping</h2><p>Links each market's raw commodity text to your real Base Products, so Market Statements (and, later, Purchase Costs) know what was actually bought. Two markets feed this today — JHB and Tshwane — mapped separately, since the same commodity name from a different market isn't the same mapping. A blank row hasn't been mapped yet — nothing uses it until it is.</p></div>
+      <div><h2>Market Product Mapping</h2><p>Links each market's raw commodity text to your real Base Products, so Market Statements (and, later, Purchase Costs) know what was actually bought. Two markets feed this today — JHB and Tshwane — mapped separately, since the same commodity name from a different market isn't the same mapping. Pack size is how many of the Base Product's own procurement unit (set in Item Setup) one of these raw packs actually is — e.g. Onions bought as "10KG POCKE" gets pack size 10, since Onions are held in kg — so the same Base Product bought as a pack one day and a box another can still be compared and costed on the same footing. A blank Base Product hasn't been mapped yet; a blank pack size just means Base qty/price can't be worked out for it yet — nothing uses either until both are set.</p></div>
       <div class="actions">
         <button class="btn primary" id="saveMarketMappingBtn">Save mapping</button>
       </div>
     </div>
     ${totalUnmapped ? `<div class="banner warn">⚠ ${totalUnmapped} raw commodity name${totalUnmapped===1?"":"s"} not mapped yet.</div>` : `<div class="banner good">Everything seen so far is mapped.</div>`}
+    ${totalMissingPackSize ? `<div class="banner warn">⚠ ${totalMissingPackSize} mapped commodity name${totalMissingPackSize===1?"":"s"} ${totalMissingPackSize===1?"has":"have"} no pack size set yet — its Base qty/price won't show on Market Statements until it does.</div>` : ""}
     <div class="card">
       <div class="cardhead">
         <div class="formgrid" style="flex:1;">
@@ -4540,8 +4603,8 @@ function renderMarketMapping(){
       </div>
       <div class="cardbody" style="padding:0;">
         <div class="tablewrap" style="border:none;border-radius:0;"><table>
-          <thead><tr><th>Market</th><th>Market commodity</th><th>Seen</th><th>Maps to Base Product</th></tr></thead>
-          <tbody>${rows || `<tr><td colspan="4" class="empty">${marketMappingOnlyUnmapped && totalUnmapped===0 ? "Nothing unmapped." : "No market statement data imported yet."}</td></tr>`}</tbody>
+          <thead><tr><th>Market</th><th>Market commodity</th><th>Seen</th><th>Maps to Base Product</th><th>Pack size</th></tr></thead>
+          <tbody>${rows || `<tr><td colspan="5" class="empty">${marketMappingOnlyUnmapped && totalUnmapped===0 ? "Nothing unmapped." : "No market statement data imported yet."}</td></tr>`}</tbody>
         </table></div>
       </div>
     </div>
@@ -5835,13 +5898,22 @@ function wireTabEvents(){
     });
     const saveBtn = document.getElementById("saveMarketMappingBtn");
     if(saveBtn) saveBtn.addEventListener("click", ()=>{
-      if(!DATA.marketProductMap) DATA.marketProductMap = {};
+      // marketProductMap is now a real list (rawCommodity, baseProduct, packSize), not a flat dict — see
+      // marketProductMapLookup — so collect both inputs per row (each row's two fields share the same
+      // data-mapkey) into one row object per key, rather than one dict entry per input.
+      const byKey = new Map();
       document.querySelectorAll("#main [data-mapkey]").forEach(inp=>{
         const key = inp.dataset.mapkey; // "<MARKET>::<raw commodity>" — see marketMapKey
+        const field = inp.dataset.mapfield;
+        if(!byKey.has(key)) byKey.set(key, {rawCommodity:key});
+        const row = byKey.get(key);
         const val = inp.value.trim();
-        if(val) DATA.marketProductMap[key] = val;
-        else delete DATA.marketProductMap[key]; // cleared back out — goes back to "not yet mapped"
+        if(field==="packSize") row.packSize = val==="" ? null : Number(val);
+        else row.baseProduct = val;
       });
+      // A row with no Base Product goes back to "not yet mapped" entirely (drop it, same as the old
+      // delete-the-dict-entry behavior) — a pack size with no Base Product means nothing on its own.
+      DATA.marketProductMap = Array.from(byKey.values()).filter(r=> r.baseProduct);
       persist("Mapping saved", ["marketProductMap"]);
     });
   }
