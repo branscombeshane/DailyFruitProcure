@@ -1951,6 +1951,74 @@ function findLikelyDuplicateBaseProducts(){
   DATA.purchaseCosts.forEach(p=> record(p.baseProduct));
   return Object.values(groups).filter(g=>g.length>1).map(g=>g.slice().sort());
 }
+// Every Base Product name that exists ANYWHERE — not just the ones currently used by an Item Setup row
+// (that's distinctBaseProducts() above). A Base Product has no record of its own; it's just whatever
+// text happens to sit in Item Setup's Base Product field, so once an Item Setup row is edited to point
+// somewhere else, the old name can keep right on existing — quietly, as a key in productCycles/
+// productCeilings/baseProductCategories, as the baseProduct on old Purchase Costs/Purchase Issues/Stock
+// Takes rows, as a Market Product Mapping target, or as a key in an archived day's sales demand — with
+// nothing left in Item Setup to say so. Shane's report: "If I change a product in product setup to a
+// new base product we have 2 variants of a product without the ability to delete the other." This is
+// the full list those two variants are drawn from, feeding Manage Base Products (renderManageBaseProducts)
+// below so both the live one and the orphaned one show up and can be merged or cleared out.
+function allKnownBaseProductNames(){
+  const set = new Set();
+  DATA.itemSetup.forEach(it=> it.baseProduct && set.add(it.baseProduct));
+  DATA.purchaseCosts.forEach(p=> p.baseProduct && set.add(p.baseProduct));
+  DATA.purchaseIssues.forEach(p=> p.baseProduct && set.add(p.baseProduct));
+  DATA.stockTakes.forEach(r=> r.baseProduct && set.add(r.baseProduct));
+  Object.keys(DATA.productCycles||{}).forEach(n=> set.add(n));
+  Object.keys(DATA.productCeilings||{}).forEach(n=> set.add(n));
+  Object.keys(DATA.baseProductCategories||{}).forEach(n=> set.add(n));
+  (DATA.marketProductMap||[]).forEach(r=> r.baseProduct && set.add(r.baseProduct));
+  (DATA.salesHistory||[]).forEach(h=>{ if(h.demand) Object.keys(h.demand).forEach(n=> set.add(n)); });
+  return set;
+}
+// How much is actually attached to one Base Product name, across every place that can hold one — used
+// both to describe a row in Manage Base Products and to decide whether plain Delete is safe to offer
+// (see hasHistory below: Delete only ever clears settings/mappings, never real transactional records —
+// anything with history has to go through Merge instead, so nothing financial is ever silently erased).
+function baseProductUsageStats(name){
+  const activeItems = DATA.itemSetup.filter(it=>it.baseProduct===name).length;
+  const purchaseCount = DATA.purchaseCosts.filter(p=>p.baseProduct===name).length;
+  const issueCount = DATA.purchaseIssues.filter(p=>p.baseProduct===name).length;
+  const stockTakeCount = DATA.stockTakes.filter(r=>r.baseProduct===name).length;
+  const salesDays = (DATA.salesHistory||[]).filter(h=> h.demand && Object.prototype.hasOwnProperty.call(h.demand, name)).length;
+  const mapCount = (DATA.marketProductMap||[]).filter(r=>r.baseProduct===name).length;
+  const hasHistory = purchaseCount>0 || issueCount>0 || stockTakeCount>0 || salesDays>0;
+  return {activeItems, purchaseCount, issueCount, stockTakeCount, salesDays, mapCount, hasHistory};
+}
+// Moves everything recorded under one Base Product name onto another — used by Manage Base Products'
+// "Merge into…" action. Repoints every Item Setup row, purchase/issue/stock-take record and Market
+// Product Mapping entry; for the per-product settings dicts the target's own value wins if it already
+// has one (so merging a stray duplicate into the real product never clobbers a deliberate override),
+// otherwise the source's value carries over so nothing is silently lost. Sales history demand is the one
+// place both names can legitimately hold a real, independent number for the very same day (two spellings
+// both logged real sales) — those get added together rather than one replacing the other.
+function mergeBaseProduct_(source, target){
+  DATA.itemSetup.forEach(it=>{ if(it.baseProduct===source) it.baseProduct = target; });
+  DATA.purchaseCosts.forEach(p=>{ if(p.baseProduct===source) p.baseProduct = target; });
+  DATA.purchaseIssues.forEach(p=>{ if(p.baseProduct===source) p.baseProduct = target; });
+  DATA.stockTakes.forEach(r=>{ if(r.baseProduct===source) r.baseProduct = target; });
+  (DATA.marketProductMap||[]).forEach(r=>{ if(r.baseProduct===source) r.baseProduct = target; });
+  if(DATA.productCycles[source]!==undefined){
+    if(DATA.productCycles[target]===undefined || DATA.productCycles[target]===null) DATA.productCycles[target] = DATA.productCycles[source];
+    delete DATA.productCycles[source];
+  }
+  if(DATA.productCeilings[source]!==undefined){
+    if(DATA.productCeilings[target]===undefined || DATA.productCeilings[target]===null) DATA.productCeilings[target] = DATA.productCeilings[source];
+    delete DATA.productCeilings[source];
+  }
+  if(DATA.baseProductCategories[source]!==undefined){
+    if(!DATA.baseProductCategories[target]) DATA.baseProductCategories[target] = DATA.baseProductCategories[source];
+    delete DATA.baseProductCategories[source];
+  }
+  (DATA.salesHistory||[]).forEach(h=>{
+    if(!h.demand || !Object.prototype.hasOwnProperty.call(h.demand, source)) return;
+    h.demand[target] = (Number(h.demand[target])||0) + (Number(h.demand[source])||0);
+    delete h.demand[source];
+  });
+}
 function categoryFor(baseProduct){
   if(!baseProduct) return "";
   return DATA.baseProductCategories[baseProduct] || "";
@@ -2015,6 +2083,56 @@ function renderManageCategories(){
         <div class="tablewrap"><table>
           <thead><tr><th>Category</th><th>Hidden from Shopping List / Quick Buy</th><th></th></tr></thead>
           <tbody>${rows || `<tr><td colspan="3" class="empty">No categories yet.</td></tr>`}</tbody>
+        </table></div>
+      </div>
+    </div>`;
+}
+// Lives on Item Setup, right alongside Manage Categories, for the same reason: this is where Base
+// Products are actually created and renamed, so cleaning them up belongs here too. Lists every name
+// allKnownBaseProductNames() finds anywhere — both the ones currently live in Item Setup and any
+// orphaned leftovers from an old rename/typo — with two self-saving actions per row: Merge folds one
+// name's history into another (see mergeBaseProduct_), Delete clears a name that has nothing of
+// substance attached (only ever enabled once hasHistory is false, so real purchase/stock/sales records
+// can never be destroyed this way — merge is the only path for those).
+function renderManageBaseProducts(){
+  const names = Array.from(allKnownBaseProductNames()).sort();
+  const activeSet = new Set(distinctBaseProducts());
+  const rows = names.map(name=>{
+    const stats = baseProductUsageStats(name);
+    const isActive = activeSet.has(name);
+    const statusHtml = isActive
+      ? chip(`Active — ${stats.activeItems} Item Setup row${stats.activeItems===1?"":"s"}`, "good")
+      : chip("Orphaned — no Item Setup row", "warn");
+    const histParts = [];
+    if(stats.purchaseCount) histParts.push(`${stats.purchaseCount} purchase${stats.purchaseCount===1?"":"s"}`);
+    if(stats.issueCount) histParts.push(`${stats.issueCount} unable-to-buy log${stats.issueCount===1?"":"s"}`);
+    if(stats.stockTakeCount) histParts.push(`${stats.stockTakeCount} stock take${stats.stockTakeCount===1?"":"s"}`);
+    if(stats.salesDays) histParts.push(`${stats.salesDays} day${stats.salesDays===1?"":"s"} of sales history`);
+    if(stats.mapCount) histParts.push(`${stats.mapCount} market mapping${stats.mapCount===1?"":"s"}`);
+    const histHtml = histParts.length ? esc(histParts.join(", ")) : "No history";
+    const canDelete = !isActive && !stats.hasHistory;
+    const delTitle = isActive
+      ? "Still used by an Item Setup row — change that row's Base Product (or merge) first."
+      : "Has purchase, stock take or sales history attached — merge it into the correct Base Product instead, so that history isn't lost.";
+    const delBtn = canDelete
+      ? `<button class="delbtn" data-bpdelete="${esc(name)}" title="Delete base product">✕</button>`
+      : `<button class="delbtn" disabled title="${esc(delTitle)}" style="opacity:0.35;cursor:not-allowed;">✕</button>`;
+    return `
+    <tr>
+      <td style="max-width:220px;">${esc(name)}</td>
+      <td>${statusHtml}</td>
+      <td class="helptext">${histHtml}</td>
+      <td><div style="display:flex;gap:6px;"><input class="rowinput" data-bpmerge-input="${esc(name)}" list="baseProductsDL" placeholder="Merge into…" style="min-width:150px;"><button class="btn small" data-bpmerge-btn="${esc(name)}">Merge</button></div></td>
+      <td>${delBtn}</td>
+    </tr>`;
+  }).join("");
+  return `
+    <div class="card">
+      <div class="cardhead"><div><h3>Manage base products</h3><div class="desc">Every Base Product name found anywhere — Item Setup, Purchase Costs, Stock Takes, Market Product Mapping and per-product settings. "Orphaned" means no Item Setup row uses it any more (e.g. after fixing a typo or consolidating a duplicate there) — <strong>merge</strong> it into the correct Base Product to bring any history along with it, or <strong>delete</strong> it if it's just a leftover with nothing attached. Both actions save immediately.</div></div></div>
+      <div class="cardbody">
+        <div class="tablewrap"><table>
+          <thead><tr><th>Base product</th><th>Status</th><th>History</th><th>Merge into…</th><th></th></tr></thead>
+          <tbody>${rows || `<tr><td colspan="5" class="empty">No base products yet — add some above.</td></tr>`}</tbody>
         </table></div>
       </div>
     </div>`;
@@ -3349,6 +3467,7 @@ function renderItemSetup(){
       </div>
     </div>
     ${renderManageCategories()}
+    ${renderManageBaseProducts()}
     <div class="card">
       <div class="cardhead">
         <div><h3>Items</h3><div class="desc">Edit the input columns, then Save changes once. Category applies to every variant of that Base Product. For a Product Mix (assembled from other stock, not bought directly), set Category to "Mixes" — Base Product, Procurement Unit and Qty per Unit don't apply and blank out automatically. Tick Vatable for a product that carries standard-rate VAT (most fresh produce is zero-rated, so this stays unticked by default) — feeds the VAT Type columns on the Selling Prices Sage CSV export.</div></div>
@@ -5506,6 +5625,40 @@ function wireTabEvents(){
         });
         delete DATA.categoryBuffers[name];
         persist("Deleted category " + name, ["categories","itemSetup","baseProductCategories","categoryBuffers"]);
+      });
+    });
+    // Manage base products (see renderManageBaseProducts/mergeBaseProduct_ above). Each action saves
+    // itself immediately, same convention as Manage Categories just above — a merge or delete here
+    // reaches well beyond Item Setup (Purchase Costs, Stock Takes, Market Product Mapping, sales
+    // history), so it shouldn't be sitting unsaved alongside an unrelated in-progress Item Setup edit.
+    document.querySelectorAll("[data-bpmerge-btn]").forEach(btn=>{
+      btn.addEventListener("click", ()=>{
+        const source = btn.dataset.bpmergeBtn;
+        const input = document.querySelector(`[data-bpmerge-input="${CSS.escape(source)}"]`);
+        const typed = (input.value||"").trim();
+        if(!typed){ toast("Type the Base Product to merge into"); return; }
+        if(typed===source){ toast("That's the same Base Product — nothing to merge"); return; }
+        const known = allKnownBaseProductNames();
+        let target = known.has(typed) ? typed : null;
+        if(!target){
+          const canonical = Array.from(known).find(n=> n.toLowerCase()===typed.toLowerCase());
+          if(canonical) target = canonical;
+        }
+        if(!target){ toast(`"${typed}" isn't an existing Base Product — pick one from the list, or add/fix it in Item Setup first.`); return; }
+        if(!confirm(`Merge "${source}" into "${target}"?\n\nEvery Item Setup row, Purchase Cost, Stock Take, Purchase Issue, Market Product Mapping and setting currently under "${source}" moves to "${target}". This can't be undone, and saves immediately.`)) return;
+        mergeBaseProduct_(source, target);
+        persist(`Merged "${source}" into "${target}"`, ["itemSetup","purchaseCosts","purchaseIssues","stockTakes","marketProductMap","productCycles","productCeilings","baseProductCategories","salesHistory"]);
+      });
+    });
+    document.querySelectorAll("[data-bpdelete]").forEach(btn=>{
+      btn.addEventListener("click", ()=>{
+        const name = btn.dataset.bpdelete;
+        if(!confirm(`Delete base product "${name}"?\n\nIt isn't used by any Item Setup row and has no purchase, stock take or sales history, so this just clears any leftover cycle/ceiling/category settings. Any Market Product Mapping row pointing to it goes back to unmapped rather than disappearing. This saves immediately.`)) return;
+        delete DATA.productCycles[name];
+        delete DATA.productCeilings[name];
+        delete DATA.baseProductCategories[name];
+        (DATA.marketProductMap||[]).forEach(r=>{ if(r.baseProduct===name) r.baseProduct = ""; });
+        persist(`Deleted base product "${name}"`, ["productCycles","productCeilings","baseProductCategories","marketProductMap"]);
       });
     });
   }
