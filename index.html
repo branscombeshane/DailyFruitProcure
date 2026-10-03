@@ -453,9 +453,9 @@ let saveConflict = null;
 // "Newer data is available" — a DIFFERENT situation from saveConflict above (which means a save WE
 // tried was rejected). This means the background staleness poll (see checkForUpdates) noticed the
 // backend has moved on since this tab loaded, before we've tried to save anything ourselves. On a
-// read-focused tab with nothing unsaved sitting in the DOM (see SAFE_AUTO_REFRESH_TABS) that's handled
-// silently — DATA just gets swapped out and re-rendered; this flag and its banner are only for tabs
-// where a silent swap could wipe someone's in-progress typing.
+// page with nothing unsaved sitting in the DOM (see hasUnsavedInlineEdit) that's handled silently —
+// DATA just gets swapped out and re-rendered; this flag and its banner are only for when a silent swap
+// could wipe someone's in-progress typing.
 let staleDataAvailable = false;
 let lastKnownDataVersion = null; // DATA.dataVersion as of this tab's last successful load/refresh/save; compared against the server's on every poll
 let dataRefreshInFlight = false; // guards against overlapping silent refreshes if a slow one is still in flight when the next poll fires
@@ -641,33 +641,18 @@ const ROLE_TABS = {
   market: ["quickbuy"],
 };
 
-// Tabs where a background data refresh can safely swap DATA and re-render without ever wiping typing
-// that's only ever lived in the DOM: Shopping List, Quick Buy and the Shopping List Archive have
-// nothing that survives solely as an uncommitted input value — and neither does "home" (the landing
-// Dashboard), which is pure summary with no inputs of its own at all, just links into other tabs.
-// Receiving and Purchase (added later, see hasUnsavedInlineEdit below) both DO have uncommitted-input
-// risk — Receiving's pending-delivery rows carry their own received-qty/received-cost inputs with no
-// edit-mode toggle, and Purchase's "add a line" compose fields aren't tracked in JS state either — but
-// unlike the tabs excluded below, exactly which inputs matter is a short, fixed list that's cheap to
-// check directly, so hasUnsavedInlineEdit() does that instead of blanket-excluding either tab; a refresh
-// is deferred only while one of those specific fields actually has something typed into it, not just
-// because the tab happens to have inputs at all. Every OTHER tab still gets the banner instead: the
-// "dashboard" tab id (Calculated Holdings — not to be confused with the "home" landing Dashboard above)
-// doubles as its settings screen (cover/buffer/threshold inputs, a "Save settings" button) and Sage CSV
-// carries the category wastage-buffer table added earlier — both have enough scattered, easy-to-add-to
-// inputs that the same one-by-one check isn't worth it — same as the genuinely edit-heavy tabs (Item
-// Setup, Recipes, Item Sales, Stock Take, Users, Backup).
-const SAFE_AUTO_REFRESH_TABS = new Set(["home","shoppinglist","quickbuy","shoppingarchive","receiving","purchase"]);
-
-// Shopping List and Quick Buy have their own inline forms (buy/unable-to-purchase entry) tracked as open
-// Map/Set state; Receiving mixes that (receivingEditing/receivingNotReceivedEditing) with a few specific
-// DOM inputs that were never wired to a JS variable at all (see the comment on SAFE_AUTO_REFRESH_TABS
-// above) — checked directly by id/class since there's nowhere else their live value exists. A silent
-// refresh is deferred whenever any of this is true; the next poll just tries again. Purchase Costs has
-// nothing of its own to protect here — since the manual "New purchase entry" draft form was removed
-// (Shane's call: everything now comes in through Receiving/Quick Buy/Shopping List instead), the only
-// things left on that page are the date filter (committed instantly) and a delete button (immediate),
-// neither of which a silent refresh could ever wipe.
+// Whether a background data refresh can safely swap DATA and re-render without ever wiping typing
+// that's only ever lived in the DOM. This used to be a fixed allowlist of tabs (SAFE_AUTO_REFRESH_TABS)
+// deemed to have nothing uncommitted in the DOM, with every other tab blanket-excluded to the stale-data
+// banner just for HAVING free-typed inputs at all — Shane's report: that meant most of the app always
+// needed a manual "Reload now" click even when nothing was actually mid-edit, and the banner itself was
+// easy to miss and leave people working on stale numbers. Replaced with a generic, per-field check:
+// every free-typed input/select whose starting value comes from DATA (not already tracked in its own JS
+// variable, like a search/filter box) is stamped with its own starting value as a data-pristine attribute
+// when rendered (see renderDashboard, renderItemSetup, renderSellingPrices, etc.) — hasUnsavedInlineEdit()
+// below just compares each one's live value against that baseline. Nothing is dirty -> every tab can
+// refresh silently; something IS dirty -> only that tab shows the banner, and it clears itself the very
+// next poll once the edit is saved or reverted, since this is re-evaluated every 20s, not just once.
 function hasUnsavedInlineEdit(){
   if(shoppingBuyEditing.size > 0 || shoppingIssueEditing.size > 0 || quickBuySelected !== null) return true;
   if(currentTab==="receiving"){
@@ -677,7 +662,8 @@ function hasUnsavedInlineEdit(){
     // cost as a suggestion (data-default), so a silent refresh re-rendering it would produce that exact
     // same value right back; only a value that DIFFERS from the pre-filled default is an actual edit
     // worth protecting. Without this, any pending order with a known cost would permanently block the
-    // silent refresh on this tab even when nobody's touched anything.
+    // silent refresh on this tab even when nobody's touched anything. (Kept as its own check rather than
+    // data-pristine since the baseline here is a second data-default attribute, not a fixed starting value.)
     for(const el of document.querySelectorAll(".receive-qty, .notreceived-reason")){ if(el.value !== "") return true; }
     for(const el of document.querySelectorAll(".receive-cost")){ if(el.value !== (el.dataset.default||"")) return true; }
     // Fix (Shane's report): the Receiving search box was never checked here, so the 20s silent poll
@@ -689,6 +675,16 @@ function hasUnsavedInlineEdit(){
     // unsaved edit above: defer to the stale-data banner instead of silently swapping underneath them.
     const searchEl = document.getElementById("receivingSearchInput");
     if(searchEl && searchEl.value !== "") return true;
+  }
+  // Generic check for every other tab's free-typed fields — see the comment above this function.
+  // Checkboxes store "true"/"false" strings in data-pristine (there's no text value to compare);
+  // everything else (text/number/select) compares .value directly.
+  const main = document.getElementById("main");
+  if(main){
+    for(const el of main.querySelectorAll("[data-pristine]")){
+      const live = (el.type==="checkbox") ? (el.checked?"true":"false") : el.value;
+      if(live !== el.dataset.pristine) return true;
+    }
   }
   return false;
 }
@@ -1879,7 +1875,7 @@ function renderSaveConflictBanner(message){
 
 // Shown above whichever page is current when the background staleness poll (checkForUpdates) notices
 // the backend has moved on — e.g. another user logged a purchase or saved settings — while this tab is
-// on a page where a silent swap could wipe unsaved typing (see SAFE_AUTO_REFRESH_TABS). Deliberately
+// on a page where a silent swap could wipe unsaved typing (see hasUnsavedInlineEdit). Deliberately
 // styled less alarming than the save-conflict banner above: nothing has been lost or rejected here,
 // it's just a heads-up that what's on screen isn't the latest anymore.
 function renderStaleDataBanner(){
@@ -2079,8 +2075,8 @@ function renderManageCategories(){
     const isBuiltIn = c.name==="Mixes"; // always offered as a ready-made category for Product Mix items — kept out of rename/delete so it can't drift from what the rest of the app expects
     return `
     <tr>
-      <td>${isBuiltIn ? esc(c.name) : `<input class="rowinput" data-catname-input="${esc(c.name)}" value="${esc(c.name)}">`}</td>
-      <td style="text-align:center;"><input type="checkbox" data-cathidden-input="${esc(c.name)}" ${c.hidden?"checked":""}></td>
+      <td>${isBuiltIn ? esc(c.name) : `<input class="rowinput" data-catname-input="${esc(c.name)}" value="${esc(c.name)}" data-pristine="${esc(c.name)}">`}</td>
+      <td style="text-align:center;"><input type="checkbox" data-cathidden-input="${esc(c.name)}" ${c.hidden?"checked":""} data-pristine="${c.hidden?"true":"false"}"></td>
       <td>${isBuiltIn ? `<span class="helptext">built-in</span>` : `<button class="delbtn" data-catdelete="${esc(c.name)}" title="Delete category">✕</button>`}</td>
     </tr>`;
   }).join("");
@@ -2089,7 +2085,7 @@ function renderManageCategories(){
       <div class="cardhead"><div><h3>Manage categories</h3><div class="desc">Rename or delete a category — renaming updates every item using it, deleting moves its items to Uncategorized. Hide a category to leave it out of Shopping List and Quick Buy entirely; it still shows normally everywhere else.</div></div></div>
       <div class="cardbody">
         <div class="formgrid" style="margin-bottom:14px;">
-          <div class="field"><label>New category name</label><input type="text" id="newCategoryName" placeholder="e.g. Herbs"></div>
+          <div class="field"><label>New category name</label><input type="text" id="newCategoryName" placeholder="e.g. Herbs" data-pristine=""></div>
           <div><button class="btn" id="addCategoryBtn">Add category</button></div>
         </div>
         <div class="tablewrap"><table>
@@ -2134,7 +2130,7 @@ function renderManageBaseProducts(){
       <td style="max-width:220px;">${esc(name)}</td>
       <td>${statusHtml}</td>
       <td class="helptext">${histHtml}</td>
-      <td><div style="display:flex;gap:6px;"><input class="rowinput" data-bpmerge-input="${esc(name)}" list="baseProductsDL" placeholder="Merge into…" style="min-width:150px;"><button class="btn small" data-bpmerge-btn="${esc(name)}">Merge</button></div></td>
+      <td><div style="display:flex;gap:6px;"><input class="rowinput" data-bpmerge-input="${esc(name)}" list="baseProductsDL" placeholder="Merge into…" style="min-width:150px;" data-pristine=""><button class="btn small" data-bpmerge-btn="${esc(name)}">Merge</button></div></td>
       <td>${delBtn}</td>
     </tr>`;
   }).join("");
@@ -3335,19 +3331,23 @@ function renderDashboard(){
   const search = dashboardSearch.trim().toLowerCase();
   if(search) rows = rows.filter(r=> String(r.baseProduct||"").toLowerCase().includes(search));
 
-  const tableRows = rows.map(r=>`
+  const tableRows = rows.map(r=>{
+    const cycleVal = DATA.productCycles[r.baseProduct]!==undefined && DATA.productCycles[r.baseProduct]!==null ? DATA.productCycles[r.baseProduct] : "";
+    const ceilingVal = DATA.productCeilings[r.baseProduct]!==undefined && DATA.productCeilings[r.baseProduct]!==null ? DATA.productCeilings[r.baseProduct] : "";
+    return `
     <tr>
       <td>${esc(r.baseProduct)}</td>
       <td>${esc(r.category||"—")}</td>
       <td>${esc(r.procUnit||"—")}</td>
       <td class="num">${r.historyPeriods ? (r.historyPeriods+" day"+(r.historyPeriods===1?"":"s")) : "—"}</td>
       <td class="num">${r.avgDemand!==null ? fmtNum(r.avgDemand) : "—"}</td>
-      <td><input class="rowinput num" data-cycle-input="${esc(r.baseProduct)}" value="${DATA.productCycles[r.baseProduct]!==undefined && DATA.productCycles[r.baseProduct]!==null ? DATA.productCycles[r.baseProduct] : ""}" placeholder="${fmtNum(cm,2)}" style="max-width:80px;"></td>
-      <td><input class="rowinput num" data-ceiling-input="${esc(r.baseProduct)}" value="${DATA.productCeilings[r.baseProduct]!==undefined && DATA.productCeilings[r.baseProduct]!==null ? DATA.productCeilings[r.baseProduct] : ""}" placeholder="none" style="max-width:80px;"></td>
+      <td><input class="rowinput num" data-cycle-input="${esc(r.baseProduct)}" value="${cycleVal}" data-pristine="${esc(cycleVal)}" placeholder="${fmtNum(cm,2)}" style="max-width:80px;"></td>
+      <td><input class="rowinput num" data-ceiling-input="${esc(r.baseProduct)}" value="${ceilingVal}" data-pristine="${esc(ceilingVal)}" placeholder="none" style="max-width:80px;"></td>
       <td class="num" style="font-weight:600;">${r.recommended!==null ? fmtNum(r.recommended,0) : "—"}${r.cappedByCeiling ? ` <span class="helptext" title="Capped by shelf-life max hold">⚠</span>` : ""}</td>
       <td>${statusChip(r.consistency)}</td>
       <td>${statusChip(r.missing)}</td>
-    </tr>`).join("");
+    </tr>`;
+  }).join("");
 
   const historyRows = DATA.salesHistory.slice().sort((a,b)=> b.date.localeCompare(a.date)).map(h=>`
     <div class="quickbuylogrow">
@@ -3377,9 +3377,9 @@ function renderDashboard(){
       <div class="cardhead"><div><h3>Default cover settings</h3><div class="desc">The fallback used whenever a category (safety buffer) or product (cycle length, below) doesn't have its own override.</div></div></div>
       <div class="cardbody">
         <div class="formgrid">
-          <div class="field"><label>Default cycle length (x avg daily demand)</label><input type="number" step="0.1" id="coverMultiplier" value="${cm}"></div>
-          <div class="field"><label>Default safety buffer %</label><input type="number" step="1" id="safetyBufferPct" value="${round2(sb*100)}"></div>
-          <div class="field"><label>Sales history window (days)</label><input type="number" step="1" min="7" id="historyWindowDays" value="${hw}"></div>
+          <div class="field"><label>Default cycle length (x avg daily demand)</label><input type="number" step="0.1" id="coverMultiplier" value="${cm}" data-pristine="${esc(cm)}"></div>
+          <div class="field"><label>Default safety buffer %</label><input type="number" step="1" id="safetyBufferPct" value="${round2(sb*100)}" data-pristine="${esc(round2(sb*100))}"></div>
+          <div class="field"><label>Sales history window (days)</label><input type="number" step="1" min="7" id="historyWindowDays" value="${hw}" data-pristine="${esc(hw)}"></div>
         </div>
         <div class="helptext" style="margin-top:10px;">The history window controls how many of the most recent archived upload-days feed the rolling average and spread behind every recommendation. Shorten it so a seasonal turn shows up faster (at the cost of noisier day-to-day numbers); lengthen it to smooth things out. Currently ${historyPeriods} day${historyPeriods===1?"":"s"} archived in total, so a window past that has no extra effect yet.</div>
       </div>
@@ -3388,9 +3388,9 @@ function renderDashboard(){
       <div class="cardhead"><div><h3>Shopping List thresholds</h3><div class="desc">Stock at or below the critical % of target is flagged Critical; at or above the overstock % is flagged Overstocked; at or above the "good until" % is OK. Anything in between is Consider Buying. Set "good until" below 100% for stock that's genuinely fine even though it's under target — e.g. 75% on hand that'll comfortably last until tomorrow's delivery.</div></div></div>
       <div class="cardbody">
         <div class="formgrid">
-          <div class="field"><label>Critical threshold (% of target)</label><input type="number" step="1" min="0" id="shoppingCriticalPct" value="${round2(critPct*100)}"></div>
-          <div class="field"><label>Good until (% of target)</label><input type="number" step="1" min="0" max="100" id="shoppingBuyPct" value="${round2(buyPct*100)}"></div>
-          <div class="field"><label>Overstock threshold (% of target)</label><input type="number" step="1" min="100" id="shoppingOverstockPct" value="${round2(overPct*100)}"></div>
+          <div class="field"><label>Critical threshold (% of target)</label><input type="number" step="1" min="0" id="shoppingCriticalPct" value="${round2(critPct*100)}" data-pristine="${esc(round2(critPct*100))}"></div>
+          <div class="field"><label>Good until (% of target)</label><input type="number" step="1" min="0" max="100" id="shoppingBuyPct" value="${round2(buyPct*100)}" data-pristine="${esc(round2(buyPct*100))}"></div>
+          <div class="field"><label>Overstock threshold (% of target)</label><input type="number" step="1" min="100" id="shoppingOverstockPct" value="${round2(overPct*100)}" data-pristine="${esc(round2(overPct*100))}"></div>
         </div>
         <div class="helptext" style="margin-top:10px;">Stock at or above this % of target counts as OK ("good until") instead of Consider Buying — defaults to 100%, meaning anything below target is Consider Buying. Lower it if being partway to target is still comfortably enough stock until the next delivery.</div>
       </div>
@@ -3399,7 +3399,7 @@ function renderDashboard(){
       <div class="cardhead"><div><h3>Category safety buffers</h3><div class="desc">How much cushion to hold on top of average demand for each category. Leave blank to use the default above.</div></div></div>
       <div class="cardbody">
         <div class="formgrid">
-          ${categories.map(c=>`<div class="field"><label>${esc(c)} %</label><input class="rowinput num" data-catbuffer-input="${esc(c)}" value="${DATA.categoryBuffers[c]!==undefined && DATA.categoryBuffers[c]!==null ? round2(DATA.categoryBuffers[c]*100) : ""}" placeholder="${fmtNum(sb*100,0)}"></div>`).join("") || `<div class="empty">No categories set up yet.</div>`}
+          ${categories.map(c=>{ const cbVal = DATA.categoryBuffers[c]!==undefined && DATA.categoryBuffers[c]!==null ? round2(DATA.categoryBuffers[c]*100) : ""; return `<div class="field"><label>${esc(c)} %</label><input class="rowinput num" data-catbuffer-input="${esc(c)}" value="${cbVal}" data-pristine="${esc(cbVal)}" placeholder="${fmtNum(sb*100,0)}"></div>`; }).join("") || `<div class="empty">No categories set up yet.</div>`}
         </div>
       </div>
     </div>
@@ -3441,16 +3441,20 @@ function renderItemSetup(){
   const rows = filtered.map(it=>{
     const idx = DATA.itemSetup.indexOf(DATA.itemSetup.find(x=>x.item===it.item));
     const isMix = effectiveCategoryFor(it).trim().toLowerCase()==="mixes";
+    const bpVal = isMix?"":(it.baseProduct||"");
+    const catVal = effectiveCategoryFor(it);
+    const procUnitVal = isMix?"":(it.procurementUnit||"");
+    const convVal = isMix||it.conversionFactor===null||it.conversionFactor===undefined?"":it.conversionFactor;
     return `
     <tr>
       <td style="max-width:260px;">${esc(it.item)}</td>
       <td class="num">${fmtNum(it.combinedQty)}</td>
       <td class="num">${it.recipeQty ? fmtNum(it.recipeQty) : "—"}</td>
-      <td><input class="rowinput" data-field="baseProduct" data-idx="${idx}" value="${isMix?"":esc(it.baseProduct||"")}" list="baseProductsDL" ${isMix?"disabled":""}></td>
-      <td><input class="rowinput" data-field="category" data-idx="${idx}" value="${esc(effectiveCategoryFor(it))}" list="categoriesDL" placeholder="e.g. Veg or Mixes"></td>
-      <td style="text-align:center;"><input type="checkbox" data-field="vatable" data-idx="${idx}" ${it.vatable?"checked":""}></td>
-      <td><input class="rowinput" data-field="procurementUnit" data-idx="${idx}" value="${isMix?"":esc(it.procurementUnit||"")}" ${isMix?"disabled":""}></td>
-      <td><input class="rowinput num" data-field="conversionFactor" data-idx="${idx}" value="${isMix||it.conversionFactor===null||it.conversionFactor===undefined?"":it.conversionFactor}" style="max-width:90px;" ${isMix?"disabled":""}></td>
+      <td><input class="rowinput" data-field="baseProduct" data-idx="${idx}" value="${esc(bpVal)}" data-pristine="${esc(bpVal)}" list="baseProductsDL" ${isMix?"disabled":""}></td>
+      <td><input class="rowinput" data-field="category" data-idx="${idx}" value="${esc(catVal)}" data-pristine="${esc(catVal)}" list="categoriesDL" placeholder="e.g. Veg or Mixes"></td>
+      <td style="text-align:center;"><input type="checkbox" data-field="vatable" data-idx="${idx}" ${it.vatable?"checked":""} data-pristine="${it.vatable?"true":"false"}"/></td>
+      <td><input class="rowinput" data-field="procurementUnit" data-idx="${idx}" value="${esc(procUnitVal)}" data-pristine="${esc(procUnitVal)}" ${isMix?"disabled":""}></td>
+      <td><input class="rowinput num" data-field="conversionFactor" data-idx="${idx}" value="${convVal}" data-pristine="${esc(convVal)}" style="max-width:90px;" ${isMix?"disabled":""}></td>
       <td class="num">${it.rawNeeded!==null ? fmtNum(it.rawNeeded) : "—"}</td>
       <td><button class="delbtn" data-del-item="${idx}" title="Delete item">✕</button></td>
     </tr>`;
@@ -3473,7 +3477,7 @@ function renderItemSetup(){
       </div>
       <div class="cardbody">
         <div class="formgrid">
-          <div class="field"><label>Item (as "CODE - Description - UNIT")</label><input type="text" id="newItemText" placeholder="e.g. STRWKG - Strawberries - KG"></div>
+          <div class="field"><label>Item (as "CODE - Description - UNIT")</label><input type="text" id="newItemText" placeholder="e.g. STRWKG - Strawberries - KG" data-pristine=""></div>
           <div><button class="btn primary" id="addItemRow">Add item</button></div>
         </div>
       </div>
@@ -3517,11 +3521,13 @@ function renderRecipes(){
     if(rec.percent!==null && rec.percent!==undefined && rec.percent!=="" && pctTotal!==undefined){
       pctCheck = Math.abs(pctTotal-1)<0.001 ? "OK - 100%" : ("Check - totals "+Math.round(pctTotal*100)+"%");
     }
+    const pctVal = rec.percent!==null&&rec.percent!==undefined&&rec.percent!==""?round2(rec.percent*100):"";
+    const fixedVal = rec.fixedQty!==null&&rec.fixedQty!==undefined&&rec.fixedQty!==""?rec.fixedQty:"";
     return `<tr>
-      <td><input class="rowinput" data-recidx="${i}" data-field="compositeItem" value="${esc(rec.compositeItem)}" list="itemsDL">${compOk?"":chip("not found","critical")}</td>
-      <td><input class="rowinput" data-recidx="${i}" data-field="ingredientItem" value="${esc(rec.ingredientItem)}" list="itemsDL">${ingOk?"":chip("not found","critical")}</td>
-      <td><input class="rowinput num" data-recidx="${i}" data-field="percent" value="${rec.percent!==null&&rec.percent!==undefined&&rec.percent!==""?round2(rec.percent*100):""}" placeholder="%" style="max-width:80px;"></td>
-      <td><input class="rowinput num" data-recidx="${i}" data-field="fixedQty" value="${rec.fixedQty!==null&&rec.fixedQty!==undefined&&rec.fixedQty!==""?rec.fixedQty:""}" placeholder="qty" style="max-width:90px;"></td>
+      <td><input class="rowinput" data-recidx="${i}" data-field="compositeItem" value="${esc(rec.compositeItem)}" data-pristine="${esc(rec.compositeItem)}" list="itemsDL">${compOk?"":chip("not found","critical")}</td>
+      <td><input class="rowinput" data-recidx="${i}" data-field="ingredientItem" value="${esc(rec.ingredientItem)}" data-pristine="${esc(rec.ingredientItem)}" list="itemsDL">${ingOk?"":chip("not found","critical")}</td>
+      <td><input class="rowinput num" data-recidx="${i}" data-field="percent" value="${pctVal}" data-pristine="${esc(pctVal)}" placeholder="%" style="max-width:80px;"></td>
+      <td><input class="rowinput num" data-recidx="${i}" data-field="fixedQty" value="${fixedVal}" data-pristine="${esc(fixedVal)}" placeholder="qty" style="max-width:90px;"></td>
       <td class="num">${fmtNum(req)}</td>
       <td>${pctCheck==="—"?"—":(pctCheck.startsWith("OK")?chip(pctCheck,"good"):chip(pctCheck,"warn"))}</td>
       <td><button class="delbtn" data-del-recipe="${i}" title="Remove row">✕</button></td>
@@ -3564,10 +3570,10 @@ function renderRecipes(){
       <div class="cardhead"><div><h3>Add an ingredient line</h3><div class="desc">Fill in EITHER % of composite OR fixed qty per unit, not both.</div></div></div>
       <div class="cardbody">
         <div class="formgrid">
-          <div class="field"><label>Composite item (the mix)</label><input type="text" id="newRecComposite" list="itemsDL"></div>
-          <div class="field"><label>Ingredient item (the raw item)</label><input type="text" id="newRecIngredient" list="itemsDL"></div>
-          <div class="field"><label>% of composite</label><input type="number" step="1" id="newRecPercent" placeholder="e.g. 20"></div>
-          <div class="field"><label>OR fixed qty per unit</label><input type="number" step="0.0001" id="newRecFixed" placeholder="e.g. 0.05"></div>
+          <div class="field"><label>Composite item (the mix)</label><input type="text" id="newRecComposite" list="itemsDL" data-pristine=""></div>
+          <div class="field"><label>Ingredient item (the raw item)</label><input type="text" id="newRecIngredient" list="itemsDL" data-pristine=""></div>
+          <div class="field"><label>% of composite</label><input type="number" step="1" id="newRecPercent" placeholder="e.g. 20" data-pristine=""></div>
+          <div class="field"><label>OR fixed qty per unit</label><input type="number" step="0.0001" id="newRecFixed" placeholder="e.g. 0.05" data-pristine=""></div>
           <div><button class="btn primary" id="addRecipeRow">Add line</button></div>
         </div>
       </div>
@@ -3923,7 +3929,7 @@ function renderPriceHistory(){
       <div class="cardhead"><div><h3>Alert threshold</h3><div class="desc">How big a move (either direction) has to be, purchase to purchase, to count as an alert.</div></div></div>
       <div class="cardbody">
         <div class="formgrid">
-          <div class="field"><label>Alert threshold %</label><input type="number" step="1" min="1" id="priceAlertPctInput" value="${round2(alertPct*100)}"></div>
+          <div class="field"><label>Alert threshold %</label><input type="number" step="1" min="1" id="priceAlertPctInput" value="${round2(alertPct*100)}" data-pristine="${round2(alertPct*100)}"></div>
           <div><button class="btn primary" id="savePriceAlertPct">Save</button></div>
         </div>
       </div>
@@ -3986,7 +3992,7 @@ function renderSageImport(){
   }).join("");
 
   const bufferCats = distinctCategories();
-  const bufferFields = bufferCats.map(c=>`<div class="field"><label>${esc(c)} %</label><input class="rowinput num" data-sagebuffer-input="${esc(c)}" value="${DATA.categoryCostBuffers[c]!==undefined && DATA.categoryCostBuffers[c]!==null ? round2(DATA.categoryCostBuffers[c]*100) : ""}" placeholder="0"></div>`).join("");
+  const bufferFields = bufferCats.map(c=>{ const bufVal = DATA.categoryCostBuffers[c]!==undefined && DATA.categoryCostBuffers[c]!==null ? round2(DATA.categoryCostBuffers[c]*100) : ""; return `<div class="field"><label>${esc(c)} %</label><input class="rowinput num" data-sagebuffer-input="${esc(c)}" value="${bufVal}" data-pristine="${esc(bufVal)}" placeholder="0"></div>`; }).join("");
 
   return `
     <div class="pagehead">
@@ -4238,7 +4244,7 @@ function renderSellingPrices(){
   const exportableRows = rows.filter(r=> r.exportPrice!==null);
   const notExportable = rows.length - exportableRows.length;
 
-  const marginFields = categories.map(c=> `<div class="field"><label>${esc(c)} %</label><input class="rowinput num" data-catmargin-input="${esc(c)}" value="${DATA.categoryMarginPct[c]!==undefined && DATA.categoryMarginPct[c]!==null ? round2(DATA.categoryMarginPct[c]*100) : ""}" placeholder="${fmtNum((Number(plan.defaultMarginPct)||0)*100,0)}"></div>`).join("");
+  const marginFields = categories.map(c=>{ const cmVal = DATA.categoryMarginPct[c]!==undefined && DATA.categoryMarginPct[c]!==null ? round2(DATA.categoryMarginPct[c]*100) : ""; return `<div class="field"><label>${esc(c)} %</label><input class="rowinput num" data-catmargin-input="${esc(c)}" value="${cmVal}" data-pristine="${esc(cmVal)}" placeholder="${fmtNum((Number(plan.defaultMarginPct)||0)*100,0)}"></div>`; }).join("");
 
   const trendLabel = (r)=>{
     if(r.costChangePct===null) return `<span class="helptext">not enough trend data yet</span>`;
@@ -4255,6 +4261,9 @@ function renderSellingPrices(){
     const deltaHtml = r.priceDelta===null ? "" :
       r.priceDelta===0 ? `<div class="helptext">matches suggested</div>` :
       `<div class="helptext" style="color:${r.priceDelta>0?'var(--warn)':'var(--good)'};">${r.priceDelta>0?"▲":"▼"} ${money(Math.abs(r.priceDelta))} (${fmtNum(Math.abs(r.priceDeltaPct*100),1)}%) vs suggested</div>`;
+    const itemMarginVal = DATA.itemMarginPct[r.item]!==undefined && DATA.itemMarginPct[r.item]!==null ? round2(DATA.itemMarginPct[r.item]*100) : "";
+    const itemMinPriceVal = DATA.itemMinPrice[r.item]!==undefined && DATA.itemMinPrice[r.item]!==null ? round2(DATA.itemMinPrice[r.item]) : "";
+    const quoteVal = r.suggestedPrice!==null?r.suggestedPrice:(r.currentPrice!==null?r.currentPrice:"");
     return `
     <tr>
       <td style="max-width:240px;">${esc(r.item)}</td>
@@ -4262,10 +4271,10 @@ function renderSellingPrices(){
       <td class="num">${r.latestCost!==null?money(r.latestCost):"—"}</td>
       <td>${trendLabel(r)}</td>
       <td>
-        <input class="rowinput num" data-itemmargin-input="${esc(r.item)}" value="${DATA.itemMarginPct[r.item]!==undefined && DATA.itemMarginPct[r.item]!==null ? round2(DATA.itemMarginPct[r.item]*100) : ""}" placeholder="${fmtNum(r.marginPct*100,0)}" style="max-width:70px;">${marginSourceNote}
+        <input class="rowinput num" data-itemmargin-input="${esc(r.item)}" value="${itemMarginVal}" data-pristine="${esc(itemMarginVal)}" placeholder="${fmtNum(r.marginPct*100,0)}" style="max-width:70px;">${marginSourceNote}
       </td>
       <td>
-        <input class="rowinput num" data-itemminprice-input="${esc(r.item)}" value="${DATA.itemMinPrice[r.item]!==undefined && DATA.itemMinPrice[r.item]!==null ? round2(DATA.itemMinPrice[r.item]) : ""}" placeholder="none" style="max-width:80px;">
+        <input class="rowinput num" data-itemminprice-input="${esc(r.item)}" value="${itemMinPriceVal}" data-pristine="${esc(itemMinPriceVal)}" placeholder="none" style="max-width:80px;">
       </td>
       <td class="num" style="font-weight:600;">${r.suggestedPrice!==null?money(r.suggestedPrice):"—"}${r.priceFloored ? `<div class="helptext" style="color:var(--warn);">held at floor</div>` : ""}</td>
       <td>
@@ -4275,7 +4284,7 @@ function renderSellingPrices(){
       <td>
         ${editing ? `
           <div style="display:flex;align-items:center;gap:4px;white-space:nowrap;">
-            <input type="number" step="0.01" class="pricequote-input" data-pricequote-input="${esc(r.item)}" value="${r.suggestedPrice!==null?r.suggestedPrice:(r.currentPrice!==null?r.currentPrice:"")}" style="width:90px;">
+            <input type="number" step="0.01" class="pricequote-input" data-pricequote-input="${esc(r.item)}" value="${quoteVal}" data-pristine="${esc(quoteVal)}" style="width:90px;">
             <button class="btn primary" data-pricequote-tick="${esc(r.item)}" title="Save" style="padding:2px 10px;font-size:12px;">✓</button>
             <button class="btn" data-pricequote-cancel="${esc(r.item)}" style="padding:2px 6px;font-size:12px;" title="Close without saving">✕</button>
           </div>` : `<button class="btn" data-pricequote-addnew="${esc(r.item)}" style="padding:2px 10px;font-size:12px;white-space:nowrap;">Update price</button>`}
@@ -4323,10 +4332,10 @@ function renderSellingPrices(){
       <div class="cardhead"><div><h3>Target margin settings</h3><div class="desc">Margin is % of selling price (e.g. 35% margin on R10 cost suggests ~R15.38). "Good deal" bumps the margin further whenever the latest cost is down at least the threshold % against the trailing window average — the saving goes partly to margin instead of straight through to price.</div></div><button class="btn primary" id="saveSellingPriceSettings">Save settings</button></div>
       <div class="cardbody">
         <div class="formgrid">
-          <div class="field"><label>Default target margin %</label><input type="number" step="1" min="0" max="90" id="defaultMarginPct" value="${round2((Number(plan.defaultMarginPct)||0)*100)}"></div>
-          <div class="field"><label>Trend window (days)</label><input type="number" step="1" min="3" id="marginTrendWindow" value="${Number(plan.trendWindowDays)||21}"></div>
-          <div class="field"><label>Good deal threshold (% cost drop)</label><input type="number" step="1" min="0" id="goodDealThresholdPct" value="${round2((Number(plan.goodDealThresholdPct)||0)*100)}"></div>
-          <div class="field"><label>Good deal margin bonus %</label><input type="number" step="1" min="0" id="goodDealBonusPct" value="${round2((Number(plan.goodDealBonusPct)||0)*100)}"></div>
+          <div class="field"><label>Default target margin %</label><input type="number" step="1" min="0" max="90" id="defaultMarginPct" value="${round2((Number(plan.defaultMarginPct)||0)*100)}" data-pristine="${round2((Number(plan.defaultMarginPct)||0)*100)}"></div>
+          <div class="field"><label>Trend window (days)</label><input type="number" step="1" min="3" id="marginTrendWindow" value="${Number(plan.trendWindowDays)||21}" data-pristine="${Number(plan.trendWindowDays)||21}"></div>
+          <div class="field"><label>Good deal threshold (% cost drop)</label><input type="number" step="1" min="0" id="goodDealThresholdPct" value="${round2((Number(plan.goodDealThresholdPct)||0)*100)}" data-pristine="${round2((Number(plan.goodDealThresholdPct)||0)*100)}"></div>
+          <div class="field"><label>Good deal margin bonus %</label><input type="number" step="1" min="0" id="goodDealBonusPct" value="${round2((Number(plan.goodDealBonusPct)||0)*100)}" data-pristine="${round2((Number(plan.goodDealBonusPct)||0)*100)}"></div>
         </div>
         <div class="helptext" style="margin-top:10px;">Category overrides below (leave blank to use the default above); each item's row further down can override its category too.</div>
         <div class="formgrid" style="margin-top:10px;">
@@ -4397,9 +4406,10 @@ function renderStockTake(){
     const bps = byCat[stockCategoryFilter].slice().sort();
     const rows = bps.map(bp=>{
       const val = takesForDate[bp];
+      const inputVal = hasValue(val)?val:"";
       return `<tr>
         <td>${esc(bp)}</td>
-        <td><input class="rowinput num" data-stock-bp="${esc(bp)}" value="${hasValue(val)?val:""}" placeholder="0" style="max-width:140px;"></td>
+        <td><input class="rowinput num" data-stock-bp="${esc(bp)}" value="${inputVal}" data-pristine="${esc(inputVal)}" placeholder="0" style="max-width:140px;"></td>
       </tr>`;
     }).join("");
     entryCardHtml = `
@@ -4601,8 +4611,8 @@ function renderUsers(){
     return `
     <tr>
       <td>${esc(u.name)}${isSelf ? ` <span class="helptext">(you)</span>` : ""}</td>
-      <td><select class="rowinput" data-idx="${i}" data-field="role">${roleOptionsFor(u.role)}</select></td>
-      <td><input class="rowinput num" data-idx="${i}" data-field="pin" value="${esc(u.pin)}" style="max-width:110px;"></td>
+      <td><select class="rowinput" data-idx="${i}" data-field="role" data-pristine="${esc(u.role)}">${roleOptionsFor(u.role)}</select></td>
+      <td><input class="rowinput num" data-idx="${i}" data-field="pin" value="${esc(u.pin)}" data-pristine="${esc(u.pin)}" style="max-width:110px;"></td>
       <td><button class="delbtn" data-del-user="${i}" title="Remove user">✕</button></td>
     </tr>`;
   }).join("");
@@ -4615,9 +4625,9 @@ function renderUsers(){
       <div class="cardhead"><div><h3>Add a user</h3></div></div>
       <div class="cardbody">
         <div class="formgrid">
-          <div class="field"><label>Name</label><input type="text" id="newUserName" placeholder="e.g. John"></div>
-          <div class="field"><label>PIN</label><input type="text" inputmode="numeric" id="newUserPin" placeholder="e.g. 1234"></div>
-          <div class="field"><label>Role</label><select id="newUserRole">${roleOptionsFor("procurement")}</select></div>
+          <div class="field"><label>Name</label><input type="text" id="newUserName" placeholder="e.g. John" data-pristine=""></div>
+          <div class="field"><label>PIN</label><input type="text" inputmode="numeric" id="newUserPin" placeholder="e.g. 1234" data-pristine=""></div>
+          <div class="field"><label>Role</label><select id="newUserRole" data-pristine="procurement">${roleOptionsFor("procurement")}</select></div>
           <div><button class="btn" id="addUserBtn">Add user</button></div>
         </div>
       </div>
@@ -4709,9 +4719,9 @@ function renderMarketMapping(){
       <td>${chip(c.market||"—","neutral")}</td>
       <td>${esc(describeRawCommodity(c.commodity))}<div class="helptext">${esc(c.commodity)}</div></td>
       <td class="helptext">${c.count} line(s), last ${esc(c.lastDate||"—")}${c.lastUnitPrice!=null ? `, ${money(c.lastUnitPrice)}` : ""}</td>
-      <td><input class="rowinput" data-mapping-idx="${i}" data-mapkey="${esc(key)}" data-mapfield="baseProduct" list="baseProductsDL" value="${esc(mappedProduct)}" placeholder="Not mapped yet"></td>
+      <td><input class="rowinput" data-mapping-idx="${i}" data-mapkey="${esc(key)}" data-mapfield="baseProduct" list="baseProductsDL" value="${esc(mappedProduct)}" data-pristine="${esc(mappedProduct)}" placeholder="Not mapped yet"></td>
       <td>
-        <input class="rowinput num" data-mapping-idx="${i}" data-mapkey="${esc(key)}" data-mapfield="packSize" type="number" step="any" min="0" style="max-width:110px;" value="${esc(packSize)}" placeholder="e.g. 10">
+        <input class="rowinput num" data-mapping-idx="${i}" data-mapkey="${esc(key)}" data-mapfield="packSize" type="number" step="any" min="0" style="max-width:110px;" value="${esc(packSize)}" data-pristine="${esc(packSize)}" placeholder="e.g. 10">
         ${mappedProduct ? `<div class="helptext">${unit ? `in ${esc(unit)}` : "set a procurement unit on this Base Product in Item Setup"}</div>` : `<div class="helptext">map a Base Product first</div>`}
       </td>
     </tr>`;
@@ -6214,9 +6224,9 @@ async function checkForUpdates(){
 
   if(serverVersion === lastKnownDataVersion) return; // still current, including the both-null case (nothing's ever been saved yet)
 
-  if(SAFE_AUTO_REFRESH_TABS.has(currentTab) && !hasUnsavedInlineEdit()){
-    // Nothing on this tab can be sitting unsaved in the DOM right now — safe to swap DATA out from
-    // under the page and re-render without anyone noticing anything beyond the numbers updating.
+  if(!hasUnsavedInlineEdit()){
+    // Nothing on this tab is sitting unsaved in the DOM right now — safe to swap DATA out from under
+    // the page and re-render without anyone noticing anything beyond the numbers updating.
     dataRefreshInFlight = true;
     try{
       const fresh = await loadData();
@@ -6229,9 +6239,27 @@ async function checkForUpdates(){
     }
     dataRefreshInFlight = false;
   } else {
-    // Either on a tab where a silent swap could wipe unsaved typing, or this safe tab currently has an
-    // inline form open — surface the banner instead and let the person choose when to reload.
+    // Something on this tab is genuinely mid-edit right now — surface the banner instead and let the
+    // person choose when to reload.
     showStaleDataBanner();
+  }
+}
+
+// Shared by the stale-data banner's "Reload now" button and anywhere else that wants fresh DATA right
+// now without a full page reload — a plain location.reload() re-fetches the whole app (HTML/JS/login)
+// just to pick up new rows, which is slower than it needs to be and was Shane's original complaint.
+// Clicking the button is explicit intent to proceed, so this doesn't re-check hasUnsavedInlineEdit()
+// first — same as a manual reload would also discard anything not yet saved.
+async function fastDataRefresh(){
+  try{
+    const fresh = await loadData();
+    DATA = fresh;
+    lastKnownDataVersion = DATA.dataVersion || null;
+    staleDataAvailable = false;
+    render();
+    return true;
+  }catch(e){
+    return false;
   }
 }
 
@@ -6251,7 +6279,12 @@ function showStaleDataBanner(){
   toast("Updated data is available — reload when you can");
   main.insertAdjacentHTML("afterbegin", renderStaleDataBanner());
   const btn = document.getElementById("staleDataReload");
-  if(btn) btn.addEventListener("click", ()=> location.reload());
+  if(btn) btn.addEventListener("click", async ()=>{
+    btn.disabled = true;
+    btn.textContent = "Reloading…";
+    const ok = await fastDataRefresh();
+    if(!ok) location.reload(); // fast path failed for some reason — fall back to the reliable full reload
+  });
 }
 
 async function boot(){
