@@ -930,12 +930,21 @@ function procurementPlanComputed(){
   });
 }
 
-function latestStockTakeMap(){
-  // most recent stock take entry per base product — ISO (YYYY-MM-DD) dates sort lexicographically,
-  // so a plain string comparison is enough to find the latest one.
+// beforeDate: only a stock take dated STRICTLY BEFORE this counts toward "current stock" — ISO
+// (YYYY-MM-DD) dates sort lexicographically, so a plain string comparison finds the latest qualifying
+// one. A count entered the evening of day D is always dated D (the day it was physically taken) but is
+// meant to set that day's CLOSING stock / day D+1's OPENING stock, never a same-day figure for D itself
+// (confirmed with Shane, 3 Oct 2026, after the Shopping List Archive for 2 Oct showed numbers that could
+// only be explained by that same evening's own stock take having already landed before the 9pm snapshot
+// trigger ran — making the 2 Oct archive show 3 Oct's opening position instead of what was actually on
+// hand during 2 Oct's business day). Excluding any stock take dated D or later when computing "current
+// stock for day D" means a count never affects the calendar day it was submitted on — only from the next
+// day onward — matching how it's actually used, with no change needed to how Stock Take itself works.
+function latestStockTakeMap(beforeDate){
   const map = {};
   for(const r of DATA.stockTakes){
     if(!r.baseProduct) continue;
+    if(beforeDate && !(r.date < beforeDate)) continue;
     if(!map[r.baseProduct] || r.date > map[r.baseProduct].date){
       map[r.baseProduct] = {amount:Number(r.amount), date:r.date};
     }
@@ -944,10 +953,13 @@ function latestStockTakeMap(){
 }
 
 
-function shoppingListComputed(){
-  // compares each base product's most recent stock take against its Calculated Holdings target
+function shoppingListComputed(referenceDate){
+  // compares each base product's most recent (pre-referenceDate) stock take against its Calculated
+  // Holdings target — referenceDate defaults to today, since every live caller (Shopping List, Quick
+  // Buy, Dashboard) means "right now"; a historical recompute can pass an explicit date instead.
+  const today = referenceDate || new Date().toISOString().slice(0,10);
   const plan = procurementPlanComputed();
-  const stockMap = latestStockTakeMap();
+  const stockMap = latestStockTakeMap(today);
   const critPct = Number(DATA.shoppingList.criticalPct)||0.25;
   const overPct = Number(DATA.shoppingList.overstockPct)||1.5;
   const buyPct = Number(DATA.shoppingList.buyPct)||1; // ratio below which stock still counts as "Buy" (Consider Buying); at/above it, and below the overstock threshold, it's OK — defaults to 100% (old hardcoded behavior)
