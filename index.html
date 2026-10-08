@@ -367,6 +367,7 @@ function emptyDataShape(){
     // the cold-start fallback, never something that overwrites a value he's already set.
     pricingPlan: {defaultMarginPct:0.32, goodDealThresholdPct:0.10, goodDealBonusPct:0.05, trendWindowDays:21},
     categoryMarginPct: {"Eggs":0.30, "Herbs":0.35, "Mixes":0.35}, itemMarginPct: {}, itemMinPrice: {}, priceQuotes: [],
+    palletTallyResets: [],
   };
 }
 
@@ -427,6 +428,7 @@ function applyDataDefaults(d){
   // convention as itemMarginPct/categoryMarginPct above.
   if(!d.itemMinPrice) d.itemMinPrice = {};
   if(!d.priceQuotes) d.priceQuotes = [];
+  if(!d.palletTallyResets) d.palletTallyResets = []; // backward-compatible default for backups/sheets predating the owner-only Pallet tally reset
   return d;
 }
 
@@ -579,6 +581,7 @@ let marketStatementSelectedDate = "";
 // since a raw commodity is written once and then never needs touching again once mapped).
 let marketMappingSearch = "";
 let marketMappingOnlyUnmapped = true;
+let marketMappingShowIgnored = false; // show raw commodities Shane has removed from the mapping list (with a Restore button) instead of hiding them
 
 const NAV = [
   {group:"Overview", items:[
@@ -4092,17 +4095,37 @@ function distinctMarketStatementDates(){
 // at all. Tshwane's own return line has confirmed this sign-based direction detection is right; JHB's
 // side of it (Deposit-charged vs Deposit-refunded) hasn't yet been checked against a real JHB refund
 // example — flag it if a JHB pallet return line ever produces a tally that looks wrong.
+// Owner-only "Reset tally" (see renderMarketStatements) never deletes ledger rows — it appends a row to
+// palletTallyResets holding the latest statement date in the ledger at that moment, and the tally only
+// counts statements dated AFTER the most recent reset date. Returns the latest reset row, or null.
+function latestPalletTallyReset(){
+  let best = null;
+  (DATA.palletTallyResets||[]).forEach(r=>{ if(r.resetDate && (!best || String(r.resetDate) >= String(best.resetDate))) best = r; });
+  return best;
+}
+
+// A raw commodity removed from Market Product Mapping because it'll never be used — see the "ignored"
+// column on marketProductMap in Code.gs.
+function isMapIgnored(m){ return !!m && (m.ignored===true || String(m.ignored||"").toLowerCase()==="yes" || String(m.ignored||"").toLowerCase()==="true"); }
+
 function marketPalletTallyComputed(){
   const map = {};
+  const reset = latestPalletTallyReset();
   (DATA.palletLedger||[]).forEach(r=>{
+    if(reset && !(String(r.statementDate||"") > String(reset.resetDate))) return; // counted before the last reset
     const market = r.market || "Unknown market";
     const type = r.palletType || "Unknown pallet type";
     const key = market + "::" + type;
     if(!map[key]) map[key] = {market, palletType:type, held:0, depositsPaid:0, depositsRefunded:0, feesPaid:0};
     const qty = Number(r.qty)||0;
     const total = Number(r.total)||0;
-    if(r.direction === "out"){ map[key].held += qty; map[key].depositsPaid += Math.abs(total); }
-    else if(r.direction === "in"){ map[key].held -= qty; map[key].depositsRefunded += Math.abs(total); }
+    // "Sale cancel" is the market reversing an earlier pallet deposit (JHB, first seen 2 Oct 2026: same qty
+    // and amount as the Deposit it cancels, opposite sign) — a pallet effectively coming back, not a usage
+    // fee. Rows imported before this was understood were stored as direction "fee", so it's decided here
+    // from the transaction type rather than trusting the stored direction.
+    const direction = r.transactionType === "Sale cancel" ? "in" : r.direction;
+    if(direction === "out"){ map[key].held += qty; map[key].depositsPaid += Math.abs(total); }
+    else if(direction === "in"){ map[key].held -= qty; map[key].depositsRefunded += Math.abs(total); }
     else { map[key].feesPaid += Math.abs(total); }
   });
   return Object.keys(map).sort().map(key=> map[key]);
@@ -4124,6 +4147,7 @@ function renderMarketStatements(){
   const mapLookup = marketProductMapLookup();
   const lineRows = dayLines.map(r=>{
     const mapping = mapLookup.get(marketMapKey(r.market, r.commodity));
+    const ignoredLine = isMapIgnored(mapping);
     const baseProduct = mapping && mapping.baseProduct;
     const packSize = mapping && mapping.packSize!=null && mapping.packSize!=="" ? Number(mapping.packSize) : null;
     // Base qty/price are shown unitless — the Product column right next to them already names the
@@ -4131,7 +4155,8 @@ function renderMarketStatements(){
     const baseQty = (packSize && r.qty!=null) ? Number(r.qty)*packSize : null;
     const baseUnitPrice = (packSize && r.unitPrice!=null) ? Number(r.unitPrice)/packSize : null;
     let productCell;
-    if(!baseProduct) productCell = `<span class="helptext">${esc(r.commodity)}</span> ${chip("unmapped","warn")}`;
+    if(ignoredLine) productCell = `<span class="helptext">${esc(r.commodity)}</span> ${chip("not used","neutral")}`;
+    else if(!baseProduct) productCell = `<span class="helptext">${esc(r.commodity)}</span> ${chip("unmapped","warn")}`;
     else if(!packSize) productCell = `${esc(baseProduct)} ${chip("no pack size","warn")}`;
     else productCell = esc(baseProduct);
     return `
@@ -4169,10 +4194,24 @@ function renderMarketStatements(){
       <td class="num">${fmtNum(t.held,0)}</td>
       <td class="num">${money(t.depositsPaid)}</td>
       <td class="num">${money(t.depositsRefunded)}</td>
+      <td class="num" style="font-weight:600;">${money(round2(t.depositsPaid - t.depositsRefunded))}</td>
       <td class="num">${money(t.feesPaid)}</td>
     </tr>`).join("");
+  const tallyTotals = tally.reduce((a,t)=>({
+    held: a.held + t.held, paid: a.paid + t.depositsPaid, refunded: a.refunded + t.depositsRefunded, fees: a.fees + t.feesPaid,
+  }), {held:0, paid:0, refunded:0, fees:0});
+  const tallyTotalsRow = tally.length ? `
+    <tr style="font-weight:700;border-top:2px solid var(--line);">
+      <td colspan="2">Total</td>
+      <td class="num">${fmtNum(tallyTotals.held,0)}</td>
+      <td class="num">${money(tallyTotals.paid)}</td>
+      <td class="num">${money(tallyTotals.refunded)}</td>
+      <td class="num">${money(round2(tallyTotals.paid - tallyTotals.refunded))}</td>
+      <td class="num">${money(tallyTotals.fees)}</td>
+    </tr>` : "";
+  const lastReset = latestPalletTallyReset();
 
-  const unmappedCount = dayLines.filter(r=> !(mapLookup.get(marketMapKey(r.market, r.commodity))||{}).baseProduct).length;
+  const unmappedCount = dayLines.filter(r=>{ const m = mapLookup.get(marketMapKey(r.market, r.commodity)); return !isMapIgnored(m) && !(m||{}).baseProduct; }).length;
   const missingPackSizeCount = dayLines.filter(r=>{
     const m = mapLookup.get(marketMapKey(r.market, r.commodity));
     return m && m.baseProduct && (m.packSize==null || m.packSize==="");
@@ -4207,11 +4246,14 @@ function renderMarketStatements(){
       </div>
     </div>
     <div class="card">
-      <div class="cardhead"><div><h3>Pallet tally (all time)</h3><div class="desc">Running count of pallets currently held, per market and pallet type, across every statement imported so far. A pallet going out to the buyer adds to the tally; a pallet coming back subtracts — a usage/rental fee alone doesn't change the count. See the note on marketPalletTallyComputed for how "out"/"in" is worked out per market — flag it if a count here ever looks wrong.</div></div></div>
+      <div class="cardhead">
+        <div><h3>Pallet tally${lastReset ? " (since last reset)" : " (all time)"}</h3><div class="desc">Running count of pallets currently held, per market and pallet type${lastReset ? `, counting only statements dated after the last reset (${esc(lastReset.resetDate)}${lastReset.resetBy ? `, by ${esc(lastReset.resetBy)}` : ""})` : ", across every statement imported so far"}. A pallet going out to the buyer adds to the tally; a pallet coming back (a refund, same-day refund, or cancelled sale) subtracts — a usage/rental fee alone doesn't change the count. "Current cost" is deposits paid minus deposits refunded: the money still tied up in pallets. See the note on marketPalletTallyComputed for how "out"/"in" is worked out per market — flag it if a count here ever looks wrong.</div></div>
+        ${isOwner() ? `<button class="btn" id="resetPalletTallyBtn" title="Owner only — zeroes the tally; the underlying statement history is kept">Reset tally to zero</button>` : ""}
+      </div>
       <div class="cardbody" style="padding:0;">
         <div class="tablewrap" style="border:none;border-radius:0;"><table>
-          <thead><tr><th>Market</th><th>Pallet type</th><th class="num">Currently held</th><th class="num">Deposits paid</th><th class="num">Deposits refunded</th><th class="num">Fees paid</th></tr></thead>
-          <tbody>${tallyRows || `<tr><td colspan="6" class="empty">No pallet activity imported yet.</td></tr>`}</tbody>
+          <thead><tr><th>Market</th><th>Pallet type</th><th class="num">Currently held</th><th class="num">Deposits paid</th><th class="num">Deposits refunded</th><th class="num">Current cost (paid − refunded)</th><th class="num">Fees paid</th></tr></thead>
+          <tbody>${tallyRows || `<tr><td colspan="7" class="empty">${lastReset ? "Nothing since the last reset." : "No pallet activity imported yet."}</td></tr>`}${tallyTotalsRow}</tbody>
         </table></div>
       </div>
     </div>`;
@@ -4697,12 +4739,17 @@ function renderMarketMapping(){
   const search = marketMappingSearch.trim().toLowerCase();
   const mapLookup = marketProductMapLookup();
   let commodities = distinctRawMarketCommodities();
-  if(marketMappingOnlyUnmapped) commodities = commodities.filter(c=> !(mapLookup.get(marketMapKey(c.market, c.commodity))||{}).baseProduct);
+  // Removed ("ignored") commodities stay out of the list — and out of every "unmapped" count — unless
+  // "Show removed" is ticked, which lists ONLY them (each with a Restore button).
+  const ignoredOf = c => isMapIgnored(mapLookup.get(marketMapKey(c.market, c.commodity)));
+  const removedCount = distinctRawMarketCommodities().filter(ignoredOf).length;
+  commodities = marketMappingShowIgnored ? commodities.filter(ignoredOf) : commodities.filter(c=> !ignoredOf(c));
+  if(marketMappingOnlyUnmapped && !marketMappingShowIgnored) commodities = commodities.filter(c=> !(mapLookup.get(marketMapKey(c.market, c.commodity))||{}).baseProduct);
   if(search) commodities = commodities.filter(c=> c.commodity.toLowerCase().includes(search) || describeRawCommodity(c.commodity).toLowerCase().includes(search) || (c.market||"").toLowerCase().includes(search));
   commodities.sort((a,b)=> (a.market||"").localeCompare(b.market||"") || describeRawCommodity(a.commodity).localeCompare(describeRawCommodity(b.commodity)));
 
   const allCommodities = distinctRawMarketCommodities();
-  const totalUnmapped = allCommodities.filter(c=> !(mapLookup.get(marketMapKey(c.market, c.commodity))||{}).baseProduct).length;
+  const totalUnmapped = allCommodities.filter(c=> !ignoredOf(c) && !(mapLookup.get(marketMapKey(c.market, c.commodity))||{}).baseProduct).length;
   const totalMissingPackSize = allCommodities.filter(c=>{
     const m = mapLookup.get(marketMapKey(c.market, c.commodity));
     return m && m.baseProduct && (m.packSize==null || m.packSize==="");
@@ -4714,6 +4761,15 @@ function renderMarketMapping(){
     const mappedProduct = m.baseProduct || "";
     const packSize = m.packSize!=null ? m.packSize : "";
     const unit = mappedProduct ? procurementUnitForBaseProduct(mappedProduct) : "";
+    if(marketMappingShowIgnored){
+      return `
+    <tr>
+      <td>${chip(c.market||"—","neutral")}</td>
+      <td>${esc(describeRawCommodity(c.commodity))}<div class="helptext">${esc(c.commodity)}</div></td>
+      <td class="helptext">${c.count} line(s), last ${esc(c.lastDate||"—")}${c.lastUnitPrice!=null ? `, ${money(c.lastUnitPrice)}` : ""}</td>
+      <td colspan="2"><span class="helptext">Removed — not used</span> <button class="btn small" data-restore-mapkey="${esc(key)}">Restore</button></td>
+    </tr>`;
+    }
     return `
     <tr>
       <td>${chip(c.market||"—","neutral")}</td>
@@ -4724,6 +4780,7 @@ function renderMarketMapping(){
         <input class="rowinput num" data-mapping-idx="${i}" data-mapkey="${esc(key)}" data-mapfield="packSize" type="number" step="any" min="0" style="max-width:110px;" value="${esc(packSize)}" data-pristine="${esc(packSize)}" placeholder="e.g. 10">
         ${mappedProduct ? `<div class="helptext">${unit ? `in ${esc(unit)}` : "set a procurement unit on this Base Product in Item Setup"}</div>` : `<div class="helptext">map a Base Product first</div>`}
       </td>
+      <td><button class="delbtn" data-remove-mapkey="${esc(key)}" title="Remove — this one won't be used or mapped">✕</button></td>
     </tr>`;
   }).join("");
 
@@ -4741,12 +4798,13 @@ function renderMarketMapping(){
         <div class="formgrid" style="flex:1;">
           <div class="field"><label>Search</label><input type="text" id="marketMappingSearchInput" value="${esc(marketMappingSearch)}" placeholder="Search market, raw, or mapped name…"></div>
           <label class="btn" style="align-self:flex-end;"><input type="checkbox" id="marketMappingOnlyUnmappedToggle" ${marketMappingOnlyUnmapped?"checked":""} style="margin-right:6px;">Only unmapped</label>
+          ${removedCount || marketMappingShowIgnored ? `<label class="btn" style="align-self:flex-end;"><input type="checkbox" id="marketMappingShowIgnoredToggle" ${marketMappingShowIgnored?"checked":""} style="margin-right:6px;">Show removed (${removedCount})</label>` : ""}
         </div>
       </div>
       <div class="cardbody" style="padding:0;">
         <div class="tablewrap" style="border:none;border-radius:0;"><table>
-          <thead><tr><th>Market</th><th>Market commodity</th><th>Seen</th><th>Maps to Base Product</th><th>Pack size</th></tr></thead>
-          <tbody>${rows || `<tr><td colspan="5" class="empty">${marketMappingOnlyUnmapped && totalUnmapped===0 ? "Nothing unmapped." : "No market statement data imported yet."}</td></tr>`}</tbody>
+          <thead><tr><th>Market</th><th>Market commodity</th><th>Seen</th><th>Maps to Base Product</th><th>Pack size</th>${marketMappingShowIgnored ? "" : "<th></th>"}</tr></thead>
+          <tbody>${rows || `<tr><td colspan="6" class="empty">${marketMappingShowIgnored ? "Nothing has been removed." : (marketMappingOnlyUnmapped && totalUnmapped===0 ? "Nothing unmapped." : "No market statement data imported yet.")}</td></tr>`}</tbody>
         </table></div>
       </div>
     </div>
@@ -6059,6 +6117,28 @@ function wireTabEvents(){
       marketStatementSelectedDate = e.target.value;
       render();
     });
+    const resetBtn = document.getElementById("resetPalletTallyBtn");
+    if(resetBtn) resetBtn.addEventListener("click", async ()=>{
+      if(!isOwner()) return; // defensive — the button only ever renders for an owner
+      const dates = (DATA.palletLedger||[]).map(r=>r.statementDate).filter(Boolean).sort();
+      const latest = dates[dates.length-1];
+      if(!latest){ toast("No pallet activity to reset yet"); return; }
+      const prev = latestPalletTallyReset();
+      if(prev && String(prev.resetDate) >= latest){ toast("Already at zero — nothing new since the last reset"); return; }
+      if(!confirm(`Reset the pallet tally to zero?\n\nEvery count and total in the Pallet tally goes to zero, and only statements dated after ${latest} count from here on. No statement or pallet history is deleted — it all stays on file and in the per-day Pallets view above. This saves immediately.`)) return;
+      if(!DATA.palletTallyResets) DATA.palletTallyResets = [];
+      DATA.palletTallyResets.push({
+        id: "pr_" + Date.now().toString(36) + Math.random().toString(36).slice(2,6),
+        resetDate: latest,
+        resetAt: new Date().toISOString().slice(0,19).replace("T"," "),
+        resetBy: currentUser ? currentUser.name : "",
+      });
+      const saved = await persist("Pallet tally reset", ["palletTallyResets"]);
+      if(!saved){
+        DATA.palletTallyResets.pop(); // not saved — don't leave an unsaved reset sitting in memory looking real
+        render();
+      }
+    });
   }
 
   if(currentTab==="marketmapping"){
@@ -6071,6 +6151,33 @@ function wireTabEvents(){
     if(unmappedToggle) unmappedToggle.addEventListener("change", (e)=>{
       marketMappingOnlyUnmapped = e.target.checked;
       render();
+    });
+    const ignoredToggle = document.getElementById("marketMappingShowIgnoredToggle");
+    if(ignoredToggle) ignoredToggle.addEventListener("change", (e)=>{
+      marketMappingShowIgnored = e.target.checked;
+      render();
+    });
+    // Remove / Restore: a raw commodity can't be deleted outright (it's derived from the imported statement
+    // lines, which are financial records and stay), so "remove" saves an "ignored" marker for it instead —
+    // see the ignored column on marketProductMap in Code.gs. Saves immediately, like Item Setup's deletes.
+    document.querySelectorAll("[data-remove-mapkey]").forEach(btn=>{
+      btn.addEventListener("click", ()=>{
+        const key = btn.dataset.removeMapkey;
+        const existing = (DATA.marketProductMap||[]).find(r=> r.rawCommodity===key);
+        const raw = key.includes("::") ? key.slice(key.indexOf("::")+2) : key;
+        if(!confirm(`Remove "${describeRawCommodity(raw)}" from the mapping list?\n\nUse this for a market line you'll never use or map.${existing && existing.baseProduct ? ` Its current mapping to "${existing.baseProduct}" is cleared.` : ""} The statement lines themselves are kept, and it stops counting as "unmapped". You can bring it back with "Show removed" > Restore. This saves immediately.`)) return;
+        if(!DATA.marketProductMap) DATA.marketProductMap = [];
+        if(existing){ existing.baseProduct = ""; existing.packSize = null; existing.ignored = "yes"; }
+        else DATA.marketProductMap.push({rawCommodity:key, baseProduct:"", packSize:null, ignored:"yes"});
+        persist("Removed from mapping list", ["marketProductMap"]);
+      });
+    });
+    document.querySelectorAll("[data-restore-mapkey]").forEach(btn=>{
+      btn.addEventListener("click", ()=>{
+        const key = btn.dataset.restoreMapkey;
+        DATA.marketProductMap = (DATA.marketProductMap||[]).filter(r=> r.rawCommodity!==key);
+        persist("Restored to mapping list", ["marketProductMap"]);
+      });
     });
     const saveBtn = document.getElementById("saveMarketMappingBtn");
     if(saveBtn) saveBtn.addEventListener("click", ()=>{
@@ -6110,7 +6217,7 @@ function wireTabEvents(){
       });
       // A row with no Base Product goes back to "not yet mapped" entirely (drop it, same as the old
       // delete-the-dict-entry behavior) — a pack size with no Base Product means nothing on its own.
-      DATA.marketProductMap = Array.from(byKey.values()).filter(r=> r.baseProduct);
+      DATA.marketProductMap = Array.from(byKey.values()).filter(r=> r.baseProduct || isMapIgnored(r)); // removed ("ignored") rows have no Base Product by design but must survive a save
       if(rejectedTyped.size){
         const list = Array.from(rejectedTyped).slice(0,3).map(v=>`"${v}"`).join(", ");
         toast(`Didn't save ${list}${rejectedTyped.size>3?" and others":""} — not an existing Base Product. Add it in Item Setup first, or pick one from the list.`);
