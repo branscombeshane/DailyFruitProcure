@@ -720,7 +720,11 @@ function money(n){ return n===null||n===undefined||n==="" ? "" : "R"+fmtNum(n,2)
 // HH:MM:SS (as stored) -> HH:MM for display — minute precision is plenty to find the right spot on a
 // camera system's timeline, and blank/missing (older rows, or a manually-dated batch entry with no real
 // receipt moment — see submitPurchaseBatch) is left as nothing rather than a misleading "00:00".
-function fmtTime(t){ return t ? String(t).slice(0,5) : ""; }
+function fmtTime(t){
+  if(!t) return "";
+  const m = String(t).match(/^(\d{1,2}):(\d{2})/); // "8:04:12" used to be cut to "8:04:" by a plain slice(0,5)
+  return m ? m[1].padStart(2,"0") + ":" + m[2] : String(t).slice(0,5);
+}
 
 // ---------- parsing helpers (mirrors the workbook's "CODE - Description - UNIT" convention) ----------
 function parseItem(item){
@@ -4053,7 +4057,7 @@ function renderConfirmPrices(){
     return `
     <tr data-price-row="${esc(p.id||"")}">
       <td>${esc(p.baseProduct)}</td>
-      <td class="helptext">${esc(p.receivedDate||"—")}${p.receivedTime ? " " + esc(fmtTime(p.receivedTime)) : ""}</td>
+      <td class="helptext">${esc(p.receivedDate||"—")}${p.receivedTime ? " " + esc(fmtTime(p.receivedTime)) : ""}<div>received by ${esc(p.receivedBy||"—")}</div></td>
       <td class="num">${fmtNum(p.receivedQty)}</td>
       <td>${esc(p.supplier||"—")}</td>
       <td>${hasOrdered ? money(p.cost) : chip("none entered","neutral")}</td>
@@ -4079,7 +4083,7 @@ function renderConfirmPrices(){
     return `
     <tr>
       <td>${esc(p.baseProduct)}</td>
-      <td class="helptext">${esc(p.receivedDate||"—")}</td>
+      <td class="helptext">${esc(p.receivedDate||"—")}<div>received by ${esc(p.receivedBy||"—")}</div></td>
       <td class="num">${fmtNum(p.receivedQty)}</td>
       <td class="num" style="font-weight:600;">${money(p.receivedCost)}<div class="helptext" style="font-weight:400;">per ${esc(unit||"unit")}</div></td>
       <td class="num">${money(lineTotal)}</td>
