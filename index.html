@@ -367,7 +367,7 @@ function emptyDataShape(){
     // the cold-start fallback, never something that overwrites a value he's already set.
     pricingPlan: {defaultMarginPct:0.32, goodDealThresholdPct:0.10, goodDealBonusPct:0.05, trendWindowDays:21},
     categoryMarginPct: {"Eggs":0.30, "Herbs":0.35, "Mixes":0.35}, itemMarginPct: {}, itemMinPrice: {}, priceQuotes: [],
-    palletTallyResets: [],
+    palletTallyResets: [], costCsvDownloads: [],
   };
 }
 
@@ -430,6 +430,7 @@ function applyDataDefaults(d){
   // convention as itemMarginPct/categoryMarginPct above.
   if(!d.itemMinPrice) d.itemMinPrice = {};
   if(!d.priceQuotes) d.priceQuotes = [];
+  if(!d.costCsvDownloads) d.costCsvDownloads = []; // backward-compatible default for sheets predating the cost CSV download log
   if(!d.palletTallyResets) d.palletTallyResets = []; // backward-compatible default for backups/sheets predating the owner-only Pallet tally reset
   return d;
 }
@@ -550,6 +551,7 @@ let quickBuyEditingId = null; // id of the purchase line being corrected, or nul
 // ids of already-received purchase lines currently showing an editable received-qty/received-cost form
 // again (to correct a mistake) — pending (not-yet-received) lines always show the form, no toggle needed.
 let receivingEditing = new Set();
+let pricesEditing = new Set(); // Confirm Prices: ids of already-confirmed lines whose price is open for correction
 // ids of pending purchase lines currently showing the inline "not received" reason box — mirrors
 // shoppingIssueEditing's pattern for "unable to purchase" on the Shopping List.
 let receivingNotReceivedEditing = new Set();
@@ -605,6 +607,7 @@ const NAV = [
   ]},
   {group:"Costings", items:[
     {id:"purchase", label:"Purchase Costs"},
+    {id:"confirmprices", label:"Confirm Prices"},
     {id:"pricehistory", label:"Price History"},
     {id:"sageimport", label:"Sage CSV"},
     {id:"marketstatements", label:"Market Statements"},
@@ -639,8 +642,8 @@ if(!TABS.some(t=>t.id===currentTab)){
 // "home" (the landing Dashboard) is Owner + Procurement only, by Shane's explicit request — Stock Taker,
 // Receiving and Market stay scoped to their single-purpose tab(s), same as before.
 const ROLE_TABS = {
-  owner: ["home","shoppinglist","quickbuy","shoppingarchive","receiving","dashboard","salesdata","itemsetup","recipes","purchase","pricehistory","sageimport","marketstatements","sellingprices","stocktake","users","stockvariance","marketmapping"],
-  procurement: ["home","shoppinglist","quickbuy","shoppingarchive","receiving","purchase","pricehistory","sageimport","marketstatements","sellingprices","stocktake"],
+  owner: ["home","shoppinglist","quickbuy","shoppingarchive","receiving","dashboard","salesdata","itemsetup","recipes","purchase","confirmprices","pricehistory","sageimport","marketstatements","sellingprices","stocktake","users","stockvariance","marketmapping"],
+  procurement: ["home","shoppinglist","quickbuy","shoppingarchive","receiving","purchase","confirmprices","pricehistory","sageimport","marketstatements","sellingprices","stocktake"],
   stocktaker: ["stocktake","receiving"],
   receiving: ["receiving"],
   market: ["quickbuy"],
@@ -663,14 +666,8 @@ function hasUnsavedInlineEdit(){
   if(currentTab==="receiving"){
     if(receivingEditing.size > 0 || receivingNotReceivedEditing.size > 0) return true;
     // .receive-qty and .notreceived-reason always start empty (no pre-fill), so any value at all means
-    // someone typed it. .receive-cost on a pending row is different — it's pre-filled with the ordered
-    // cost as a suggestion (data-default), so a silent refresh re-rendering it would produce that exact
-    // same value right back; only a value that DIFFERS from the pre-filled default is an actual edit
-    // worth protecting. Without this, any pending order with a known cost would permanently block the
-    // silent refresh on this tab even when nobody's touched anything. (Kept as its own check rather than
-    // data-pristine since the baseline here is a second data-default attribute, not a fixed starting value.)
+    // someone typed it. (Receiving has no price field any more — see the Confirm Prices tab.)
     for(const el of document.querySelectorAll(".receive-qty, .notreceived-reason")){ if(el.value !== "") return true; }
-    for(const el of document.querySelectorAll(".receive-cost")){ if(el.value !== (el.dataset.default||"")) return true; }
     // Fix (Shane's report): the Receiving search box was never checked here, so the 20s silent poll
     // (see checkForUpdates) could — and on a tab this busy, reliably would — blow away #main mid-search,
     // destroying and recreating the search <input> under someone's fingers. The typed text itself
@@ -1210,11 +1207,29 @@ function isNotReceived(p){
 function receivingDiscrepancy(p){
   if(!isReceived(p)) return null;
   const qtyKnown = p.qty!==undefined && p.qty!==null && p.qty!=="";
-  const costKnown = p.cost!==undefined && p.cost!==null && p.cost!=="";
   const qtyDiff = qtyKnown && Number(p.qty)!==Number(p.receivedQty);
-  const costDiff = costKnown && Number(p.cost)!==Number(p.receivedCost);
-  if(!qtyDiff && !costDiff) return null;
-  return {qtyDiff, costDiff};
+  // Quantity only (Oct 2026): Receiving no longer records a price — it's confirmed separately on the Confirm
+  // Prices tab — so a confirmed price that differs from the ordered one is a deliberate pricing decision
+  // (visible in Price History), not a receiving discrepancy. costDiff is kept in the shape, always false, so
+  // nothing that reads it needs to change.
+  if(!qtyDiff) return null;
+  return {qtyDiff, costDiff:false};
+}
+
+// Price confirmation (Oct 2026): Receiving counts quantities only; the buying price is confirmed afterwards
+// on the Confirm Prices tab (Owner/Procurement), which writes it into receivedCost — the field every costing
+// function already reads. So "has a price" == "receivedCost is set", and a received line without one is
+// "awaiting price" (weightedCostMap_ already skips it entirely rather than costing it at R0).
+function hasCostValue(p){ return p.receivedCost!==undefined && p.receivedCost!==null && p.receivedCost!==""; }
+function hasConfirmedPrice(p){ return isReceived(p) && hasCostValue(p); }
+function awaitingPriceLines(){
+  return DATA.purchaseCosts.filter(p=> p.baseProduct && isReceived(p) && !isNotReceived(p) && !hasCostValue(p))
+    .slice().sort((a,b)=> (a.receivedDate||"").localeCompare(b.receivedDate||"") || String(a.receivedTime||"").localeCompare(String(b.receivedTime||"")) || a.baseProduct.localeCompare(b.baseProduct));
+}
+// The unit a price is "per" — the base product's procurement unit from Item Setup (what Receiving counts in).
+function procUnitForBase(bp){
+  const it = (DATA.itemSetup||[]).find(x=> x.baseProduct===bp && x.procurementUnit);
+  return it ? it.procurementUnit : "";
 }
 
 // Shane, 2026-09: printer isn't hooked up yet, so the automatic print-on-confirm is off for now — it
@@ -1625,8 +1640,9 @@ async function persist(successMsg, changedKeys){
 // handlePurchaseAction_), so two people logging purchases around the same time — e.g. two buyers at
 // the market — never overwrite each other and never need to reload. No version check applies here;
 // there's nothing for it to conflict with.
-async function persistPurchaseAction(payload, successMsg){
+async function persistPurchaseAction(payload, successMsg, onSuccess){
   setSyncBusy(true);
+  let ok = false;
   try{
     const res = await fetch(API_URL, {
       method: "POST",
@@ -1639,7 +1655,9 @@ async function persistPurchaseAction(payload, successMsg){
       // same reasoning as persist() above — this tab's own purchase log is data changing too, so absorb
       // its new version rather than have the next poll flag this tab's own write back at itself
       if(result.dataVersion){ DATA.dataVersion = result.dataVersion; lastKnownDataVersion = result.dataVersion; }
+      if(onSuccess) onSuccess(); // lets a caller apply its local DATA change only once the server has accepted it
       toast(successMsg || "Saved");
+      ok = true;
     } else {
       toast("Could not save" + (result && result.error ? (": " + result.error) : "") + " — check your connection and try again");
     }
@@ -1648,6 +1666,7 @@ async function persistPurchaseAction(payload, successMsg){
   }
   setSyncBusy(false);
   render();
+  return ok;
 }
 
 function toast(msg){
@@ -1812,6 +1831,7 @@ function render(){
     else if(currentTab==="recipes") pageHtml = renderRecipes();
     else if(currentTab==="salesdata") pageHtml = renderSalesData();
     else if(currentTab==="purchase") pageHtml = renderPurchase();
+    else if(currentTab==="confirmprices") pageHtml = renderConfirmPrices();
     else if(currentTab==="pricehistory") pageHtml = renderPriceHistory();
     else if(currentTab==="sageimport") pageHtml = renderSageImport();
     else if(currentTab==="marketstatements") pageHtml = renderMarketStatements();
@@ -2218,7 +2238,10 @@ function purchaseLineChip(e, opts){
   const cost = received ? e.receivedCost : e.cost;
   const hasQty = qty!==undefined && qty!==null && qty!=="";
   const hasCost = cost!==undefined && cost!==null && cost!=="";
-  let core = (hasQty ? fmtNum(qty)+" @ " : "") + (hasCost ? money(cost) : "cost pending") + (e.supplier ? " (" + esc(e.supplier) + ")" : "");
+  // opts.hidePrice (Receiving page): receiving staff only deal in quantities now, so show the count alone.
+  let core = opts.hidePrice
+    ? ((hasQty ? fmtNum(qty) : "—") + (e.supplier ? " (" + esc(e.supplier) + ")" : ""))
+    : ((hasQty ? fmtNum(qty)+" @ " : "") + (hasCost ? money(cost) : "cost pending") + (e.supplier ? " (" + esc(e.supplier) + ")" : ""));
   if(opts.showWho){
     if(e.loggedBy) core += " — logged by " + esc(e.loggedBy);
     if(received && e.receivedBy) core += ", received by " + esc(e.receivedBy);
@@ -2811,7 +2834,6 @@ function discrepancyChipHtml(p){
   if(!disc) return "";
   return chip("⚠ " + [
     disc.qtyDiff ? `qty differs (ordered ${fmtNum(p.qty)}, received ${fmtNum(p.receivedQty)})` : null,
-    disc.costDiff ? `cost differs (ordered ${money(p.cost)}, received ${money(p.receivedCost)})` : null,
   ].filter(Boolean).join(", "), "warn");
 }
 
@@ -2915,14 +2937,12 @@ function renderReceiving(){
   const notReceivedShown = notReceived.filter(matchesReceivingSearch);
 
   const pendingRows = pendingShown.map(p=>{
-    const hasCost = p.cost!==undefined && p.cost!==null && p.cost!=="";
     const overdue = p.date && p.date < todayStr;
     // Deliberately NOT showing the ordered quantity here (and not pre-filling receive-qty with it) —
     // Shane's call: whoever confirms receipt must physically count the stock and type what they counted,
     // rather than seeing the ordered figure and rubber-stamping it. That's how a shortage actually gets
     // caught instead of silently confirmed. The ordered qty (p.qty) is still stored and used for the
     // discrepancy check once received — it's just not displayed at count time.
-    const costCell = hasCost ? "@ "+money(p.cost) : chip("cost pending","neutral");
     // "Not received" is the other resolution besides actually confirming receipt — supplier ran out,
     // order cancelled, wrong stock sent back, etc. Mirrors Shopping List's "Unable to buy" inline reason
     // box (shoppingIssueEditing) via receivingNotReceivedEditing, tracked per pending-line id.
@@ -2949,18 +2969,15 @@ function renderReceiving(){
       <td>${esc(p.baseProduct)}</td>
       <td>${esc(categoryFor(p.baseProduct)||"—")}</td>
       <td class="helptext">${esc(p.date||"—")}${overdue ? ` ${chip("overdue","warn")}` : ""}</td>
-      <td>${costCell}</td>
       <td>${esc(p.supplier||"—")}</td>
       <td>${esc(p.loggedBy||"—")}</td>
       <td><input type="number" step="0.01" class="receive-qty" placeholder="Count qty" value="" style="width:80px;"></td>
-      <td>${randFieldHtml("receive-cost", hasCost?p.cost:"", "Cost/u", `data-default="${esc(hasCost?p.cost:"")}"`, "width:80px;")}</td>
       <td>${actionsCell}</td>
     </tr>` : `
     <tr>
       <td>${esc(p.baseProduct)}</td>
       <td>${esc(categoryFor(p.baseProduct)||"—")}</td>
       <td class="helptext">${esc(p.date||"—")}${overdue ? ` ${chip("overdue","warn")}` : ""}</td>
-      <td>${costCell}</td>
       <td>${esc(p.supplier||"—")}</td>
       <td>${esc(p.loggedBy||"—")}</td>
       <td>${actionsCell}</td>
@@ -2988,7 +3005,6 @@ function renderReceiving(){
     const editForm = manage && editing ? `
       <div class="buyrow" data-receive-row="${esc(p.id||"")}" style="display:flex;align-items:center;gap:4px;white-space:nowrap;margin-top:4px;">
         <input type="number" step="0.01" class="receive-qty" placeholder="Qty" value="${esc(p.receivedQty!==undefined?p.receivedQty:"")}" style="width:64px;">
-        ${randFieldHtml("receive-cost", p.receivedCost!==undefined?p.receivedCost:"", "Cost/u", "", "width:80px;")}
         <button class="btn primary" data-receive-tick="${esc(p.id||"")}" title="Save correction" style="padding:2px 10px;font-size:12px;">✓ Save</button>
         <button class="btn" data-receive-edit-cancel="${esc(p.id||"")}" style="padding:2px 6px;font-size:12px;">✕</button>
       </div>` : "";
@@ -3001,7 +3017,7 @@ function renderReceiving(){
     <tr>
       <td>${esc(p.baseProduct)}</td>
       <td class="helptext">${esc(p.date||"—")} → received ${esc(p.receivedDate||"—")}${p.receivedTime ? " at " + esc(fmtTime(p.receivedTime)) : ""}</td>
-      <td>${purchaseLineChip(p)} ${discFlag} ${noOrderFlag}</td>
+      <td>${purchaseLineChip(p, {hidePrice:true})} ${hasCostValue(p) ? "" : chip("price to be confirmed","neutral")} ${discFlag} ${noOrderFlag}</td>
       <td>${esc(p.receivedBy||"—")}</td>
       <td>${manage ? `<button class="btn small" data-receive-edit="${esc(p.id||"")}">${editing?"Cancel":"Correct"}</button>${editForm}` : ""} ${printBtn} ${deleteBtn}</td>
     </tr>`;
@@ -3009,7 +3025,7 @@ function renderReceiving(){
 
   return `
     <div class="pagehead">
-      <div><h2>Receiving</h2><p>${manage ? "Count what's actually arrived and enter it below — the ordered quantity is hidden on purpose so it doesn't get rubber-stamped. Your count and cost here become the real, final numbers used for costing (Sage CSV, Product Mixes)." : "What's still outstanding, and what's been confirmed recently. Read-only for your role."}</p></div>
+      <div><h2>Receiving</h2><p>${manage ? "Count what's actually arrived and enter the quantity below — the ordered quantity is hidden on purpose so it doesn't get rubber-stamped. Quantities only: prices are confirmed afterwards by procurement, so there's nothing to price here." : "What's still outstanding, and what's been confirmed recently. Read-only for your role."}</p></div>
       <div class="actions">
         <div class="field" style="min-width:220px;"><label>Search</label><input type="text" id="receivingSearchInput" placeholder="Base product or supplier…" value="${esc(receivingSearch)}"></div>
       </div>
@@ -3022,12 +3038,11 @@ function renderReceiving(){
     </div>
     ${manage ? `
     <div class="card">
-      <div class="cardhead"><div><h3>Log stock with no order on file</h3><div class="desc">Stock showed up but procurement never logged an order for it? Count it and record it here directly — it's tracked as received immediately, same as anything confirmed above.</div></div></div>
+      <div class="cardhead"><div><h3>Log stock with no order on file</h3><div class="desc">Stock showed up but procurement never logged an order for it? Count it and record it here directly — it's tracked as received immediately, same as anything confirmed above. Procurement adds its price afterwards.</div></div></div>
       <div class="cardbody">
         <div class="formgrid">
           <div class="field"><label>Base product</label><input type="text" id="directReceiveBase" list="baseProductsDL"></div>
           <div class="field"><label>Quantity received</label><input type="number" step="0.01" id="directReceiveQty" placeholder="e.g. 10"></div>
-          <div class="field"><label>Cost per unit</label>${randFieldHtml("", "", "if known", 'id="directReceiveCost"')}</div>
           <div class="field"><label>Supplier</label><input type="text" id="directReceiveSupplier" placeholder="optional"></div>
           <div><button class="btn primary" id="logDirectReceipt">+ Log received stock</button></div>
         </div>
@@ -3040,8 +3055,8 @@ function renderReceiving(){
       <div class="cardhead"><div><h3>Pending delivery</h3><div class="desc">${search ? `${pendingShown.length} of ${pending.length}` : pending.length} order(s) awaiting confirmation, oldest first.</div></div></div>
       <div class="cardbody" style="padding:0;">
         <div class="tablewrap" style="border:none;border-radius:0;"><table>
-          <thead><tr><th>Base product</th><th>Category</th><th>Ordered</th><th>Cost</th><th>Supplier</th><th>Ordered by</th>${manage?"<th>Amount</th><th>Price</th><th></th>":"<th>Status</th>"}</tr></thead>
-          <tbody>${pendingRows || (search ? `<tr><td colspan="${manage?9:7}" class="empty">No pending deliveries match "${esc(receivingSearch)}".</td></tr>` : `<tr><td colspan="${manage?9:7}" class="empty">Nothing outstanding — everything logged so far has been confirmed received.</td></tr>`)}</tbody>
+          <thead><tr><th>Base product</th><th>Category</th><th>Ordered</th><th>Supplier</th><th>Ordered by</th>${manage?"<th>Amount</th><th></th>":"<th>Status</th>"}</tr></thead>
+          <tbody>${pendingRows || (search ? `<tr><td colspan="${manage?7:5}" class="empty">No pending deliveries match "${esc(receivingSearch)}".</td></tr>` : `<tr><td colspan="${manage?7:5}" class="empty">Nothing outstanding — everything logged so far has been confirmed received.</td></tr>`)}</tbody>
         </table></div>
       </div>
     </div>` : ""}
@@ -3116,6 +3131,10 @@ function renderHomeDashboard(){
   const recentCutoff = new Date(Date.now() - RECEIVING_RECENT_DAYS*86400000).toISOString().slice(0,10);
   const recentlyReceived = DATA.purchaseCosts.filter(p=> p.baseProduct && isReceived(p) && p.receivedDate >= recentCutoff);
   const discrepancyRows = recentlyReceived.filter(p=> receivingDiscrepancy(p));
+  // ---- Costing step: received lines still needing a confirmed price, and whether today's cost CSV has been downloaded ----
+  const awaitingPrice = awaitingPriceLines();
+  const costDlList = costCsvDownloadsOn(today);
+  const costDlToday = costDlList.length ? costDlList[costDlList.length-1] : null;
 
   // ---- Over-suggested buys: orders logged more than 20% over the suggested buy (see
   // OVER_SUGGESTED_BUY_MULTIPLIER) — the whole point of flagging these is that Owner and Procurement see
@@ -3225,6 +3244,10 @@ function renderHomeDashboard(){
       ${navStat("Needs action today", needsActionRows.length, needsActionRows.length?'var(--warn)':'var(--good)', "shoppinglist")}
       ${navStat("Pending deliveries", pending.length, pending.length?'var(--warn)':'var(--good)', "receiving")}
       ${navStat("Overdue orders", overduePending.length, overduePending.length?'var(--critical)':'var(--good)', "receiving")}
+    </div>
+    <div class="cardrow">
+      ${navStat("Prices awaiting confirmation", awaitingPrice.length, awaitingPrice.length?'var(--warn)':'var(--good)', "confirmprices")}
+      ${navStat("Cost CSV today", costDlToday ? ("✓ " + fmtTime(costDlToday.downloadedTime) + (costDlToday.downloadedBy ? " · " + costDlToday.downloadedBy : "")) : "Not yet", costDlToday ? 'var(--good)' : 'var(--warn)', "sageimport")}
     </div>
     <div class="cardrow">
       ${navStat("Receiving discrepancies ("+RECEIVING_RECENT_DAYS+"d)", discrepancyRows.length, discrepancyRows.length?'var(--warn)':'var(--good)', "receiving")}
@@ -4002,6 +4025,102 @@ function renderPriceHistory(){
 }
 
 // ---------- Sage CSV ----------
+// ---------- Confirm Prices (Oct 2026) ----------
+// Receiving staff were struggling to work out the price per Base Product unit, which was corrupting
+// costings — so Receiving now records QUANTITY ONLY and this tab (Owner + Procurement) is the separate step
+// where each received line gets its buying price added or confirmed. The price lands in receivedCost, the
+// field all costing already reads (see hasConfirmedPrice above), stamped with who/when. A line's price starts
+// pre-filled with the price procurement entered when ordering (if any) so confirming is one tap, but is never
+// applied without someone pressing Confirm. The Sage CSV download stays blocked until every received line for
+// the chosen date is priced (see renderSageImport).
+function costCsvDownloadsOn(dateStr){
+  return (DATA.costCsvDownloads||[]).filter(d=> d.downloadedDate===dateStr);
+}
+function renderConfirmPrices(){
+  const todayStr = new Date().toISOString().slice(0,10);
+  const awaiting = awaitingPriceLines();
+  const cutoff = new Date(Date.now() - RECEIVING_RECENT_DAYS*86400000).toISOString().slice(0,10);
+  const confirmed = DATA.purchaseCosts.filter(p=> p.baseProduct && hasConfirmedPrice(p) && !isNotReceived(p) && (p.priceConfirmedDate || p.receivedDate || "") >= cutoff)
+    .slice().sort((a,b)=> String(b.priceConfirmedDate||b.receivedDate||"").localeCompare(String(a.priceConfirmedDate||a.receivedDate||"")) || String(b.priceConfirmedTime||"").localeCompare(String(a.priceConfirmedTime||"")));
+  const dlToday = costCsvDownloadsOn(todayStr);
+  const lastDl = dlToday.length ? dlToday[dlToday.length-1] : null;
+
+  const awaitingRows = awaiting.map(p=>{
+    const hasOrdered = p.cost!==undefined && p.cost!==null && p.cost!=="" && Number(p.cost)>0;
+    const pre = hasOrdered ? p.cost : "";
+    const unit = procUnitForBase(p.baseProduct);
+    const total = ""; // line total shown after confirming, in Recently confirmed
+    return `
+    <tr data-price-row="${esc(p.id||"")}">
+      <td>${esc(p.baseProduct)}</td>
+      <td class="helptext">${esc(p.receivedDate||"—")}${p.receivedTime ? " " + esc(fmtTime(p.receivedTime)) : ""}</td>
+      <td class="num">${fmtNum(p.receivedQty)}</td>
+      <td>${esc(p.supplier||"—")}</td>
+      <td>${hasOrdered ? money(p.cost) : chip("none entered","neutral")}</td>
+      <td>
+        <input type="number" step="0.01" min="0" class="confirm-price" data-confirm-id="${esc(p.id||"")}" placeholder="Price" value="${esc(pre)}" data-pristine="${esc(pre)}" style="width:100px;">
+        <div class="helptext">per ${esc(unit||"unit")}</div>
+      </td>
+      <td><button class="btn primary" data-price-confirm="${esc(p.id||"")}" style="padding:2px 10px;font-size:12px;">✓ Confirm</button></td>
+    </tr>`;
+  }).join("");
+
+  const confirmedRows = confirmed.map(p=>{
+    const editing = pricesEditing.has(p.id);
+    const unit = procUnitForBase(p.baseProduct);
+    const lineTotal = round2((Number(p.receivedQty)||0) * (Number(p.receivedCost)||0));
+    const cur = String(p.receivedCost);
+    const editCell = editing ? `
+      <div style="display:flex;align-items:center;gap:4px;white-space:nowrap;" data-price-row="${esc(p.id||"")}">
+        <input type="number" step="0.01" min="0" class="confirm-price" data-confirm-id="${esc(p.id||"")}" value="${esc(cur)}" data-pristine="${esc(cur)}" style="width:90px;">
+        <button class="btn primary" data-price-confirm="${esc(p.id||"")}" style="padding:2px 10px;font-size:12px;">✓ Save</button>
+        <button class="btn" data-price-edit-cancel="${esc(p.id||"")}" style="padding:2px 6px;font-size:12px;">✕</button>
+      </div>` : `<button class="btn small" data-price-edit="${esc(p.id||"")}">Change price</button>`;
+    return `
+    <tr>
+      <td>${esc(p.baseProduct)}</td>
+      <td class="helptext">${esc(p.receivedDate||"—")}</td>
+      <td class="num">${fmtNum(p.receivedQty)}</td>
+      <td class="num" style="font-weight:600;">${money(p.receivedCost)}<div class="helptext" style="font-weight:400;">per ${esc(unit||"unit")}</div></td>
+      <td class="num">${money(lineTotal)}</td>
+      <td class="helptext">${p.priceConfirmedBy ? esc(p.priceConfirmedBy) + " · " + esc(p.priceConfirmedDate||"") + (p.priceConfirmedTime ? " " + esc(fmtTime(p.priceConfirmedTime)) : "") : "entered before this step existed"}</td>
+      <td>${editCell}</td>
+    </tr>`;
+  }).join("");
+
+  return `
+    <div class="pagehead">
+      <div><h2>Confirm Prices</h2><p>Receiving only counts quantities now. Once a delivery has been received, add or confirm its buying price here — per the unit shown under the price box (the Base Product's procurement unit in Item Setup). If a price was entered when the order was placed it's filled in for you, but nothing counts until you press Confirm. The Sage cost CSV can only be downloaded once every received delivery for its date has a confirmed price.</p></div>
+      <div class="actions">
+        ${awaiting.length ? `<button class="btn primary" id="confirmAllPrices" title="Confirms every line below that has a price filled in">✓ Confirm all with a price</button>` : ""}
+        <button class="btn small" data-goto-tab="sageimport">Go to Sage CSV →</button>
+      </div>
+    </div>
+    <div class="cardrow">
+      ${plainStat("Awaiting price", awaiting.length, awaiting.length?'var(--warn)':'var(--good)')}
+      ${plainStat("Confirmed (last "+RECEIVING_RECENT_DAYS+"d)", confirmed.length, 'var(--ink)')}
+      ${plainStat("Cost CSV today", lastDl ? ("✓ " + fmtTime(lastDl.downloadedTime)) : "Not yet", lastDl ? 'var(--good)' : 'var(--warn)')}
+    </div>
+    <div class="card">
+      <div class="cardhead"><div><h3>Awaiting price</h3><div class="desc">${awaiting.length} received line${awaiting.length===1?"":"s"} with no confirmed price yet, oldest first.</div></div></div>
+      <div class="cardbody" style="padding:0;">
+        <div class="tablewrap" style="border:none;border-radius:0;"><table>
+          <thead><tr><th>Base product</th><th>Received</th><th class="num">Qty received</th><th>Supplier</th><th>Order price</th><th>Buying price</th><th></th></tr></thead>
+          <tbody>${awaitingRows || `<tr><td colspan="7" class="empty">Nothing waiting — every received delivery has a confirmed price.</td></tr>`}</tbody>
+        </table></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="cardhead"><div><h3>Recently confirmed</h3><div class="desc">Prices confirmed in the last ${RECEIVING_RECENT_DAYS} days. Change price corrects one — it re-stamps who and when.</div></div></div>
+      <div class="cardbody" style="padding:0;">
+        <div class="tablewrap" style="border:none;border-radius:0;"><table>
+          <thead><tr><th>Base product</th><th>Received</th><th class="num">Qty</th><th class="num">Price</th><th class="num">Line total</th><th>Confirmed by</th><th></th></tr></thead>
+          <tbody>${confirmedRows || `<tr><td colspan="7" class="empty">Nothing confirmed in the last ${RECEIVING_RECENT_DAYS} days.</td></tr>`}</tbody>
+        </table></div>
+      </div>
+    </div>`;
+}
+
 function renderSageImport(){
   const all = sageImportComputed(sageDateFilter);
   const rows = sageOnlyPurchasedOnDate ? all.filter(r=>r.purchasedOnDate) : all;
@@ -4012,6 +4131,30 @@ function renderSageImport(){
   // or Receiving first — a genuinely R0 item never happens in this business, so this is never a false
   // positive worth working around.
   const zeroCostRows = rows.filter(r=> r.averageCost === 0);
+  // Oct 2026: the CSV is locked until every RECEIVED line for the chosen date has a confirmed price (see
+  // Confirm Prices). Lines still awaiting delivery don't block it — they aren't costed yet either way —
+  // but are named so it's clear they won't be in this file.
+  const sageLines = DATA.purchaseCosts.filter(p=> p.baseProduct && (!sageDateFilter || p.date===sageDateFilter) && !isNotReceived(p));
+  const unpricedLines = sageLines.filter(p=> isReceived(p) && !hasCostValue(p));
+  const undeliveredLines = sageLines.filter(p=> !isReceived(p));
+  const sageLocked = unpricedLines.length > 0;
+  const todayStr = new Date().toISOString().slice(0,10);
+  const dlHistory = (DATA.costCsvDownloads||[]).slice().sort((a,b)=> (String(b.downloadedDate)+String(b.downloadedTime)).localeCompare(String(a.downloadedDate)+String(a.downloadedTime)));
+  const dlStrip = Array.from({length:14}, (_,i)=>{
+    const d = new Date(Date.now() - i*86400000).toISOString().slice(0,10);
+    const got = costCsvDownloadsOn(d);
+    const label = new Date(d+"T00:00:00Z").toUTCString().slice(0,11).replace(",","");
+    return got.length
+      ? chip("✓ " + label + " · " + got.map(g=>g.downloadedBy||"?").filter((v,ix,a)=>a.indexOf(v)===ix).join("/"), "good")
+      : chip("✗ " + label, i===0 ? "neutral" : "warn");
+  }).join(" ");
+  const dlRows = dlHistory.slice(0,40).map(d=>`
+    <tr>
+      <td class="helptext">${esc(d.downloadedDate||"—")} ${esc(fmtTime(d.downloadedTime))}</td>
+      <td>${esc(d.downloadedBy||"—")}</td>
+      <td class="helptext">${esc(d.exportDate||"all dates")}</td>
+      <td class="num">${esc(d.rows===undefined||d.rows===null?"":d.rows)}</td>
+    </tr>`).join("");
   const tableRows = rows.map(r=>{
     const zeroCost = r.averageCost === 0;
     return `
@@ -4028,23 +4171,35 @@ function renderSageImport(){
 
   return `
     <div class="pagehead">
-      <div><h2>Sage CSV</h2><p>Average Cost is pulled from Purchase Costs entries logged on the date selected below, once Receiving has confirmed them — an order still awaiting delivery (or invoice) won't show a cost here yet, so run this after Receiving is caught up for the day. Quantity On Hand is exported as 0. A Product Mix (composite) item's cost is built from its ingredients' costs instead — see Product Mixes for the full breakdown. Unlike a plain item, a mix doesn't need every one of its ingredients purchased on this exact date: it uses each ingredient's latest known cost (same as Product Mixes shows), tagged "latest known price" below whenever that's not this date's own figure, since a multi-ingredient mix is rarely bought whole in one day.</p></div>
+      <div><h2>Sage CSV</h2><p>Average Cost is pulled from Purchase Costs entries logged on the date selected below, once they've been received AND had their price confirmed on the Confirm Prices tab — the download stays locked until every received line for the date is priced, so run this after Receiving and Confirm Prices are caught up for the day. Quantity On Hand is exported as 0. A Product Mix (composite) item's cost is built from its ingredients' costs instead — see Product Mixes for the full breakdown. Unlike a plain item, a mix doesn't need every one of its ingredients purchased on this exact date: it uses each ingredient's latest known cost (same as Product Mixes shows), tagged "latest known price" below whenever that's not this date's own figure, since a multi-ingredient mix is rarely bought whole in one day.</p></div>
       <div class="actions">
         <div class="field" style="min-width:170px;">
           <label>Purchase date</label>
           <input type="date" id="sageDateFilter" value="${esc(sageDateFilter)}">
         </div>
         <label class="btn"><input type="checkbox" id="toggleFilter" ${sageOnlyPurchasedOnDate?"checked":""} style="margin-right:6px;">Only items purchased on this date</label>
-        <button class="btn primary" id="downloadSageCsv" ${zeroCostRows.length?'disabled title="Fix the R0 cost item(s) below before exporting"':''}>Download CSV</button>
+        <button class="btn primary" id="downloadSageCsv" ${sageLocked?'disabled title="Confirm every received price first (Confirm Prices tab)"':(zeroCostRows.length?'disabled title="Fix the R0 cost item(s) below before exporting"':'')}>Download CSV</button>
       </div>
     </div>
-    ${zeroCostRows.length ? `<div class="banner critical">⚠ ${zeroCostRows.length} item${zeroCostRows.length===1?"":"s"} would export at R0 — a buy was logged (and received) with no price: ${zeroCostRows.slice(0,6).map(r=>esc(r.item)).join(", ")}${zeroCostRows.length>6?` and ${zeroCostRows.length-6} more`:""}. Download is blocked until the price is fixed in Purchase Costs or Receiving.</div>` : ""}
+    ${sageLocked ? `<div class="banner critical"><span>🔒 ${unpricedLines.length} received line${unpricedLines.length===1?"":"s"} for ${esc(sageDateFilter||"these dates")} still need${unpricedLines.length===1?"s":""} a confirmed price (${unpricedLines.slice(0,6).map(p=>esc(p.baseProduct)).filter((v,ix,a)=>a.indexOf(v)===ix).join(", ")}${unpricedLines.length>6?" and more":""}). The CSV unlocks once every one is confirmed.</span><button class="btn small" data-goto-tab="confirmprices">Go to Confirm Prices →</button></div>` : ""}
+    ${(!sageLocked && undeliveredLines.length) ? `<div class="banner warn">ℹ ${undeliveredLines.length} order${undeliveredLines.length===1?"":"s"} for ${esc(sageDateFilter||"these dates")} haven't been received yet, so ${undeliveredLines.length===1?"it isn't":"they aren't"} in this CSV.</div>` : ""}
+    ${zeroCostRows.length ? `<div class="banner critical">⚠ ${zeroCostRows.length} item${zeroCostRows.length===1?"":"s"} would export at R0 — a buy was logged (and received) with no price: ${zeroCostRows.slice(0,6).map(r=>esc(r.item)).join(", ")}${zeroCostRows.length>6?` and ${zeroCostRows.length-6} more`:""}. Download is blocked until the price is fixed in Confirm Prices or Purchase Costs.</div>` : ""}
     <div class="card">
       <div class="cardhead"><div><h3>Category wastage buffers</h3><div class="desc">A % markup added on top of average cost for every product in a category, to account for wastage/shrink — affects only the cost figures shown and exported on this page (Quick Buy, Shopping List and Product Mixes are unaffected). Leave blank for no markup.</div></div><button class="btn primary" id="saveSageBuffers">Save buffers</button></div>
       <div class="cardbody">
         <div class="formgrid">
           ${bufferFields || `<div class="empty">No categories set up yet.</div>`}
         </div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="cardhead"><div><h3>Download record</h3><div class="desc">Every cost CSV download is logged with who and when, so you can check it's being done each day. Last 14 days (today first):</div></div></div>
+      <div class="cardbody">
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;">${dlStrip}</div>
+        <div class="tablewrap" style="max-height:260px;overflow-y:auto;"><table>
+          <thead><tr><th>Downloaded</th><th>By</th><th>Purchase date</th><th class="num">Rows</th></tr></thead>
+          <tbody>${dlRows || `<tr><td colspan="4" class="empty">No downloads recorded yet.</td></tr>`}</tbody>
+        </table></div>
       </div>
     </div>
     <div class="card">
@@ -4965,6 +5120,9 @@ function wireTabEvents(){
           entry.receivedBy = existingRow.receivedBy;
           entry.receivedDate = existingRow.receivedDate;
           entry.receivedTime = existingRow.receivedTime;
+          entry.priceConfirmedBy = existingRow.priceConfirmedBy;
+          entry.priceConfirmedDate = existingRow.priceConfirmedDate;
+          entry.priceConfirmedTime = existingRow.priceConfirmedTime;
         }
         // a "not received" line being corrected here (its qty/cost typo'd at order time) must keep that
         // status too — logPurchase's full-row overwrite would otherwise silently reopen it
@@ -5176,6 +5334,9 @@ function wireTabEvents(){
             entry.receivedBy = existingRow.receivedBy;
             entry.receivedDate = existingRow.receivedDate;
             entry.receivedTime = existingRow.receivedTime;
+            entry.priceConfirmedBy = existingRow.priceConfirmedBy;
+            entry.priceConfirmedDate = existingRow.priceConfirmedDate;
+            entry.priceConfirmedTime = existingRow.priceConfirmedTime;
           }
           // a "not received" line being corrected here must keep that status too — see the matching
           // comment on the Shopping List edit path above
@@ -5349,7 +5510,6 @@ function wireTabEvents(){
         const container = btn.closest("[data-receive-row]");
         const id = container.dataset.receiveRow;
         const qtyVal = container.querySelector(".receive-qty").value;
-        const costVal = container.querySelector(".receive-cost").value;
         if(!qtyVal){ toast("Enter the quantity actually received"); return; }
         const existing = DATA.purchaseCosts.find(p=> p.id===id);
         if(!existing){ toast("That order no longer exists"); return; }
@@ -5357,7 +5517,6 @@ function wireTabEvents(){
         // qty/cost correction on an already-received line (see printReceivingSlip call).
         const wasAlreadyReceived = isReceived(existing);
         existing.receivedQty = Number(qtyVal);
-        if(costVal!==""){ existing.receivedCost = Number(costVal); } else { delete existing.receivedCost; }
         if(currentUser) existing.receivedBy = currentUser.name;
         existing.receivedDate = existing.receivedDate || new Date().toISOString().slice(0,10);
         // Shane's ask: a discrepancy needs a clock time to check against the camera system, not just a
@@ -5371,7 +5530,7 @@ function wireTabEvents(){
         // so the original qty/cost/supplier/loggedBy it was ordered under are preserved.
         persistPurchaseAction({
           action:"receivePurchase", id,
-          receivedQty: existing.receivedQty, receivedCost: existing.receivedCost,
+          receivedQty: existing.receivedQty,
           receivedBy: existing.receivedBy, receivedDate: existing.receivedDate, receivedTime: existing.receivedTime,
         }, "Marked " + existing.baseProduct + " as received");
         // Auto-print, but only on the delivery's FIRST confirmation — not on a later correction to an
@@ -5474,7 +5633,6 @@ function wireTabEvents(){
       directReceiptBtn.addEventListener("click", ()=>{
         const bpTyped = document.getElementById("directReceiveBase").value.trim();
         const qtyVal = document.getElementById("directReceiveQty").value;
-        const costVal = document.getElementById("directReceiveCost").value;
         const supplierVal = document.getElementById("directReceiveSupplier").value.trim();
         if(!bpTyped){ toast("Enter a base product"); return; }
         // This form receives stock against an item that should already exist in Item Setup — Procurement
@@ -5506,7 +5664,6 @@ function wireTabEvents(){
         // Receiving list flags it with a "no order on file" chip so it stays visible that this one
         // skipped the usual Order -> Received flow.
         const entry = {id:newId(), date:today, baseProduct:bp, receivedQty:Number(qtyVal), receivedDate:today, receivedTime:new Date().toTimeString().slice(0,8)};
-        if(costVal!==""){ entry.receivedCost = Number(costVal); }
         if(supplierVal) entry.supplier = supplierVal;
         if(currentUser){ entry.loggedBy = currentUser.name; entry.receivedBy = currentUser.name; }
         DATA.purchaseCosts = DATA.purchaseCosts.filter(p=> p.id !== entry.id);
@@ -5893,6 +6050,56 @@ function wireTabEvents(){
     });
   }
 
+  if(currentTab==="sageimport" || currentTab==="confirmprices"){
+    document.querySelectorAll("[data-goto-tab]").forEach(el=>{
+      el.addEventListener("click", ()=>{ setCurrentTab(el.dataset.gotoTab); render(); });
+    });
+  }
+
+  // Confirm Prices: confirm (or correct) one line's price, or every line with a price filled in. The local DATA
+  // change is applied only once the server has accepted it (persistPurchaseAction's onSuccess).
+  if(currentTab==="confirmprices"){
+    const submitPrices = (ids, msg)=>{
+      const items = [];
+      let missing = 0;
+      ids.forEach(id=>{
+        const inp = document.querySelector('.confirm-price[data-confirm-id="'+id+'"]');
+        const v = inp ? inp.value.trim() : "";
+        const n = Number(v);
+        if(v==="" || isNaN(n) || n<=0){ missing++; return; }
+        items.push({id, cost:n});
+      });
+      if(!items.length){ toast("Enter a price above R0 first"); return; }
+      const by = currentUser ? currentUser.name : "";
+      persistPurchaseAction({action:"confirmPurchasePrices", items, confirmedBy:by}, msg || ("Confirmed " + items.length + " price" + (items.length===1?"":"s") + (missing ? " — " + missing + " skipped (no price entered)" : "")), ()=>{
+        const nowD = new Date();
+        items.forEach(it=>{
+          const row = DATA.purchaseCosts.find(p=> p.id===it.id);
+          if(!row) return;
+          row.receivedCost = it.cost;
+          row.priceConfirmedBy = by;
+          row.priceConfirmedDate = nowD.toISOString().slice(0,10);
+          row.priceConfirmedTime = nowD.toTimeString().slice(0,8);
+          pricesEditing.delete(it.id);
+        });
+      });
+    };
+    document.querySelectorAll("[data-price-confirm]").forEach(btn=>{
+      btn.addEventListener("click", ()=> submitPrices([btn.dataset.priceConfirm]));
+    });
+    const confirmAll = document.getElementById("confirmAllPrices");
+    if(confirmAll) confirmAll.addEventListener("click", ()=>{
+      const ids = awaitingPriceLines().map(p=>p.id);
+      submitPrices(ids);
+    });
+    document.querySelectorAll("[data-price-edit]").forEach(btn=>{
+      btn.addEventListener("click", ()=>{ pricesEditing.add(btn.dataset.priceEdit); render(); });
+    });
+    document.querySelectorAll("[data-price-edit-cancel]").forEach(btn=>{
+      btn.addEventListener("click", ()=>{ pricesEditing.delete(btn.dataset.priceEditCancel); render(); });
+    });
+  }
+
   if(currentTab==="sageimport"){
     document.getElementById("sageDateFilter").addEventListener("change", (e)=>{ sageDateFilter = e.target.value; render(); });
     document.getElementById("toggleFilter").addEventListener("change", (e)=>{ sageOnlyPurchasedOnDate = e.target.checked; render(); });
@@ -5913,9 +6120,16 @@ function wireTabEvents(){
       // renderSageImport) — a buy logged with no price and received with no price computes to an
       // "average cost" of exactly R0, which must never reach Sage as a real cost price.
       if(rows.some(r=> r.averageCost === 0)){ toast("Can't export — one or more items would show R0 cost. Fix the price first."); return; }
+      // Same gate as the disabled button (see renderSageImport): every received line for this date must have a confirmed price.
+      if(DATA.purchaseCosts.some(p=> p.baseProduct && (!sageDateFilter || p.date===sageDateFilter) && isReceived(p) && !isNotReceived(p) && !hasCostValue(p))){ toast("Can't export — some received deliveries still need a confirmed price (Confirm Prices tab)."); return; }
       const csv = "Item Code,Average Cost,Quantity On Hand\n" + rows.map(r=>[toCsvField(r.itemCode), r.averageCost, r.quantityOnHand].join(",")).join("\n");
       browserDownload("sage_import_"+(sageDateFilter||"all")+".csv", csv, "text/csv");
-      toast("Download started");
+      // Record the download (who/when/for which date) so it can be audited — the server stamps the real time.
+      const nowD = new Date();
+      const dlEntry = {id:newId(), exportDate:sageDateFilter||"", downloadedBy: currentUser ? currentUser.name : "", rows: rows.length};
+      DATA.costCsvDownloads = DATA.costCsvDownloads || [];
+      DATA.costCsvDownloads.push(Object.assign({}, dlEntry, {downloadedDate: nowD.toISOString().slice(0,10), downloadedTime: nowD.toTimeString().slice(0,8)}));
+      persistPurchaseAction({action:"logCostCsvDownload", entry: dlEntry}, "Download started — recorded");
     });
   }
 
