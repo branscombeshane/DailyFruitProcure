@@ -354,7 +354,7 @@ function emptyDataShape(){
     salesA: [], salesB: [], itemSetup: [], recipes: [],
     procurementPlan: {coverMultiplier:1, safetyBuffer:0, historyWindow:30},
     purchaseCosts: [], baseProductCategories: {},
-    stockTakes: [], shoppingList: {criticalPct:0.25, overstockPct:1.5, priceAlertPct:0.25, buyPct:1},
+    stockTakes: [], shoppingList: {criticalPct:0.25, criticalPctPeak:0.4, peakDays:"Tue,Fri,Sat", overstockPct:1.5, priceAlertPct:0.25, buyPct:1},
     users: [{name:"Owner", pin:"1234", role:"owner"}],
     purchaseIssues: [], salesHistory: [],
     procurementSignoffs: [],
@@ -378,6 +378,8 @@ function applyDataDefaults(d){
   if(!d.shoppingList) d.shoppingList = {criticalPct:0.25, overstockPct:1.5}; // backward-compatible default for backups predating the Shopping List
   if(d.shoppingList.priceAlertPct===undefined || d.shoppingList.priceAlertPct===null) d.shoppingList.priceAlertPct = 0.25; // backward-compatible default for backups/sheets predating Price History
   if(d.shoppingList.buyPct===undefined || d.shoppingList.buyPct===null) d.shoppingList.buyPct = 1; // backward-compatible default (100% = old hardcoded behavior) for backups/sheets predating the configurable Buy/OK boundary
+  if(d.shoppingList.criticalPctPeak===undefined || d.shoppingList.criticalPctPeak===null) d.shoppingList.criticalPctPeak = 0.4; // higher Critical threshold on peak stock-up days (Oct 2026) — see criticalPctFor()
+  if(d.shoppingList.peakDays===undefined || d.shoppingList.peakDays===null) d.shoppingList.peakDays = "Tue,Fri,Sat"; // which weekdays count as peak; "" = none
   if(d.stockLevels){
     // migrate the earlier undated "current levels only" shape into a dated archive entry, then drop it
     const migrationDate = new Date().toISOString().slice(0,10);
@@ -952,6 +954,26 @@ function latestStockTakeMap(beforeDate){
 }
 
 
+// Peak stock-up days (Oct 2026, per Shane: Tuesdays, Fridays and Saturdays need more stock than other
+// days, so the Critical threshold is higher on them). "Day" here means the calendar day the list is FOR
+// (the referenceDate, i.e. today for every live screen) — the same day whose stock count is the previous
+// evening's. Weekday is read from the YYYY-MM-DD string as UTC so it can't shift with the viewer's
+// timezone. Settings: shoppingList.peakDays ("Tue,Fri,Sat", "" = none) and shoppingList.criticalPctPeak.
+// NOTE: the same logic is mirrored in Code.gs (criticalPctFor_) and DailyFlagsEmail.gs — keep in step.
+const WEEKDAY_ABBR = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+function isPeakDay(dateStr){
+  const raw = (DATA.shoppingList||{}).peakDays;
+  const days = String(raw===undefined||raw===null ? "Tue,Fri,Sat" : raw).split(",").map(x=>x.trim()).filter(Boolean);
+  const wd = new Date(String(dateStr).slice(0,10) + "T00:00:00Z").getUTCDay();
+  return days.includes(WEEKDAY_ABBR[wd]);
+}
+function criticalPctFor(dateStr){
+  const base = Number(DATA.shoppingList.criticalPct)||0.25;
+  if(!isPeakDay(dateStr)) return base;
+  const peak = Number(DATA.shoppingList.criticalPctPeak);
+  return peak>0 ? peak : base;
+}
+
 function shoppingListComputed(referenceDate){
   // compares each base product's most recent (pre-referenceDate) stock take against its Calculated
   // Holdings target — referenceDate defaults to today, since every live caller (Shopping List, Quick
@@ -959,7 +981,7 @@ function shoppingListComputed(referenceDate){
   const today = referenceDate || new Date().toISOString().slice(0,10);
   const plan = procurementPlanComputed();
   const stockMap = latestStockTakeMap(today);
-  const critPct = Number(DATA.shoppingList.criticalPct)||0.25;
+  const critPct = criticalPctFor(today); // higher on peak days (Tue/Fri/Sat by default)
   const overPct = Number(DATA.shoppingList.overstockPct)||1.5;
   const buyPct = Number(DATA.shoppingList.buyPct)||1; // ratio below which stock still counts as "Buy" (Consider Buying); at/above it, and below the overstock threshold, it's OK — defaults to 100% (old hardcoded behavior)
   const rows = plan.map(row=>{
@@ -2418,7 +2440,7 @@ function renderShoppingList(){
 
   return `
     <div class="pagehead">
-      <div><h2>Shopping List</h2><p>Compares your most recent stock take against your Calculated Holdings target for every base product, so you can see at a glance what's critically low, what's worth buying, and what's overstocked.</p></div>
+      <div><h2>Shopping List</h2><p>Compares your most recent stock take against your Calculated Holdings target for every base product, so you can see at a glance what's critically low, what's worth buying, and what's overstocked.${isPeakDay(new Date().toISOString().slice(0,10)) ? ` <strong>Peak stock-up day:</strong> Critical is flagged at or below ${round2(criticalPctFor(new Date().toISOString().slice(0,10))*100)}% of target today (usually ${round2((Number(DATA.shoppingList.criticalPct)||0.25)*100)}%).` : ""}</p></div>
     </div>
     ${noStockTakesYet ? `<div class="banner warn">No stock takes recorded yet — log today's counts in Stock Take, then this list will show what needs buying.</div>` : ""}
     <div class="cardrow">
@@ -3320,6 +3342,8 @@ function renderDashboard(){
   const hw = demandHistoryWindow();
   const historyPeriods = DATA.salesHistory.length;
   const critPct = Number(DATA.shoppingList.criticalPct)||0.25;
+  const critPctPeak = Number(DATA.shoppingList.criticalPctPeak)||critPct;
+  const peakDaySet = new Set(String(DATA.shoppingList.peakDays===undefined||DATA.shoppingList.peakDays===null ? "Tue,Fri,Sat" : DATA.shoppingList.peakDays).split(",").map(x=>x.trim()).filter(Boolean));
   const overPct = Number(DATA.shoppingList.overstockPct)||1.5;
   const buyPct = Number(DATA.shoppingList.buyPct)||1;
   const pendingReceiving = DATA.purchaseCosts.filter(p=> p.baseProduct && !isReceived(p) && !isNotReceived(p)).length;
@@ -3388,12 +3412,17 @@ function renderDashboard(){
       </div>
     </div>
     <div class="card">
-      <div class="cardhead"><div><h3>Shopping List thresholds</h3><div class="desc">Stock at or below the critical % of target is flagged Critical; at or above the overstock % is flagged Overstocked; at or above the "good until" % is OK. Anything in between is Consider Buying. Set "good until" below 100% for stock that's genuinely fine even though it's under target — e.g. 75% on hand that'll comfortably last until tomorrow's delivery.</div></div></div>
+      <div class="cardhead"><div><h3>Shopping List thresholds</h3><div class="desc">Stock at or below the critical % of target (a higher one on peak days) is flagged Critical; at or above the overstock % is flagged Overstocked; at or above the "good until" % is OK. Anything in between is Consider Buying. Set "good until" below 100% for stock that's genuinely fine even though it's under target — e.g. 75% on hand that'll comfortably last until tomorrow's delivery.</div></div></div>
       <div class="cardbody">
         <div class="formgrid">
           <div class="field"><label>Critical threshold (% of target)</label><input type="number" step="1" min="0" id="shoppingCriticalPct" value="${round2(critPct*100)}" data-pristine="${esc(round2(critPct*100))}"></div>
+          <div class="field"><label>Critical threshold on peak days (% of target)</label><input type="number" step="1" min="0" id="shoppingCriticalPctPeak" value="${round2(critPctPeak*100)}" data-pristine="${esc(round2(critPctPeak*100))}"></div>
           <div class="field"><label>Good until (% of target)</label><input type="number" step="1" min="0" max="100" id="shoppingBuyPct" value="${round2(buyPct*100)}" data-pristine="${esc(round2(buyPct*100))}"></div>
           <div class="field"><label>Overstock threshold (% of target)</label><input type="number" step="1" min="100" id="shoppingOverstockPct" value="${round2(overPct*100)}" data-pristine="${esc(round2(overPct*100))}"></div>
+        </div>
+        <div class="field" style="margin-top:12px;"><label>Peak stock-up days</label>
+          <div style="display:flex;gap:14px;flex-wrap:wrap;">${WEEKDAY_ABBR.map(d=>{ const on = peakDaySet.has(d); return `<label style="display:inline-flex;gap:5px;align-items:center;font-weight:400;"><input type="checkbox" data-peakday="${d}" ${on?"checked":""} data-pristine="${on?"true":"false"}">${d}</label>`; }).join("")}</div>
+          <div class="helptext">On these days of the week the higher "Critical threshold on peak days" above is used instead of the normal one — more stock is needed on those days, so more items are flagged Critical. Leave every day unticked to use the normal threshold all week. Applies to the Shopping List, Quick Buy, the Dashboard, the nightly snapshot and the flags email.</div>
         </div>
         <div class="helptext" style="margin-top:10px;">Stock at or above this % of target counts as OK ("good until") instead of Consider Buying — defaults to 100%, meaning anything below target is Consider Buying. Lower it if being partway to target is still comfortably enough stock until the next delivery.</div>
       </div>
@@ -5501,6 +5530,9 @@ function wireTabEvents(){
       const overRaw = Number(document.getElementById("shoppingOverstockPct").value);
       const buyRaw = Number(document.getElementById("shoppingBuyPct").value);
       DATA.shoppingList.criticalPct = (critRaw>0 ? critRaw : 25)/100;
+      const critPeakRaw = Number(document.getElementById("shoppingCriticalPctPeak").value);
+      DATA.shoppingList.criticalPctPeak = (critPeakRaw>0 ? critPeakRaw : (critRaw>0 ? critRaw : 25))/100;
+      DATA.shoppingList.peakDays = Array.from(document.querySelectorAll("[data-peakday]")).filter(cb=>cb.checked).map(cb=>cb.dataset.peakday).join(",");
       DATA.shoppingList.overstockPct = (overRaw>100 ? overRaw : 150)/100;
       DATA.shoppingList.buyPct = (buyRaw>0 && buyRaw<=100 ? buyRaw : 100)/100;
       document.querySelectorAll("[data-catbuffer-input]").forEach(inp=>{
