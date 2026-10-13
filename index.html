@@ -3197,8 +3197,7 @@ function renderHomeDashboard(){
   const discrepancyRows = recentlyReceived.filter(p=> receivingDiscrepancy(p));
   // ---- Costing step: received lines still needing a confirmed price, and whether today's cost CSV has been downloaded ----
   const awaitingPrice = awaitingPriceLines();
-  const costDlList = costCsvDownloadsOn(today);
-  const costDlToday = costDlList.length ? costDlList[costDlList.length-1] : null;
+  const costTile = costCsvStatTile();
 
   // ---- Over-suggested buys: orders logged more than 20% over the suggested buy (see
   // OVER_SUGGESTED_BUY_MULTIPLIER) — the whole point of flagging these is that Owner and Procurement see
@@ -3311,7 +3310,7 @@ function renderHomeDashboard(){
     </div>
     <div class="cardrow">
       ${navStat("Prices awaiting confirmation", awaitingPrice.length, awaitingPrice.length?'var(--warn)':'var(--good)', "confirmprices")}
-      ${navStat("Cost CSV today", costDlToday ? ("✓ " + fmtTime(costDlToday.downloadedTime) + (costDlToday.downloadedBy ? " · " + costDlToday.downloadedBy : "")) : "Not yet", costDlToday ? 'var(--good)' : 'var(--warn)', "sageimport")}
+      ${navStat(costTile.label, costTile.value, costTile.color, "sageimport")}
     </div>
     <div class="cardrow">
       ${navStat("Receiving discrepancies ("+RECEIVING_RECENT_DAYS+"d)", discrepancyRows.length, discrepancyRows.length?'var(--warn)':'var(--good)', "receiving")}
@@ -4081,8 +4080,29 @@ function renderPriceHistory(){
 // pre-filled with the price procurement entered when ordering (if any) so confirming is one tap, but is never
 // applied without someone pressing Confirm. The Sage CSV download stays blocked until every received line for
 // the chosen date is priced (see renderSageImport).
-function costCsvDownloadsOn(dateStr){
-  return (DATA.costCsvDownloads||[]).filter(d=> d.downloadedDate===dateStr);
+// Download log is keyed on the PURCHASE date the CSV was generated for (exportDate), never on the calendar
+// day it was downloaded — a manager normally downloads yesterday's purchases the next morning, and what
+// matters is "has each day's buying been exported", not "was anything downloaded today".
+function costCsvDownloadsFor(purchaseDate){
+  return (DATA.costCsvDownloads||[]).filter(d=> d.exportDate===purchaseDate)
+    .slice().sort((a,b)=> (String(a.downloadedDate)+String(a.downloadedTime)).localeCompare(String(b.downloadedDate)+String(b.downloadedTime)));
+}
+function shortDayLabel(d){ return new Date(d+"T00:00:00Z").toUTCString().slice(5,11); } // "12 Oct"
+// The purchase date whose cost CSV is currently "due": the most recent day (up to today) that has a received line.
+function costCsvDueDate(){
+  const todayStr = new Date().toISOString().slice(0,10);
+  let best = "";
+  DATA.purchaseCosts.forEach(p=>{
+    if(p.baseProduct && isReceived(p) && !isNotReceived(p) && p.date && p.date<=todayStr && p.date>best) best = p.date;
+  });
+  return best;
+}
+function costCsvStatTile(){
+  const due = costCsvDueDate();
+  if(!due) return {label:"Cost CSV", value:"No purchases", color:"var(--muted)"};
+  const got = costCsvDownloadsFor(due);
+  const last = got.length ? got[got.length-1] : null;
+  return {label:"Cost CSV · "+shortDayLabel(due), value: last ? ("✓ " + (last.downloadedBy||"downloaded")) : "Not yet", color: last ? "var(--good)" : "var(--warn)"};
 }
 function renderConfirmPrices(){
   const todayStr = new Date().toISOString().slice(0,10);
@@ -4093,8 +4113,7 @@ function renderConfirmPrices(){
   const cutoff = new Date(Date.now() - RECEIVING_RECENT_DAYS*86400000).toISOString().slice(0,10);
   const confirmed = DATA.purchaseCosts.filter(p=> p.baseProduct && hasConfirmedPrice(p) && !isNotReceived(p) && matchesCp(p) && (p.priceConfirmedDate || p.receivedDate || "") >= cutoff)
     .slice().sort((a,b)=> String(b.priceConfirmedDate||b.receivedDate||"").localeCompare(String(a.priceConfirmedDate||a.receivedDate||"")) || String(b.priceConfirmedTime||"").localeCompare(String(a.priceConfirmedTime||"")));
-  const dlToday = costCsvDownloadsOn(todayStr);
-  const lastDl = dlToday.length ? dlToday[dlToday.length-1] : null;
+  const costTile = costCsvStatTile();
 
   const awaitingRows = awaiting.map(p=>{
     const hasOrdered = p.cost!==undefined && p.cost!==null && p.cost!=="" && Number(p.cost)>0;
@@ -4151,7 +4170,7 @@ function renderConfirmPrices(){
     <div class="cardrow">
       ${plainStat("Awaiting price", awaitingAll.length, awaitingAll.length?'var(--warn)':'var(--good)')}
       ${plainStat("Confirmed (last "+RECEIVING_RECENT_DAYS+"d)", confirmed.length, 'var(--ink)')}
-      ${plainStat("Cost CSV today", lastDl ? ("✓ " + fmtTime(lastDl.downloadedTime)) : "Not yet", lastDl ? 'var(--good)' : 'var(--warn)')}
+      ${plainStat(costTile.label, costTile.value, costTile.color)}
     </div>
     <div class="card">
       <div class="cardhead"><div><h3>Awaiting price</h3><div class="desc">${cpq ? `${awaiting.length} of ${awaitingAll.length}` : awaiting.length} received line${awaiting.length===1?"":"s"} with no confirmed price yet, oldest first.</div></div></div>
@@ -4191,20 +4210,22 @@ function renderSageImport(){
   const undeliveredLines = sageLines.filter(p=> !isReceived(p));
   const sageLocked = unpricedLines.length > 0;
   const todayStr = new Date().toISOString().slice(0,10);
-  const dlHistory = (DATA.costCsvDownloads||[]).slice().sort((a,b)=> (String(b.downloadedDate)+String(b.downloadedTime)).localeCompare(String(a.downloadedDate)+String(a.downloadedTime)));
+  // Sorted by the purchase date each file was for, newest first (then by when it was downloaded).
+  const dlHistory = (DATA.costCsvDownloads||[]).slice().sort((a,b)=> String(b.exportDate||"").localeCompare(String(a.exportDate||"")) || (String(b.downloadedDate)+String(b.downloadedTime)).localeCompare(String(a.downloadedDate)+String(a.downloadedTime)));
   const dlStrip = Array.from({length:14}, (_,i)=>{
-    const d = new Date(Date.now() - i*86400000).toISOString().slice(0,10);
-    const got = costCsvDownloadsOn(d);
+    const d = new Date(Date.now() - i*86400000).toISOString().slice(0,10); // a PURCHASE date
+    const got = costCsvDownloadsFor(d);
     const label = new Date(d+"T00:00:00Z").toUTCString().slice(0,11).replace(",","");
-    return got.length
-      ? chip("✓ " + label + " · " + got.map(g=>g.downloadedBy||"?").filter((v,ix,a)=>a.indexOf(v)===ix).join("/"), "good")
-      : chip("✗ " + label, i===0 ? "neutral" : "warn");
+    const hadPurchases = DATA.purchaseCosts.some(p=> p.baseProduct && p.date===d && isReceived(p) && !isNotReceived(p));
+    if(got.length) return chip("✓ " + label + " · " + got.map(g=>g.downloadedBy||"?").filter((v,ix,a)=>a.indexOf(v)===ix).join("/"), "good");
+    if(!hadPurchases) return chip("– " + label, "neutral");
+    return chip("✗ " + label, i===0 ? "neutral" : "warn");
   }).join(" ");
   const dlRows = dlHistory.slice(0,40).map(d=>`
     <tr>
+      <td style="font-weight:600;">${esc(d.exportDate||"all dates")}</td>
       <td class="helptext">${esc(d.downloadedDate||"—")} ${esc(fmtTime(d.downloadedTime))}</td>
       <td>${esc(d.downloadedBy||"—")}</td>
-      <td class="helptext">${esc(d.exportDate||"all dates")}</td>
       <td class="num">${esc(d.rows===undefined||d.rows===null?"":d.rows)}</td>
     </tr>`).join("");
   const tableRows = rows.map(r=>{
@@ -4245,11 +4266,11 @@ function renderSageImport(){
       </div>
     </div>
     <div class="card">
-      <div class="cardhead"><div><h3>Download record</h3><div class="desc">Every cost CSV download is logged with who and when, so you can check it's being done each day. Last 14 days (today first):</div></div></div>
+      <div class="cardhead"><div><h3>Download record</h3><div class="desc">Every cost CSV download is logged with who and when. Each day below is a <strong>purchase date</strong> — ✓ means the cost CSV for that day's buying has been downloaded (whenever it was downloaded), ✗ means it hasn't, – means nothing was received that day. Last 14 purchase dates (today first):</div></div></div>
       <div class="cardbody">
         <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;">${dlStrip}</div>
         <div class="tablewrap" style="max-height:260px;overflow-y:auto;"><table>
-          <thead><tr><th>Downloaded</th><th>By</th><th>Purchase date</th><th class="num">Rows</th></tr></thead>
+          <thead><tr><th>Purchase date</th><th>Downloaded</th><th>By</th><th class="num">Rows</th></tr></thead>
           <tbody>${dlRows || `<tr><td colspan="4" class="empty">No downloads recorded yet.</td></tr>`}</tbody>
         </table></div>
       </div>
