@@ -521,7 +521,13 @@ let salesUploadDate = new Date().toISOString().slice(0,10); // date the Item Sal
 let salesUploadDateUserSet = false; // true once the user manually changes the Report date field — stops the auto-default from overriding their choice
 let salesPendingA = null; // {filename, rows} staged Pyroca file for the current report date, awaiting Submit
 let salesPendingB = null; // {filename, rows} staged DF Veg file for the current report date, awaiting Submit
-let sageDateFilter = new Date().toISOString().slice(0,10);
+// "Today" for the cost-CSV rule is the calendar date in South Africa (the business's day), not UTC.
+function todaySA(){ return new Intl.DateTimeFormat("en-CA",{timeZone:"Africa/Johannesburg"}).format(new Date()); }
+function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate(d.getUTCDate()-1); return d.toISOString().slice(0,10); }
+// A day's cost CSV can only be pulled from the next calendar day (the next morning), so every delivery for that
+// day has had the chance to be received and priced first. Today's — or a future — purchase date is never allowed.
+function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
+let sageDateFilter = yesterdaySA(); // defaults to the day that is actually downloadable
 let sageOnlyPurchasedOnDate = true;
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
 // often than it's audited in bulk, so opening the tab should land on today's entries, not the full history.
@@ -582,7 +588,7 @@ let stockVarianceAsOfDate = "";
 let sellingPriceCategoryFilter = "";
 let sellingPriceSearch = "";
 let sellingPriceEditing = new Set();
-let sellingCsvDate = new Date().toISOString().slice(0,10); // Selling Prices: which day's moved prices the Selling Prices CSV covers
+let sellingCsvDate = yesterdaySA(); // Selling Prices: which day's moved prices the Selling Prices CSV covers
 const SAGE_MAX_IMPORT_LINES = 500; // Sage's import limit — a day with more moved prices is split into parts of this size
 // Market Statements (Costings) — which imported statement date is currently showing. Defaults to the
 // most recent date with data each time the tab is opened fresh (see renderMarketStatements()); "" only
@@ -4104,12 +4110,12 @@ function costCsvDownloadsFor(purchaseDate){
     .slice().sort((a,b)=> (String(a.downloadedDate)+String(a.downloadedTime)).localeCompare(String(b.downloadedDate)+String(b.downloadedTime)));
 }
 function shortDayLabel(d){ return new Date(d+"T00:00:00Z").toUTCString().slice(5,11); } // "12 Oct"
-// The purchase date whose cost CSV is currently "due": the most recent day (up to today) that has a received line.
+// The purchase date whose cost CSV is currently "due": the most recent day BEFORE today that has a received line.
 function costCsvDueDate(){
-  const todayStr = new Date().toISOString().slice(0,10);
+  const todayStr = todaySA(); // today's purchases aren't due until tomorrow (see costCsvTooEarly)
   let best = "";
   DATA.purchaseCosts.forEach(p=>{
-    if(p.baseProduct && isReceived(p) && !isNotReceived(p) && p.date && p.date<=todayStr && p.date>best) best = p.date;
+    if(p.baseProduct && isReceived(p) && !isNotReceived(p) && p.date && p.date<todayStr && p.date>best) best = p.date;
   });
   return best;
 }
@@ -4225,12 +4231,14 @@ function renderSageImport(){
   const sageLines = DATA.purchaseCosts.filter(p=> p.baseProduct && (!sageDateFilter || p.date===sageDateFilter) && !isNotReceived(p));
   const unpricedLines = sageLines.filter(p=> needsPriceConfirm(p));
   const undeliveredLines = sageLines.filter(p=> !isReceived(p));
+  const tooEarly = costCsvTooEarly(sageDateFilter);
   const sageLocked = unpricedLines.length > 0;
   const todayStr = new Date().toISOString().slice(0,10);
   // Sorted by the purchase date each file was for, newest first (then by when it was downloaded).
   const dlHistory = (DATA.costCsvDownloads||[]).slice().sort((a,b)=> String(b.exportDate||"").localeCompare(String(a.exportDate||"")) || (String(b.downloadedDate)+String(b.downloadedTime)).localeCompare(String(a.downloadedDate)+String(a.downloadedTime)));
   const dlStrip = Array.from({length:14}, (_,i)=>{
-    const d = new Date(Date.now() - i*86400000).toISOString().slice(0,10); // a PURCHASE date
+    const dd = new Date(todaySA()+"T00:00:00Z"); dd.setUTCDate(dd.getUTCDate()-i);
+    const d = dd.toISOString().slice(0,10); // a PURCHASE date (South African calendar day)
     const got = costCsvDownloadsFor(d);
     const label = new Date(d+"T00:00:00Z").toUTCString().slice(0,11).replace(",","");
     const hadPurchases = DATA.purchaseCosts.some(p=> p.baseProduct && p.date===d && isReceived(p) && !isNotReceived(p));
@@ -4261,17 +4269,18 @@ function renderSageImport(){
 
   return `
     <div class="pagehead">
-      <div><h2>Cost CSV</h2><p>Average Cost is pulled from Purchase Costs entries logged on the date selected below, once they've been received AND had their price confirmed on the Confirm Prices tab — the download stays locked until every received line for the date is priced, so run this after Receiving and Confirm Prices are caught up for the day. Quantity On Hand is exported as 0. A Product Mix (composite) item's cost is built from its ingredients' costs instead — see Product Mixes for the full breakdown. Unlike a plain item, a mix doesn't need every one of its ingredients purchased on this exact date: it uses each ingredient's latest known cost (same as Product Mixes shows), tagged "latest known price" below whenever that's not this date's own figure, since a multi-ingredient mix is rarely bought whole in one day.</p></div>
+      <div><h2>Cost CSV</h2><p>A day's Cost CSV can only be downloaded from the next calendar day (the next morning), so every delivery for that day has had the chance to be received and priced. Average Cost is pulled from Purchase Costs entries logged on the date selected below, once they've been received AND had their price confirmed on the Confirm Prices tab — the download stays locked until every received line for the date is priced, so run this after Receiving and Confirm Prices are caught up for the day. Quantity On Hand is exported as 0. A Product Mix (composite) item's cost is built from its ingredients' costs instead — see Product Mixes for the full breakdown. Unlike a plain item, a mix doesn't need every one of its ingredients purchased on this exact date: it uses each ingredient's latest known cost (same as Product Mixes shows), tagged "latest known price" below whenever that's not this date's own figure, since a multi-ingredient mix is rarely bought whole in one day.</p></div>
       <div class="actions">
         <div class="field" style="min-width:170px;">
           <label>Purchase date</label>
           <input type="date" id="sageDateFilter" value="${esc(sageDateFilter)}">
         </div>
         <label class="btn"><input type="checkbox" id="toggleFilter" ${sageOnlyPurchasedOnDate?"checked":""} style="margin-right:6px;">Only items purchased on this date</label>
-        <button class="btn primary" id="downloadSageCsv" ${sageLocked?'disabled title="Confirm every received price first (Confirm Prices tab)"':(zeroCostRows.length?'disabled title="Fix the R0 cost item(s) below before exporting"':'')}>Download Cost CSV</button>
+        <button class="btn primary" id="downloadSageCsv" ${tooEarly?'disabled title="A day\'s Cost CSV can only be downloaded from the next morning"':sageLocked?'disabled title="Confirm every received price first (Confirm Prices tab)"':(zeroCostRows.length?'disabled title="Fix the R0 cost item(s) below before exporting"':'')}>Download Cost CSV</button>
       </div>
     </div>
-    ${sageLocked ? `<div class="banner critical"><span>🔒 ${unpricedLines.length} received line${unpricedLines.length===1?"":"s"} for ${esc(sageDateFilter||"these dates")} still need${unpricedLines.length===1?"s":""} a confirmed price (${unpricedLines.slice(0,6).map(p=>esc(p.baseProduct)).filter((v,ix,a)=>a.indexOf(v)===ix).join(", ")}${unpricedLines.length>6?" and more":""}). The CSV unlocks once every one is confirmed.</span><button class="btn small" data-goto-tab="confirmprices">Go to Confirm Prices →</button></div>` : ""}
+    ${tooEarly ? `<div class="banner critical">🔒 The Cost CSV for ${esc(sageDateFilter||"this date")} can only be downloaded from the next calendar day, so every delivery has the chance to be received and priced first. Pick an earlier purchase date.</div>` : ""}
+    ${(!tooEarly && sageLocked) ? `<div class="banner critical"><span>🔒 ${unpricedLines.length} received line${unpricedLines.length===1?"":"s"} for ${esc(sageDateFilter||"these dates")} still need${unpricedLines.length===1?"s":""} a confirmed price (${unpricedLines.slice(0,6).map(p=>esc(p.baseProduct)).filter((v,ix,a)=>a.indexOf(v)===ix).join(", ")}${unpricedLines.length>6?" and more":""}). The CSV unlocks once every one is confirmed.</span><button class="btn small" data-goto-tab="confirmprices">Go to Confirm Prices →</button></div>` : ""}
     ${(!sageLocked && undeliveredLines.length) ? `<div class="banner warn">ℹ ${undeliveredLines.length} order${undeliveredLines.length===1?"":"s"} for ${esc(sageDateFilter||"these dates")} haven't been received yet, so ${undeliveredLines.length===1?"it isn't":"they aren't"} in this CSV.</div>` : ""}
     ${zeroCostRows.length ? `<div class="banner critical">⚠ ${zeroCostRows.length} item${zeroCostRows.length===1?"":"s"} would export at R0 — a buy was logged (and received) with no price: ${zeroCostRows.slice(0,6).map(r=>esc(r.item)).join(", ")}${zeroCostRows.length>6?` and ${zeroCostRows.length-6} more`:""}. Download is blocked until the price is fixed in Confirm Prices or Purchase Costs.</div>` : ""}
     <div class="card">
@@ -6236,6 +6245,7 @@ function wireTabEvents(){
       persist("Wastage buffers saved", ["categoryCostBuffers"]);
     });
     document.getElementById("downloadSageCsv").addEventListener("click", ()=>{
+      if(costCsvTooEarly(sageDateFilter)){ toast("A day's Cost CSV can only be downloaded from the next morning"); return; }
       const all = sageImportComputed(sageDateFilter);
       const rows = sageOnlyPurchasedOnDate ? all.filter(r=>r.purchasedOnDate) : all;
       if(!rows.length){ toast("Nothing to export yet"); return; }
