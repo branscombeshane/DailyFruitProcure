@@ -3050,6 +3050,7 @@ function renderReceiving(){
   const notReceivedRows = notReceivedShown.map(p=>`
     <tr>
       <td>${esc(p.baseProduct)}</td>
+      <td class="num">${(p.qty===undefined || p.qty===null || p.qty==="") ? "—" : fmtNum(p.qty)}</td>
       <td class="helptext">${esc(p.date||"—")}</td>
       <td>${esc(p.supplier||"—")}</td>
       <td>${esc(p.notReceivedReason||"—")}</td>
@@ -3128,8 +3129,8 @@ function renderReceiving(){
       <div class="cardhead"><div><h3>Not received</h3><div class="desc">${search ? `${notReceivedShown.length} of ${notReceived.length}` : notReceived.length} order(s) confirmed as NOT arriving in the last ${NOT_RECEIVED_RETENTION_DAYS} days, with a reason on file. Reopen sends one back to Pending delivery. Older than ${NOT_RECEIVED_RETENTION_DAYS} days just drops off this list — it's still on record in Purchase Costs, it's just no longer shown here.</div></div></div>
       <div class="cardbody" style="padding:0;">
         <div class="tablewrap" style="border:none;border-radius:0;"><table>
-          <thead><tr><th>Base product</th><th>Ordered</th><th>Supplier</th><th>Reason</th><th>Marked by</th><th></th></tr></thead>
-          <tbody>${notReceivedRows || (search ? `<tr><td colspan="6" class="empty">No "not received" lines match "${esc(receivingSearch)}".</td></tr>` : `<tr><td colspan="6" class="empty">Nothing marked not received in the last ${NOT_RECEIVED_RETENTION_DAYS} days.</td></tr>`)}</tbody>
+          <thead><tr><th>Base product</th><th class="num">Qty ordered</th><th>Ordered</th><th>Supplier</th><th>Reason</th><th>Marked by</th><th></th></tr></thead>
+          <tbody>${notReceivedRows || (search ? `<tr><td colspan="7" class="empty">No "not received" lines match "${esc(receivingSearch)}".</td></tr>` : `<tr><td colspan="7" class="empty">Nothing marked not received in the last ${NOT_RECEIVED_RETENTION_DAYS} days.</td></tr>`)}</tbody>
         </table></div>
       </div>
     </div>` : ""}
