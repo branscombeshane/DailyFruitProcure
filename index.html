@@ -431,6 +431,11 @@ function applyDataDefaults(d){
   if(!d.itemMinPrice) d.itemMinPrice = {};
   if(!d.priceQuotes) d.priceQuotes = [];
   if(!d.costCsvDownloads) d.costCsvDownloads = []; // backward-compatible default for sheets predating the cost CSV download log
+  // Defensive: if the Sheet ever hands a date/time cell back as a full timestamp ("2026-10-11T22:00:00.000Z",
+  // "1899-12-30T…") instead of the plain "yyyy-MM-dd" / "HH:mm:ss" text, turn it back into one so the
+  // per-day matching (cost CSV done for date D? / downloads today) still works.
+  d.costCsvDownloads = d.costCsvDownloads.map(r=> Object.assign({}, r, {
+    exportDate: normDayStr(r.exportDate), downloadedDate: normDayStr(r.downloadedDate), downloadedTime: normClockStr(r.downloadedTime)}));
   if(!d.palletTallyResets) d.palletTallyResets = []; // backward-compatible default for backups/sheets predating the owner-only Pallet tally reset
   return d;
 }
@@ -727,6 +732,22 @@ function money(n){ return n===null||n===undefined||n==="" ? "" : "R"+fmtNum(n,2)
 // HH:MM:SS (as stored) -> HH:MM for display — minute precision is plenty to find the right spot on a
 // camera system's timeline, and blank/missing (older rows, or a manually-dated batch entry with no real
 // receipt moment — see submitPurchaseBatch) is left as nothing rather than a misleading "00:00".
+function normDayStr(v){
+  if(v===undefined || v===null || v==="") return v;
+  const s = String(v);
+  if(/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  const dt = new Date(v);
+  if(isNaN(dt.getTime())) return s;
+  return dt.getFullYear()+"-"+String(dt.getMonth()+1).padStart(2,"0")+"-"+String(dt.getDate()).padStart(2,"0");
+}
+function normClockStr(v){
+  if(v===undefined || v===null || v==="") return v;
+  const s = String(v);
+  if(/^\d{1,2}:\d{2}/.test(s)) return s;
+  const dt = new Date(v);
+  if(isNaN(dt.getTime())) return s;
+  return String(dt.getHours()).padStart(2,"0")+":"+String(dt.getMinutes()).padStart(2,"0")+":"+String(dt.getSeconds()).padStart(2,"0");
+}
 function fmtTime(t){
   if(!t) return "";
   const m = String(t).match(/^(\d{1,2}):(\d{2})/); // "8:04:12" used to be cut to "8:04:" by a plain slice(0,5)
