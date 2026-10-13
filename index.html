@@ -551,6 +551,7 @@ let quickBuyEditingId = null; // id of the purchase line being corrected, or nul
 // ids of already-received purchase lines currently showing an editable received-qty/received-cost form
 // again (to correct a mistake) — pending (not-yet-received) lines always show the form, no toggle needed.
 let receivingEditing = new Set();
+let confirmPricesSearch = ""; // Confirm Prices: filters both tables by base product
 let pricesEditing = new Set(); // Confirm Prices: ids of already-confirmed lines whose price is open for correction
 // ids of pending purchase lines currently showing the inline "not received" reason box — mirrors
 // shoppingIssueEditing's pattern for "unable to purchase" on the Shopping List.
@@ -576,6 +577,8 @@ let stockVarianceAsOfDate = "";
 let sellingPriceCategoryFilter = "";
 let sellingPriceSearch = "";
 let sellingPriceEditing = new Set();
+let sellingCsvDate = new Date().toISOString().slice(0,10); // Selling Prices: which day's moved prices the Sage CSV covers
+const SAGE_MAX_IMPORT_LINES = 500; // Sage's import limit — a day with more moved prices is split into parts of this size
 // Market Statements (Costings) — which imported statement date is currently showing. Defaults to the
 // most recent date with data each time the tab is opened fresh (see renderMarketStatements()); "" only
 // means nothing has ever been imported yet.
@@ -677,6 +680,10 @@ function hasUnsavedInlineEdit(){
     // unsaved edit above: defer to the stale-data banner instead of silently swapping underneath them.
     const searchEl = document.getElementById("receivingSearchInput");
     if(searchEl && searchEl.value !== "") return true;
+  }
+  if(currentTab==="confirmprices"){
+    const cps = document.getElementById("confirmPricesSearchInput");
+    if(cps && cps.value !== "") return true; // an active search — don't let a silent refresh rebuild the box under someone's fingers
   }
   // Generic check for every other tab's free-typed fields — see the comment above this function.
   // Checkboxes store "true"/"false" strings in data-pristine (there's no text value to compare);
@@ -1494,6 +1501,37 @@ function marginFor(item, category){
 // built up), whether the latest cost counts as a "good deal" against that trend, the margin actually
 // applied (and where it came from), the resulting suggested price, and — once any prices have been
 // recorded — the last price actually set so it's obvious how far off the current asking price is.
+// Sage selling-price CSV, by date (Oct 2026): the all-items export went over Sage's 500-line import limit, so
+// like the cost CSV it now covers ONE day and only what moved. "Moved on D" = the item had a price recorded
+// (Update price / Update all shown) on D, and its final price that day differs from its last price recorded
+// before D (or it had none — first time priced). That's the set Sage doesn't already have. The exported price
+// is the price recorded that day. The download is also locked until the cost CSV for D has been downloaded
+// (see costCsvDownloadedFor) — selling prices are built from costs, so costs go to Sage first.
+function costCsvDownloadedFor(dateStr){
+  return (DATA.costCsvDownloads||[]).some(d=> d.exportDate===dateStr);
+}
+function sellingPricesMovedOn(dateStr){
+  const byItem = {};
+  (DATA.priceQuotes||[]).forEach(q=>{ if(q.item) (byItem[q.item] = byItem[q.item]||[]).push(q); });
+  const order = (a,b)=> String(a.date||"").localeCompare(String(b.date||"")) || String(a.time||"").localeCompare(String(b.time||""));
+  const info = {};
+  DATA.itemSetup.forEach(it=>{ info[it.item] = it; });
+  const out = [];
+  Object.keys(byItem).forEach(item=>{
+    const qs = byItem[item].slice().sort(order);
+    const dayQs = qs.filter(q=> q.date===dateStr);
+    if(!dayQs.length || !info[item]) return;
+    const last = dayQs[dayQs.length-1];
+    const before = qs.filter(q=> String(q.date||"") < dateStr);
+    const prev = before.length ? before[before.length-1] : null;
+    if(prev && Number(prev.price)===Number(last.price)) return; // recorded again at the same price — nothing moved
+    const it = info[item];
+    out.push({item, itemCode: it.itemCode, description: sageItemDescription(it), vatable: !!it.vatable,
+      price: Number(last.price), prevPrice: prev ? Number(prev.price) : null});
+  });
+  return out.sort((a,b)=> a.item.localeCompare(b.item));
+}
+
 function pricingSuggestionsComputed(){
   const plan = DATA.pricingPlan || {};
   const windowDays = Number(plan.trendWindowDays)>0 ? Math.round(Number(plan.trendWindowDays)) : 21;
@@ -4042,9 +4080,12 @@ function costCsvDownloadsOn(dateStr){
 }
 function renderConfirmPrices(){
   const todayStr = new Date().toISOString().slice(0,10);
-  const awaiting = awaitingPriceLines();
+  const cpq = confirmPricesSearch.trim().toLowerCase();
+  const matchesCp = (p)=> !cpq || String(p.baseProduct||"").toLowerCase().includes(cpq);
+  const awaitingAll = awaitingPriceLines();
+  const awaiting = awaitingAll.filter(matchesCp);
   const cutoff = new Date(Date.now() - RECEIVING_RECENT_DAYS*86400000).toISOString().slice(0,10);
-  const confirmed = DATA.purchaseCosts.filter(p=> p.baseProduct && hasConfirmedPrice(p) && !isNotReceived(p) && (p.priceConfirmedDate || p.receivedDate || "") >= cutoff)
+  const confirmed = DATA.purchaseCosts.filter(p=> p.baseProduct && hasConfirmedPrice(p) && !isNotReceived(p) && matchesCp(p) && (p.priceConfirmedDate || p.receivedDate || "") >= cutoff)
     .slice().sort((a,b)=> String(b.priceConfirmedDate||b.receivedDate||"").localeCompare(String(a.priceConfirmedDate||a.receivedDate||"")) || String(b.priceConfirmedTime||"").localeCompare(String(a.priceConfirmedTime||"")));
   const dlToday = costCsvDownloadsOn(todayStr);
   const lastDl = dlToday.length ? dlToday[dlToday.length-1] : null;
@@ -4096,21 +4137,22 @@ function renderConfirmPrices(){
     <div class="pagehead">
       <div><h2>Confirm Prices</h2><p>Receiving only counts quantities now. Once a delivery has been received, add or confirm its buying price here — per the unit shown under the price box (the Base Product's procurement unit in Item Setup). If a price was entered when the order was placed it's filled in for you, but nothing counts until you press Confirm. The Sage cost CSV can only be downloaded once every received delivery for its date has a confirmed price.</p></div>
       <div class="actions">
-        ${awaiting.length ? `<button class="btn primary" id="confirmAllPrices" title="Confirms every line below that has a price filled in">✓ Confirm all with a price</button>` : ""}
+        <div class="field" style="min-width:220px;"><label>Search base product</label><input type="text" id="confirmPricesSearchInput" placeholder="e.g. Banana…" value="${esc(confirmPricesSearch)}"></div>
+        ${awaiting.length ? `<button class="btn primary" id="confirmAllPrices" title="Confirms every line shown below that has a price filled in">✓ Confirm all${cpq ? " shown" : ""} with a price</button>` : ""}
         <button class="btn small" data-goto-tab="sageimport">Go to Sage CSV →</button>
       </div>
     </div>
     <div class="cardrow">
-      ${plainStat("Awaiting price", awaiting.length, awaiting.length?'var(--warn)':'var(--good)')}
+      ${plainStat("Awaiting price", awaitingAll.length, awaitingAll.length?'var(--warn)':'var(--good)')}
       ${plainStat("Confirmed (last "+RECEIVING_RECENT_DAYS+"d)", confirmed.length, 'var(--ink)')}
       ${plainStat("Cost CSV today", lastDl ? ("✓ " + fmtTime(lastDl.downloadedTime)) : "Not yet", lastDl ? 'var(--good)' : 'var(--warn)')}
     </div>
     <div class="card">
-      <div class="cardhead"><div><h3>Awaiting price</h3><div class="desc">${awaiting.length} received line${awaiting.length===1?"":"s"} with no confirmed price yet, oldest first.</div></div></div>
+      <div class="cardhead"><div><h3>Awaiting price</h3><div class="desc">${cpq ? `${awaiting.length} of ${awaitingAll.length}` : awaiting.length} received line${awaiting.length===1?"":"s"} with no confirmed price yet, oldest first.</div></div></div>
       <div class="cardbody" style="padding:0;">
         <div class="tablewrap" style="border:none;border-radius:0;"><table>
           <thead><tr><th>Base product</th><th>Received</th><th class="num">Qty received</th><th>Supplier</th><th>Order price</th><th>Buying price</th><th></th></tr></thead>
-          <tbody>${awaitingRows || `<tr><td colspan="7" class="empty">Nothing waiting — every received delivery has a confirmed price.</td></tr>`}</tbody>
+          <tbody>${awaitingRows || `<tr><td colspan="7" class="empty">${cpq ? `No lines awaiting a price match "${esc(confirmPricesSearch)}".` : "Nothing waiting — every received delivery has a confirmed price."}</td></tr>`}</tbody>
         </table></div>
       </div>
     </div>
@@ -4119,7 +4161,7 @@ function renderConfirmPrices(){
       <div class="cardbody" style="padding:0;">
         <div class="tablewrap" style="border:none;border-radius:0;"><table>
           <thead><tr><th>Base product</th><th>Received</th><th class="num">Qty</th><th class="num">Price</th><th class="num">Line total</th><th>Confirmed by</th><th></th></tr></thead>
-          <tbody>${confirmedRows || `<tr><td colspan="7" class="empty">Nothing confirmed in the last ${RECEIVING_RECENT_DAYS} days.</td></tr>`}</tbody>
+          <tbody>${confirmedRows || `<tr><td colspan="7" class="empty">${cpq ? `No recently confirmed lines match "${esc(confirmPricesSearch)}".` : `Nothing confirmed in the last ${RECEIVING_RECENT_DAYS} days.`}</td></tr>`}</tbody>
         </table></div>
       </div>
     </div>`;
@@ -4471,8 +4513,24 @@ function renderSellingPrices(){
   const withSuggestion = rows.filter(r=>r.suggestedPrice!==null).length;
   const goodDeals = rows.filter(r=>r.isGoodDeal).length;
   const noCost = rows.length - withSuggestion;
-  const exportableRows = rows.filter(r=> r.exportPrice!==null);
-  const notExportable = rows.length - exportableRows.length;
+  const movedRows = sellingPricesMovedOn(sellingCsvDate);
+  const costDone = costCsvDownloadedFor(sellingCsvDate);
+  const csvParts = Math.max(1, Math.ceil(movedRows.length / SAGE_MAX_IMPORT_LINES));
+  const canDownloadSelling = costDone && movedRows.length > 0;
+  const sellingDownloadTitle = !costDone ? "Download the cost prices for this date first (Sage CSV tab)" : (!movedRows.length ? "No prices moved on this date" : "");
+  const partButtons = Array.from({length:csvParts}, (_,i)=>{
+    const from = i*SAGE_MAX_IMPORT_LINES + 1, to = Math.min(movedRows.length, (i+1)*SAGE_MAX_IMPORT_LINES);
+    const label = csvParts===1 ? "Download Sage CSV" : `Download part ${i+1} of ${csvParts} (rows ${from}–${to})`;
+    return `<button class="btn primary" data-sellingcsv-part="${i}" ${canDownloadSelling?"":`disabled title="${esc(sellingDownloadTitle)}"`}>${label}</button>`;
+  }).join("");
+  const movedTableRows = movedRows.map(r=>`
+    <tr>
+      <td>${esc(r.itemCode||"")}</td>
+      <td>${esc(r.item)}</td>
+      <td class="num">${r.prevPrice!==null ? money(r.prevPrice) : "—"}</td>
+      <td class="num" style="font-weight:600;">${money(r.price)}</td>
+      <td>${r.prevPrice===null ? chip("new","neutral") : (r.price>r.prevPrice ? chip("▲ "+money(round2(r.price-r.prevPrice)),"warn") : chip("▼ "+money(round2(r.prevPrice-r.price)),"good"))}</td>
+    </tr>`).join("");
 
   const marginFields = categories.map(c=>{ const cmVal = DATA.categoryMarginPct[c]!==undefined && DATA.categoryMarginPct[c]!==null ? round2(DATA.categoryMarginPct[c]*100) : ""; return `<div class="field"><label>${esc(c)} %</label><input class="rowinput num" data-catmargin-input="${esc(c)}" value="${cmVal}" data-pristine="${esc(cmVal)}" placeholder="${fmtNum((Number(plan.defaultMarginPct)||0)*100,0)}"></div>`; }).join("");
 
@@ -4544,15 +4602,18 @@ function renderSellingPrices(){
 
   return `
     <div class="pagehead">
-      <div><h2>Selling Prices</h2><p>A suggested selling price per item, built from the latest known cost (Purchase Costs / Receiving) plus a target margin — bumped automatically when the latest cost is running notably below the recent trend ("good deal" below). Suggested prices are rounded up to the nearest 50c so they read as normal retail prices. This builds up smarter over time as more cost and price history accumulates; for now it's a starting point to tweak or override, not a final answer.</p></div>
+      <div><h2>Selling Prices</h2><p>A suggested selling price per item, built from the latest known cost (Purchase Costs / Receiving) plus a target margin — bumped automatically when the latest cost is running notably below the recent trend ("good deal" below). Suggested prices are rounded up to the nearest 50c so they read as normal retail prices. This builds up smarter over time as more cost and price history accumulates; for now it's a starting point to tweak or override, not a final answer. The Sage CSV only carries prices you've recorded (Update price / Update all shown) on the chosen date that differ from the previous recorded price, and unlocks once that date's cost CSV has been downloaded.</p></div>
       <div class="actions">
-        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;">
-          <button class="btn primary" id="downloadSellingPricesCsv" ${exportableRows.length?"":'disabled title="Nothing to export yet — no item has a cost or a recorded price"'}>Download Sage CSV</button>
-          <div class="helptext">Code, Description, Default Price List - Exclusive, VAT Type Sales, VAT Type Purchases — the price you've set (or today's suggestion if you haven't set one yet), and the VAT rate from that item's Vatable tick box on Item Setup</div>
+        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;">
+          <div class="field" style="min-width:170px;"><label>Prices moved on</label><input type="date" id="sellingCsvDate" value="${esc(sellingCsvDate)}"></div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;">${partButtons}</div>
+          <div class="helptext" style="max-width:420px;text-align:right;">Code, Description, Default Price List - Exclusive, VAT Type Sales, VAT Type Purchases — only items whose price was recorded on this date and changed, so the file stays within Sage's ${SAGE_MAX_IMPORT_LINES}-line import limit. Locked until that date's cost prices have been downloaded.</div>
         </div>
       </div>
     </div>
-    ${notExportable ? `<div class="banner info">ℹ ${notExportable} item${notExportable===1?"":"s"} skipped from the export — no recorded price and no cost yet to suggest one from.</div>` : ""}
+    ${!costDone ? `<div class="banner critical"><span>🔒 The cost prices for ${esc(sellingCsvDate||"this date")} haven't been downloaded yet, so the selling prices can't be either. Download the cost CSV first.</span><button class="btn small" data-goto-tab="sageimport">Go to Sage CSV →</button></div>` : ""}
+    ${(costDone && !movedRows.length) ? `<div class="banner info">ℹ No prices were recorded as changed on ${esc(sellingCsvDate||"this date")} — use "Update price" / "Update all shown" below first, then they'll appear in this day's export.</div>` : ""}
+    ${movedRows.length > SAGE_MAX_IMPORT_LINES ? `<div class="banner warn">ℹ ${movedRows.length} prices moved on ${esc(sellingCsvDate)} — more than Sage's ${SAGE_MAX_IMPORT_LINES}-line limit, so the download is split into ${csvParts} parts. Import them one after the other.</div>` : ""}
     <div class="cardrow">
       <div class="stat"><div class="label">Items priced</div><div class="value">${withSuggestion} / ${rows.length}</div></div>
       <div class="stat"><div class="label">Good deals right now</div><div class="value" style="color:${goodDeals?'var(--good)':'inherit'}">${goodDeals}</div></div>
@@ -4588,6 +4649,17 @@ function renderSellingPrices(){
           <table>
             <thead><tr><th>Item</th><th>Category</th><th class="num">Latest cost</th><th>Trend (${Number(plan.trendWindowDays)||21}d)</th><th>Margin</th><th>Min price</th><th class="num">Suggested price</th><th>Current price</th><th></th></tr></thead>
             <tbody>${tableRows || `<tr><td colspan="9" class="empty">No items match.</td></tr>`}</tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="cardhead"><div><h3>Sage export for ${esc(sellingCsvDate||"—")}</h3><div class="desc">${movedRows.length} price${movedRows.length===1?"":"s"} moved on this date — exactly what the download contains.</div></div></div>
+      <div class="cardbody" style="padding:0;">
+        <div class="tablewrap" style="border:none;border-radius:0;max-height:360px;overflow-y:auto;">
+          <table>
+            <thead><tr><th>Item code</th><th>Item</th><th class="num">Previous price</th><th class="num">New price</th><th>Change</th></tr></thead>
+            <tbody>${movedTableRows || `<tr><td colspan="5" class="empty">Nothing moved on this date.</td></tr>`}</tbody>
           </table>
         </div>
       </div>
@@ -6054,7 +6126,7 @@ function wireTabEvents(){
     });
   }
 
-  if(currentTab==="sageimport" || currentTab==="confirmprices"){
+  if(currentTab==="sageimport" || currentTab==="confirmprices" || currentTab==="sellingprices"){
     document.querySelectorAll("[data-goto-tab]").forEach(el=>{
       el.addEventListener("click", ()=>{ setCurrentTab(el.dataset.gotoTab); render(); });
     });
@@ -6093,9 +6165,12 @@ function wireTabEvents(){
     });
     const confirmAll = document.getElementById("confirmAllPrices");
     if(confirmAll) confirmAll.addEventListener("click", ()=>{
-      const ids = awaitingPriceLines().map(p=>p.id);
+      // only the rows currently shown (the search filter applies) — same scoping as Selling Prices' "Update all shown"
+      const ids = Array.from(document.querySelectorAll("tr[data-price-row]")).map(tr=> tr.dataset.priceRow).filter(id=> document.querySelector('.confirm-price[data-confirm-id="'+id+'"]') && awaitingPriceLines().some(p=>p.id===id));
       submitPrices(ids);
     });
+    const cpSearch = document.getElementById("confirmPricesSearchInput");
+    if(cpSearch) cpSearch.addEventListener("input", (e)=>{ confirmPricesSearch = e.target.value; render(); });
     document.querySelectorAll("[data-price-edit]").forEach(btn=>{
       btn.addEventListener("click", ()=>{ pricesEditing.add(btn.dataset.priceEdit); render(); });
     });
@@ -6227,19 +6302,25 @@ function wireTabEvents(){
         persist("Updated " + rows.length + " price" + (rows.length===1?"":"s"), ["priceQuotes"]);
       });
     }
-    const downloadSellingPricesBtn = document.getElementById("downloadSellingPricesCsv");
-    if(downloadSellingPricesBtn){
-      downloadSellingPricesBtn.addEventListener("click", ()=>{
-        const rows = pricingSuggestionsComputed().filter(r=> r.exportPrice!==null);
-        if(!rows.length){ toast("Nothing to export yet"); return; }
-        const csv = "Code,Description,Default Price List - Exclusive,VAT Type Sales,VAT Type Purchases\n" + rows.map(r=>{
+    const sellingDateInput = document.getElementById("sellingCsvDate");
+    if(sellingDateInput) sellingDateInput.addEventListener("change", (e)=>{ sellingCsvDate = e.target.value; render(); });
+    document.querySelectorAll("[data-sellingcsv-part]").forEach(btn=>{
+      btn.addEventListener("click", ()=>{
+        const part = Number(btn.dataset.sellingcsvPart);
+        // same gates as the (disabled) button — see renderSellingPrices
+        if(!costCsvDownloadedFor(sellingCsvDate)){ toast("Download the cost prices for this date first (Sage CSV tab)"); return; }
+        const moved = sellingPricesMovedOn(sellingCsvDate);
+        if(!moved.length){ toast("No prices moved on this date"); return; }
+        const slice = moved.slice(part*SAGE_MAX_IMPORT_LINES, (part+1)*SAGE_MAX_IMPORT_LINES);
+        const csv = "Code,Description,Default Price List - Exclusive,VAT Type Sales,VAT Type Purchases\n" + slice.map(r=>{
           const vatType = r.vatable ? "Standard Rate (15.00%)" : "Zero Rate (0.00%)";
-          return [toCsvField(r.itemCode), toCsvField(r.description), r.exportPrice, toCsvField(vatType), toCsvField(vatType)].join(",");
+          return [toCsvField(r.itemCode), toCsvField(r.description), r.price, toCsvField(vatType), toCsvField(vatType)].join(",");
         }).join("\n");
-        browserDownload("sage_selling_prices_"+new Date().toISOString().slice(0,10)+".csv", csv, "text/csv");
+        const parts = Math.ceil(moved.length / SAGE_MAX_IMPORT_LINES);
+        browserDownload("sage_selling_prices_"+sellingCsvDate+(parts>1 ? "_part"+(part+1)+"of"+parts : "")+".csv", csv, "text/csv");
         toast("Download started");
       });
-    }
+    });
   }
 
   if(currentTab==="stocktake"){
