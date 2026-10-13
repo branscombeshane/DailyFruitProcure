@@ -401,7 +401,7 @@ function applyDataDefaults(d){
   if(!d.salesHistory) d.salesHistory = []; // backward-compatible default for backups predating automatic sales history archiving
   if(!d.procurementSignoffs) d.procurementSignoffs = []; // backward-compatible default for backups predating the daily procurement sign-off
   if(!d.categoryBuffers) d.categoryBuffers = {}; // backward-compatible default: per-category safety buffer % overrides (falls back to the global safety buffer when unset)
-  if(!d.categoryCostBuffers) d.categoryCostBuffers = {}; // backward-compatible default: per-category cost (wastage) buffer %, Sage CSV only — distinct from categoryBuffers (a demand buffer)
+  if(!d.categoryCostBuffers) d.categoryCostBuffers = {}; // backward-compatible default: per-category cost (wastage) buffer %, Cost CSV only — distinct from categoryBuffers (a demand buffer)
   if(!d.shoppingListSnapshotDates) d.shoppingListSnapshotDates = []; // set by doGet, not saved by the app itself — defaults to empty until the nightly snapshot trigger has run at least once
   if(!d.productCycles) d.productCycles = {}; // backward-compatible default: per-product replenishment cycle length overrides (falls back to the global cover multiplier when unset)
   if(!d.productCeilings) d.productCeilings = {}; // backward-compatible default: per-product shelf-life hold ceilings (no cap when unset)
@@ -577,7 +577,7 @@ let stockVarianceAsOfDate = "";
 let sellingPriceCategoryFilter = "";
 let sellingPriceSearch = "";
 let sellingPriceEditing = new Set();
-let sellingCsvDate = new Date().toISOString().slice(0,10); // Selling Prices: which day's moved prices the Sage CSV covers
+let sellingCsvDate = new Date().toISOString().slice(0,10); // Selling Prices: which day's moved prices the Selling Prices CSV covers
 const SAGE_MAX_IMPORT_LINES = 500; // Sage's import limit — a day with more moved prices is split into parts of this size
 // Market Statements (Costings) — which imported statement date is currently showing. Defaults to the
 // most recent date with data each time the tab is opened fresh (see renderMarketStatements()); "" only
@@ -612,7 +612,7 @@ const NAV = [
     {id:"purchase", label:"Purchase Costs"},
     {id:"confirmprices", label:"Confirm Prices"},
     {id:"pricehistory", label:"Price History"},
-    {id:"sageimport", label:"Sage CSV"},
+    {id:"sageimport", label:"Cost CSV"},
     {id:"marketstatements", label:"Market Statements"},
   ]},
   {group:"Selling", items:[
@@ -746,7 +746,7 @@ function parseItem(item){
 
 // Sage's own item descriptions include the unit suffix (e.g. "Apple Golden Delicious - BOX"), but
 // parseItem() deliberately keeps `description` and `unit`/`sellingUnit` separate (see above — that split
-// is what lets Item Setup show them in their own columns). Shane's report: the Selling Prices Sage CSV
+// is what lets Item Setup show them in their own columns). Shane's report: the Selling Prices CSV
 // export was using the bare `description` alone, so every variant of an item (BOX/KG/EACH) exported with
 // an identical, ambiguous description — this reassembles the two back into the single "Description - UNIT"
 // string Sage actually expects, matching the format of Sage's own item list one-for-one.
@@ -3583,7 +3583,7 @@ function renderItemSetup(){
     ${renderManageBaseProducts()}
     <div class="card">
       <div class="cardhead">
-        <div><h3>Items</h3><div class="desc">Edit the input columns, then Save changes once. Category applies to every variant of that Base Product. For a Product Mix (assembled from other stock, not bought directly), set Category to "Mixes" — Base Product, Procurement Unit and Qty per Unit don't apply and blank out automatically. Tick Vatable for a product that carries standard-rate VAT (most fresh produce is zero-rated, so this stays unticked by default) — feeds the VAT Type columns on the Selling Prices Sage CSV export.</div></div>
+        <div><h3>Items</h3><div class="desc">Edit the input columns, then Save changes once. Category applies to every variant of that Base Product. For a Product Mix (assembled from other stock, not bought directly), set Category to "Mixes" — Base Product, Procurement Unit and Qty per Unit don't apply and blank out automatically. Tick Vatable for a product that carries standard-rate VAT (most fresh produce is zero-rated, so this stays unticked by default) — feeds the VAT Type columns on the Selling Prices CSV export.</div></div>
         <div class="field" style="min-width:180px;">
           <label>Filter by category</label>
           <select id="itemSetupCategoryFilterSel">${categoryFilterOptions}</select>
@@ -3652,7 +3652,7 @@ function renderRecipes(){
       <div class="actions"><button class="btn primary" id="saveRecipes">Save changes</button></div>
     </div>
     <div class="card">
-      <div class="cardhead"><div><h3>Product mix costs</h3><div class="desc">Cost per unit for each mix, built from the current known cost of its ingredients (their most recently logged Purchase Cost) — recalculates automatically the moment you log a new purchase for any ingredient, no manual update needed. Also feeds the Sage CSV export.</div></div></div>
+      <div class="cardhead"><div><h3>Product mix costs</h3><div class="desc">Cost per unit for each mix, built from the current known cost of its ingredients (their most recently logged Purchase Cost) — recalculates automatically the moment you log a new purchase for any ingredient, no manual update needed. Also feeds the Cost CSV export.</div></div></div>
       <div class="cardbody" style="padding:0;">
         <div class="tablewrap" style="border:none;border-radius:0;">
           <table>
@@ -4066,7 +4066,7 @@ function renderPriceHistory(){
     </div>`;
 }
 
-// ---------- Sage CSV ----------
+// ---------- Cost CSV ----------
 // ---------- Confirm Prices (Oct 2026) ----------
 // Receiving staff were struggling to work out the price per Base Product unit, which was corrupting
 // costings — so Receiving now records QUANTITY ONLY and this tab (Owner + Procurement) is the separate step
@@ -4135,11 +4135,11 @@ function renderConfirmPrices(){
 
   return `
     <div class="pagehead">
-      <div><h2>Confirm Prices</h2><p>Receiving only counts quantities now. Once a delivery has been received, add or confirm its buying price here — per the unit shown under the price box (the Base Product's procurement unit in Item Setup). If a price was entered when the order was placed it's filled in for you, but nothing counts until you press Confirm. The Sage cost CSV can only be downloaded once every received delivery for its date has a confirmed price.</p></div>
+      <div><h2>Confirm Prices</h2><p>Receiving only counts quantities now. Once a delivery has been received, add or confirm its buying price here — per the unit shown under the price box (the Base Product's procurement unit in Item Setup). If a price was entered when the order was placed it's filled in for you, but nothing counts until you press Confirm. The Cost CSV can only be downloaded once every received delivery for its date has a confirmed price.</p></div>
       <div class="actions">
         <div class="field" style="min-width:220px;"><label>Search base product</label><input type="text" id="confirmPricesSearchInput" placeholder="e.g. Banana…" value="${esc(confirmPricesSearch)}"></div>
         ${awaiting.length ? `<button class="btn primary" id="confirmAllPrices" title="Confirms every line shown below that has a price filled in">✓ Confirm all${cpq ? " shown" : ""} with a price</button>` : ""}
-        <button class="btn small" data-goto-tab="sageimport">Go to Sage CSV →</button>
+        <button class="btn small" data-goto-tab="sageimport">Go to Cost CSV →</button>
       </div>
     </div>
     <div class="cardrow">
@@ -4217,14 +4217,14 @@ function renderSageImport(){
 
   return `
     <div class="pagehead">
-      <div><h2>Sage CSV</h2><p>Average Cost is pulled from Purchase Costs entries logged on the date selected below, once they've been received AND had their price confirmed on the Confirm Prices tab — the download stays locked until every received line for the date is priced, so run this after Receiving and Confirm Prices are caught up for the day. Quantity On Hand is exported as 0. A Product Mix (composite) item's cost is built from its ingredients' costs instead — see Product Mixes for the full breakdown. Unlike a plain item, a mix doesn't need every one of its ingredients purchased on this exact date: it uses each ingredient's latest known cost (same as Product Mixes shows), tagged "latest known price" below whenever that's not this date's own figure, since a multi-ingredient mix is rarely bought whole in one day.</p></div>
+      <div><h2>Cost CSV</h2><p>Average Cost is pulled from Purchase Costs entries logged on the date selected below, once they've been received AND had their price confirmed on the Confirm Prices tab — the download stays locked until every received line for the date is priced, so run this after Receiving and Confirm Prices are caught up for the day. Quantity On Hand is exported as 0. A Product Mix (composite) item's cost is built from its ingredients' costs instead — see Product Mixes for the full breakdown. Unlike a plain item, a mix doesn't need every one of its ingredients purchased on this exact date: it uses each ingredient's latest known cost (same as Product Mixes shows), tagged "latest known price" below whenever that's not this date's own figure, since a multi-ingredient mix is rarely bought whole in one day.</p></div>
       <div class="actions">
         <div class="field" style="min-width:170px;">
           <label>Purchase date</label>
           <input type="date" id="sageDateFilter" value="${esc(sageDateFilter)}">
         </div>
         <label class="btn"><input type="checkbox" id="toggleFilter" ${sageOnlyPurchasedOnDate?"checked":""} style="margin-right:6px;">Only items purchased on this date</label>
-        <button class="btn primary" id="downloadSageCsv" ${sageLocked?'disabled title="Confirm every received price first (Confirm Prices tab)"':(zeroCostRows.length?'disabled title="Fix the R0 cost item(s) below before exporting"':'')}>Download CSV</button>
+        <button class="btn primary" id="downloadSageCsv" ${sageLocked?'disabled title="Confirm every received price first (Confirm Prices tab)"':(zeroCostRows.length?'disabled title="Fix the R0 cost item(s) below before exporting"':'')}>Download Cost CSV</button>
       </div>
     </div>
     ${sageLocked ? `<div class="banner critical"><span>🔒 ${unpricedLines.length} received line${unpricedLines.length===1?"":"s"} for ${esc(sageDateFilter||"these dates")} still need${unpricedLines.length===1?"s":""} a confirmed price (${unpricedLines.slice(0,6).map(p=>esc(p.baseProduct)).filter((v,ix,a)=>a.indexOf(v)===ix).join(", ")}${unpricedLines.length>6?" and more":""}). The CSV unlocks once every one is confirmed.</span><button class="btn small" data-goto-tab="confirmprices">Go to Confirm Prices →</button></div>` : ""}
@@ -4517,10 +4517,10 @@ function renderSellingPrices(){
   const costDone = costCsvDownloadedFor(sellingCsvDate);
   const csvParts = Math.max(1, Math.ceil(movedRows.length / SAGE_MAX_IMPORT_LINES));
   const canDownloadSelling = costDone && movedRows.length > 0;
-  const sellingDownloadTitle = !costDone ? "Download the cost prices for this date first (Sage CSV tab)" : (!movedRows.length ? "No prices moved on this date" : "");
+  const sellingDownloadTitle = !costDone ? "Download the cost prices for this date first (Cost CSV tab)" : (!movedRows.length ? "No prices moved on this date" : "");
   const partButtons = Array.from({length:csvParts}, (_,i)=>{
     const from = i*SAGE_MAX_IMPORT_LINES + 1, to = Math.min(movedRows.length, (i+1)*SAGE_MAX_IMPORT_LINES);
-    const label = csvParts===1 ? "Download Sage CSV" : `Download part ${i+1} of ${csvParts} (rows ${from}–${to})`;
+    const label = csvParts===1 ? "Download Selling Prices CSV" : `Download part ${i+1} of ${csvParts} (rows ${from}–${to})`;
     return `<button class="btn primary" data-sellingcsv-part="${i}" ${canDownloadSelling?"":`disabled title="${esc(sellingDownloadTitle)}"`}>${label}</button>`;
   }).join("");
   const movedTableRows = movedRows.map(r=>`
@@ -4602,7 +4602,7 @@ function renderSellingPrices(){
 
   return `
     <div class="pagehead">
-      <div><h2>Selling Prices</h2><p>A suggested selling price per item, built from the latest known cost (Purchase Costs / Receiving) plus a target margin — bumped automatically when the latest cost is running notably below the recent trend ("good deal" below). Suggested prices are rounded up to the nearest 50c so they read as normal retail prices. This builds up smarter over time as more cost and price history accumulates; for now it's a starting point to tweak or override, not a final answer. The Sage CSV only carries prices you've recorded (Update price / Update all shown) on the chosen date that differ from the previous recorded price, and unlocks once that date's cost CSV has been downloaded.</p></div>
+      <div><h2>Selling Prices</h2><p>A suggested selling price per item, built from the latest known cost (Purchase Costs / Receiving) plus a target margin — bumped automatically when the latest cost is running notably below the recent trend ("good deal" below). Suggested prices are rounded up to the nearest 50c so they read as normal retail prices. This builds up smarter over time as more cost and price history accumulates; for now it's a starting point to tweak or override, not a final answer. The Selling Prices CSV only carries prices you've recorded (Update price / Update all shown) on the chosen date that differ from the previous recorded price, and unlocks once that date's cost CSV has been downloaded.</p></div>
       <div class="actions">
         <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;">
           <div class="field" style="min-width:170px;"><label>Prices moved on</label><input type="date" id="sellingCsvDate" value="${esc(sellingCsvDate)}"></div>
@@ -4611,7 +4611,7 @@ function renderSellingPrices(){
         </div>
       </div>
     </div>
-    ${!costDone ? `<div class="banner critical"><span>🔒 The cost prices for ${esc(sellingCsvDate||"this date")} haven't been downloaded yet, so the selling prices can't be either. Download the cost CSV first.</span><button class="btn small" data-goto-tab="sageimport">Go to Sage CSV →</button></div>` : ""}
+    ${!costDone ? `<div class="banner critical"><span>🔒 The cost prices for ${esc(sellingCsvDate||"this date")} haven't been downloaded yet, so the selling prices can't be either. Download the cost CSV first.</span><button class="btn small" data-goto-tab="sageimport">Go to Cost CSV →</button></div>` : ""}
     ${(costDone && !movedRows.length) ? `<div class="banner info">ℹ No prices were recorded as changed on ${esc(sellingCsvDate||"this date")} — use "Update price" / "Update all shown" below first, then they'll appear in this day's export.</div>` : ""}
     ${movedRows.length > SAGE_MAX_IMPORT_LINES ? `<div class="banner warn">ℹ ${movedRows.length} prices moved on ${esc(sellingCsvDate)} — more than Sage's ${SAGE_MAX_IMPORT_LINES}-line limit, so the download is split into ${csvParts} parts. Import them one after the other.</div>` : ""}
     <div class="cardrow">
@@ -4654,7 +4654,7 @@ function renderSellingPrices(){
       </div>
     </div>
     <div class="card">
-      <div class="cardhead"><div><h3>Sage export for ${esc(sellingCsvDate||"—")}</h3><div class="desc">${movedRows.length} price${movedRows.length===1?"":"s"} moved on this date — exactly what the download contains.</div></div></div>
+      <div class="cardhead"><div><h3>Selling prices export for ${esc(sellingCsvDate||"—")}</h3><div class="desc">${movedRows.length} price${movedRows.length===1?"":"s"} moved on this date — exactly what the download contains.</div></div></div>
       <div class="cardbody" style="padding:0;">
         <div class="tablewrap" style="border:none;border-radius:0;max-height:360px;overflow-y:auto;">
           <table>
@@ -4950,7 +4950,7 @@ function renderUsers(){
       <div class="cardhead"><div><h3>What each role can access</h3></div></div>
       <div class="cardbody helptext">
         <strong>Owner</strong> — everything, including Users. Lands on the Dashboard when logging in.<br>
-        <strong>Procurement</strong> — Dashboard, Shopping List, Quick Buy, Shopping List Archive, Purchase Costs, Sage CSV, Input Stock Levels, and Receiving (can confirm deliveries too, not just see what's outstanding). Lands on the Dashboard when logging in.<br>
+        <strong>Procurement</strong> — Dashboard, Shopping List, Quick Buy, Shopping List Archive, Purchase Costs, Cost CSV, Input Stock Levels, and Receiving (can confirm deliveries too, not just see what's outstanding). Lands on the Dashboard when logging in.<br>
         <strong>Stock Taker</strong> — Input Stock Levels, and the same Receiving access as the Receiving role (can confirm deliveries, log stock with no order on file, correct received figures) — but, unlike Receiving, can't mark a delivery "Not received". No Shopping List, no Dashboard.<br>
         <strong>Receiving</strong> — only the Receiving tab, to log stock as it's counted in, confirm deliveries, and mark a delivery "Not received" (e.g. rejecting stock that arrives in bad condition). For staff whose only job is receiving deliveries (e.g. a night-shift hand) — they don't need or see anything else. No Dashboard.<br>
         <strong>Market</strong> — only Quick Buy, to log what's bought at the market. For staff whose only job is buying — they don't need or see anything else. No Dashboard.
@@ -5692,7 +5692,7 @@ function wireTabEvents(){
         const id = btn.dataset.delReceived;
         const existing = DATA.purchaseCosts.find(p=> p.id===id);
         if(!existing){ toast("That entry no longer exists"); return; }
-        if(!confirm(`Delete this received entry for "${existing.baseProduct}"?\n\nThis removes the record entirely — it also feeds Purchase Costs and Sage CSV, so this can't be undone.`)) return;
+        if(!confirm(`Delete this received entry for "${existing.baseProduct}"?\n\nThis removes the record entirely — it also feeds Purchase Costs and the Cost CSV, so this can't be undone.`)) return;
         DATA.purchaseCosts = DATA.purchaseCosts.filter(p=> p.id!==id);
         persistPurchaseAction({action:"deletePurchaseLog", id}, "Deleted received entry for " + existing.baseProduct);
       });
@@ -6308,7 +6308,7 @@ function wireTabEvents(){
       btn.addEventListener("click", ()=>{
         const part = Number(btn.dataset.sellingcsvPart);
         // same gates as the (disabled) button — see renderSellingPrices
-        if(!costCsvDownloadedFor(sellingCsvDate)){ toast("Download the cost prices for this date first (Sage CSV tab)"); return; }
+        if(!costCsvDownloadedFor(sellingCsvDate)){ toast("Download the cost prices for this date first (Cost CSV tab)"); return; }
         const moved = sellingPricesMovedOn(sellingCsvDate);
         if(!moved.length){ toast("No prices moved on this date"); return; }
         const slice = moved.slice(part*SAGE_MAX_IMPORT_LINES, (part+1)*SAGE_MAX_IMPORT_LINES);
