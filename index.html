@@ -4018,13 +4018,6 @@ function renderPriceHistory(){
       <td><button class="btn small" data-select-product="${esc(a.baseProduct)}">View chart</button></td>
     </tr>`).join("");
 
-  const dupGroups = findLikelyDuplicateBaseProducts();
-  const dupRows = dupGroups.map(g=>`
-    <tr>
-      <td>${g.map(n=>chip(n, "warn")).join(" ")}</td>
-      <td class="helptext">Rename the wrong spelling(s) to match one, in Item Setup — or, if it's a genuinely different item (e.g. sold loose vs. by the kilo), leave as is.</td>
-    </tr>`).join("");
-
   const points = priceHistorySelectedProduct ? priceHistoryForProduct(priceHistorySelectedProduct) : [];
   const tableRows = points.slice().reverse().map(p=>`
     <tr>
@@ -4051,15 +4044,6 @@ function renderPriceHistory(){
           <div class="field"><label>Alert threshold %</label><input type="number" step="1" min="1" id="priceAlertPctInput" value="${round2(alertPct*100)}" data-pristine="${round2(alertPct*100)}"></div>
           <div><button class="btn primary" id="savePriceAlertPct">Save</button></div>
         </div>
-      </div>
-    </div>
-    <div class="card">
-      <div class="cardhead"><div><h3>Possible duplicate base products</h3><div class="desc">${dupGroups.length} name${dupGroups.length===1?"":"s"} that show up spelled more than one way — same product typed with different capitalization or spacing tracks a separate Price History line and purchase record for each spelling instead of one combined one.</div></div></div>
-      <div class="cardbody" style="padding:0;">
-        <div class="tablewrap" style="border:none;border-radius:0;"><table>
-          <thead><tr><th>Spellings in use</th><th>What to do</th></tr></thead>
-          <tbody>${dupRows || `<tr><td colspan="2" class="empty">None found — every base product name is spelled consistently.</td></tr>`}</tbody>
-        </table></div>
       </div>
     </div>
     <div class="card">
