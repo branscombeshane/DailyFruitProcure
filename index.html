@@ -527,6 +527,8 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 // A day's cost CSV can only be pulled from the next calendar day (the next morning), so every delivery for that
 // day has had the chance to be received and priced first. Today's — or a future — purchase date is never allowed.
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
+// Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
+const APP_BUILD = "2026-10-14 · VAT text + next-day cost CSV";
 let sageDateFilter = yesterdaySA(); // defaults to the day that is actually downloadable
 let sageOnlyPurchasedOnDate = true;
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
@@ -1788,6 +1790,7 @@ function renderNav(){
           <div style="font-weight:600;color:var(--ink);">${esc(currentUser.name)}</div>
           <div style="text-transform:capitalize;margin-bottom:6px;">${esc(currentUser.role)}</div>
           <button class="btn small" id="logoutBtn" style="width:100%;">Logout</button>
+          <div style="margin-top:8px;font-size:10px;opacity:.6;" title="Which version of the app this browser is running — bump APP_BUILD on every change">Version ${esc(APP_BUILD)}</div>
         </div>`;
       const btn = document.getElementById("logoutBtn");
       if(btn) btn.addEventListener("click", ()=>{
