@@ -6367,7 +6367,7 @@ function wireTabEvents(){
         if(!moved.length){ toast("No items moved on this date — nothing to export"); return; }
         const slice = moved.slice(part*SAGE_MAX_IMPORT_LINES, (part+1)*SAGE_MAX_IMPORT_LINES);
         const csv = "Code,Description,Default Price List - Exclusive,VAT Type Sales,VAT Type Purchases\n" + slice.map(r=>{
-          const vatType = r.vatable ? "Standard Rate (15.00%)" : "Zero Rate (0.00%)";
+          const vatType = r.vatable ? "Standard Rate" : "Zero Rate";
           return [toCsvField(r.itemCode), toCsvField(r.description), r.price, toCsvField(vatType), toCsvField(vatType)].join(",");
         }).join("\n");
         const parts = Math.ceil(moved.length / SAGE_MAX_IMPORT_LINES);
