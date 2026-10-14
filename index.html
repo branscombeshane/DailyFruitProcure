@@ -528,7 +528,7 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 // day has had the chance to be received and priced first. Today's — or a future — purchase date is never allowed.
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
-const APP_BUILD = "2026-10-14 · Price Export (selling + cost in one file)";
+const APP_BUILD = "2026-10-14 · Price Export: formula price, auto-recorded";
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
 // often than it's audited in bulk, so opening the tab should land on today's entries, not the full history.
 let purchaseDateFilter = new Date().toISOString().slice(0,10);
@@ -587,7 +587,6 @@ let stockVarianceAsOfDate = "";
 // inline "Update price" form open (mirrors shoppingIssueEditing's Set-of-keys pattern).
 let sellingPriceCategoryFilter = "";
 let sellingPriceSearch = "";
-let sellingPriceEditing = new Set();
 let sellingCsvDate = yesterdaySA(); // Price Export: the purchase date the file covers — defaults to the day that is actually downloadable // Selling Prices: which day's moved prices the Selling Prices CSV covers
 const SAGE_MAX_IMPORT_LINES = 500; // Sage's import limit — a day with more moved prices is split into parts of this size
 // Market Statements (Costings) — which imported statement date is currently showing. Defaults to the
@@ -1499,7 +1498,9 @@ function compositeMixCosts(){
 // latest cost is running notably below the trailing window average. There's no retained history of
 // actual selling prices yet (Item Sales CSVs only carry the current upload's realized figures, not an
 // append-only log — see parseSalesCsvText), so DATA.priceQuotes starts empty and builds up only from
-// here on, the moment someone records a price via "Update price" below.
+// here on, as each Price Export is downloaded (the prices sent to Sage are recorded automatically — there is no manual
+// "Update price" step any more: the export price is always the formula price, so a system step can never leave a stale,
+// thin-margin price in force).
 
 // Quantity-weighted average RECEIVED cost per base product across only the last `days` days — the
 // trend baseline a "good deal" is measured against. Reuses weightedCostMap_'s per-entry weighting
@@ -1521,7 +1522,7 @@ function trailingPurchaseCostMap(days){
 // never eats into the target margin just computed.
 function roundToRetailPrice(price){
   if(price===null || price===undefined) return null;
-  return Math.ceil(price*2)/2;
+  return Math.ceil(price*2 - 1e-9)/2; // 1e-9: float noise (84/0.7 = 120.00000000000001) must not bump an exact 50c price up another 50c
 }
 
 function marginFor(item, category){
@@ -1541,12 +1542,21 @@ function marginFor(item, category){
 // recorded — the last price actually set so it's obvious how far off the current asking price is.
 // Price Export (Oct 2026): ONE Sage import file carries each item's selling price AND its cost. It covers one purchase
 // date and only what moved: every item that is in D's cost run (it had a purchase cost on D — which also covers all its
-// cut/sliced/diced variants and Product Mixes built from it), plus any item whose price was explicitly recorded on D
-// (Update price / Update all shown). That keeps it inside Sage's 500-line import limit. Price = the price recorded that
-// day, otherwise the price in force now (set via Update price, else the suggestion). Cost = D's average cost with the
-// category wastage buffer applied; for an item not bought on D (only a price was recorded) its latest known cost.
+// cut/sliced/diced variants and Product Mixes built from it). That keeps it inside Sage's 500-line import limit.
+// Cost = D's average cost with the category wastage buffer applied. Price = ALWAYS the formula price worked out from that
+// SAME cost in the file (buffered cost / (1 - margin), rounded up to 50c, never below the item's Min price) — there is no
+// manually-held price that can override it, so the file's GP can never fall below the target margin. "prevPrice" is the
+// price last sent to Sage (recorded automatically when an export is downloaded). A price that jumps more than
+// PRICE_JUMP_WARN_PCT against the last one sent is flagged so a mistyped cost can't slip through unseen.
 // Downloading is locked until every received line for D has a confirmed price and D is no longer today (see
 // renderSellingPrices / costCsvTooEarly).
+const PRICE_JUMP_WARN_PCT = 0.15;
+function formulaPriceForCost_(cost, r){
+  if(cost===null || cost===undefined || isNaN(cost)) return null;
+  const m = Math.max(0, Math.min(0.9, Number(r.marginPct)||0));
+  const raw = roundToRetailPrice(cost/(1-m));
+  return (r.minPrice!==null && r.minPrice!==undefined && raw < r.minPrice) ? Number(r.minPrice) : raw;
+}
 function sellingPricesMovedOn(dateStr, suggestionRows){
   const rows = suggestionRows || pricingSuggestionsComputed();
   const rowByItem = {};
@@ -1554,26 +1564,21 @@ function sellingPricesMovedOn(dateStr, suggestionRows){
   const quotesByItem = {};
   (DATA.priceQuotes||[]).forEach(q=>{ if(q.item) (quotesByItem[q.item] = quotesByItem[q.item]||[]).push(q); });
   const order = (a,b)=> String(a.date||"").localeCompare(String(b.date||"")) || String(a.time||"").localeCompare(String(b.time||""));
-  const dayCost = {};
-  const included = new Set();
-  sageImportComputed(dateStr).forEach(r=>{ if(r.purchasedOnDate){ included.add(r.item); dayCost[r.item] = r; } }); // cost moved on D
-  Object.keys(quotesByItem).forEach(item=>{ if(quotesByItem[item].some(q=> q.date===dateStr)) included.add(item); }); // price recorded on D
-  const latestPm = applyCostBuffers_(latestPurchaseCostMap());
   const out = [];
-  included.forEach(item=>{
-    const r = rowByItem[item];
+  sageImportComputed(dateStr).forEach(dc=>{
+    if(!dc.purchasedOnDate) return; // cost moved on D
+    const r = rowByItem[dc.item];
     if(!r) return;
-    const qs = (quotesByItem[item]||[]).slice().sort(order);
-    const dayQs = qs.filter(q=> q.date===dateStr);
-    const before = qs.filter(q=> String(q.date||"") < dateStr);
+    const cost = (dc.averageCost!==null && dc.averageCost!==undefined) ? dc.averageCost : null;
+    const price = formulaPriceForCost_(cost, r);
+    if(price===null) return;
+    const before = (quotesByItem[dc.item]||[]).filter(q=> String(q.date||"") < dateStr).sort(order);
     const prev = before.length ? before[before.length-1] : null;
-    const price = dayQs.length ? Number(dayQs[dayQs.length-1].price) : (r.exportPrice!==null && r.exportPrice!==undefined ? Number(r.exportPrice) : null);
-    if(price===null || isNaN(price)) return;
-    let cost = null, costFromLatest = false;
-    if(dayCost[item] && dayCost[item].averageCost!==null){ cost = dayCost[item].averageCost; costFromLatest = !!dayCost[item].costFromLatest; }
-    else { const c = itemCostPerUnit(item, latestPm); if(c!==null){ cost = c; costFromLatest = true; } }
-    out.push({item, itemCode: r.itemCode, description: r.description, vatable: !!r.vatable,
-      price, prevPrice: prev ? Number(prev.price) : null, cost, costFromLatest});
+    const prevPrice = prev ? Number(prev.price) : null;
+    const jumpPct = (prevPrice!==null && prevPrice>0) ? (price-prevPrice)/prevPrice : null;
+    out.push({item: dc.item, itemCode: r.itemCode, description: r.description, vatable: !!r.vatable,
+      price, prevPrice, cost, costFromLatest: !!dc.costFromLatest, marginPct: r.marginPct,
+      jumpPct, jumpFlag: jumpPct!==null && Math.abs(jumpPct) > PRICE_JUMP_WARN_PCT});
   });
   return out.sort((a,b)=> a.item.localeCompare(b.item));
 }
@@ -1584,6 +1589,8 @@ function pricingSuggestionsComputed(){
   const goodDealThreshold = Number(plan.goodDealThresholdPct)||0;
   const goodDealBonus = Number(plan.goodDealBonusPct)||0;
   const latestPm = latestPurchaseCostMap();
+  // Same buffered cost map the Price Export uses, so a suggested price is worked out from exactly the Cost that goes to Sage.
+  const bufferedLatestPm = applyCostBuffers_(latestPm);
   const trailingPm = trailingPurchaseCostMap(windowDays);
   const latestQuoteByItem = {};
   (DATA.priceQuotes||[]).forEach(q=>{
@@ -1592,40 +1599,40 @@ function pricingSuggestionsComputed(){
   });
   return DATA.itemSetup.map(it=>{
     const category = effectiveCategoryFor(it);
-    const latestCost = itemCostPerUnit(it.item, latestPm);
+    const latestCost = itemCostPerUnit(it.item, latestPm); // actual cost, no wastage buffer
+    const bufferedCost = itemCostPerUnit(it.item, bufferedLatestPm); // actual cost + category wastage buffer (what exports as Cost)
     const trailingCost = itemCostPerUnit(it.item, trailingPm);
     const costChangePct = (latestCost!==null && trailingCost!==null && trailingCost>0) ? (latestCost-trailingCost)/trailingCost : null;
     const isGoodDeal = goodDealThreshold>0 && costChangePct!==null && costChangePct <= -goodDealThreshold;
     const marginInfo = marginFor(it.item, category);
     const marginPct = Math.max(0, Math.min(0.9, marginInfo.value + (isGoodDeal ? goodDealBonus : 0)));
-    const marginPrice = latestCost!==null ? roundToRetailPrice(latestCost/(1-marginPct)) : null;
-    // Never-go-below price (Shane's ask): a per-item floor under the SUGGESTION only — so a really good
-    // deal on cost (a big isGoodDeal drop, or just a naturally cheap buy) never pushes the suggested
-    // price lower than this, even though the margin math alone would happily let it. Does NOT touch a
-    // price Shane has actually recorded via "Update price" (currentPrice/exportPrice below) — if he
-    // deliberately sets something lower than the floor himself, that's his call, not something to
-    // silently override.
+    // The suggestion is calculated from the BUFFERED cost (Shane, Oct 2026), then rounded up to the nearest 50c.
+    const marginPrice = bufferedCost!==null ? roundToRetailPrice(bufferedCost/(1-marginPct)) : null;
+    // Never-go-below price (Shane's ask): a per-item floor under the price — so a really good deal on cost (a big
+    // isGoodDeal drop, or just a naturally cheap buy) never pushes the price lower than this, even though the margin
+    // math alone would happily let it. Applies to the suggestion AND the exported price (formulaPriceForCost_).
     const minPriceRaw = DATA.itemMinPrice ? DATA.itemMinPrice[it.item] : undefined;
     const minPrice = (minPriceRaw!==undefined && minPriceRaw!==null && minPriceRaw!=="") ? Number(minPriceRaw) : null;
     const priceFloored = marginPrice!==null && minPrice!==null && marginPrice < minPrice;
     const suggestedPrice = marginPrice!==null ? (priceFloored ? minPrice : marginPrice) : null;
+    // The price last SENT to Sage (recorded automatically on each export download) — shown for comparison only;
+    // it never feeds the export price.
     const quote = latestQuoteByItem[it.item] || null;
     const currentPrice = quote ? Number(quote.price) : null;
+    // Exact gross profit % on the buffered cost, at the rounded selling price (not the target margin it was built from).
+    const gpOf = (price)=> (price!==null && price>0 && bufferedCost!==null) ? (price-bufferedCost)/price : null;
+    const suggestedGpPct = gpOf(suggestedPrice);
+    const currentGpPct = gpOf(currentPrice);
     const priceDelta = (suggestedPrice!==null && currentPrice!==null) ? round2(suggestedPrice-currentPrice) : null;
     const priceDeltaPct = (priceDelta!==null && currentPrice>0) ? priceDelta/currentPrice : null;
-    // What the Sage CSV export uses for this item (Shane's call): the price he's actually decided on
-    // and recorded via "Update price", falling back to today's suggestion for anything not priced yet —
-    // never blank, so a newly-added item still exports something sensible.
-    const exportPrice = currentPrice!==null ? currentPrice : suggestedPrice;
-    const exportPriceSource = currentPrice!==null ? "set" : (suggestedPrice!==null ? "suggested" : null);
     return {
       item: it.item, itemCode: it.itemCode, description: sageItemDescription(it), baseProduct: it.baseProduct, category: category || "Uncategorized",
       vatable: !!it.vatable,
-      latestCost, trailingCost, costChangePct, isGoodDeal,
+      latestCost, bufferedCost, suggestedGpPct, currentGpPct, trailingCost, costChangePct, isGoodDeal,
       marginPct, marginSource: marginInfo.source,
       minPrice, priceFloored,
       suggestedPrice, currentPrice, currentPriceDate: quote?quote.date:null, currentPriceBy: quote?quote.setBy:null,
-      priceDelta, priceDeltaPct, exportPrice, exportPriceSource,
+      priceDelta, priceDeltaPct,
     };
   }).sort((a,b)=> a.item.localeCompare(b.item));
 }
@@ -4461,12 +4468,6 @@ function renderSellingPrices(){
   let filtered = rows;
   if(sellingPriceCategoryFilter) filtered = filtered.filter(r=> r.category===sellingPriceCategoryFilter);
   if(q) filtered = filtered.filter(r=> r.item.toLowerCase().includes(q));
-  // "Update all shown" (Shane's ask): a bulk version of the per-row "Update price" button, scoped to
-  // whatever's currently filtered (search/category) rather than the whole catalog — same scoping
-  // convention as the margin-override inputs above (only visible rows are touched). Only items that
-  // actually have a suggestion, and don't already match it, are worth recording again.
-  const updatableRows = filtered.filter(r=> r.suggestedPrice!==null && r.currentPrice!==r.suggestedPrice);
-
   const withSuggestion = rows.filter(r=>r.suggestedPrice!==null).length;
   const goodDeals = rows.filter(r=>r.isGoodDeal).length;
   const noCost = rows.length - withSuggestion;
@@ -4478,6 +4479,7 @@ function renderSellingPrices(){
   const unpricedLines = dayLines.filter(p=> needsPriceConfirm(p));
   const undeliveredLines = dayLines.filter(p=> !isReceived(p));
   const zeroCostRows = movedRows.filter(r=> r.cost === 0);
+  const jumpRows = movedRows.filter(r=> r.jumpFlag);
   const tooEarly = costCsvTooEarly(exportDate);
   const csvParts = Math.max(1, Math.ceil(movedRows.length / SAGE_MAX_IMPORT_LINES));
   const canDownload = !tooEarly && !unpricedLines.length && !zeroCostRows.length && movedRows.length > 0;
@@ -4488,12 +4490,12 @@ function renderSellingPrices(){
     return `<button class="btn primary" data-sellingcsv-part="${i}" ${canDownload?"":`disabled title="${esc(downloadTitle)}"`}>${label}</button>`;
   }).join("");
   const movedTableRows = movedRows.map(r=>`
-    <tr>
+    <tr${r.jumpFlag?' style="background:var(--warnbg, rgba(245,158,11,.12));"':''}>
       <td>${esc(r.itemCode||"")}</td>
       <td>${esc(r.item)}</td>
       <td class="num">${r.prevPrice!==null ? money(r.prevPrice) : "—"}</td>
       <td class="num" style="font-weight:600;">${money(r.price)}</td>
-      <td>${r.prevPrice===null ? chip("new","neutral") : (r.price===r.prevPrice ? chip("unchanged","neutral") : (r.price>r.prevPrice ? chip("▲ "+money(round2(r.price-r.prevPrice)),"warn") : chip("▼ "+money(round2(r.prevPrice-r.price)),"good")))}</td>
+      <td>${r.prevPrice===null ? chip("new","neutral") : (r.price===r.prevPrice ? chip("unchanged","neutral") : (r.price>r.prevPrice ? chip("▲ "+money(round2(r.price-r.prevPrice))+" ("+fmtNum(Math.abs(r.jumpPct)*100,0)+"%)","warn") : chip("▼ "+money(round2(r.prevPrice-r.price))+" ("+fmtNum(Math.abs(r.jumpPct)*100,0)+"%)","good")))}${r.jumpFlag ? ` ${chip("check cost","critical")}` : ""}</td>
       <td class="num" style="${r.cost===0?'color:var(--critical);':''}">${r.cost!==null ? money(r.cost) : "—"}${r.cost===null ? ` ${chip("no cost known","warn")}` : (r.cost===0 ? ` ${chip("R0 — no price logged","critical")}` : (r.costFromLatest ? ` ${chip("latest known cost","neutral")}` : ""))}</td>
     </tr>`).join("");
   // Sorted by the purchase date each file was for, newest first (then by when it was downloaded).
@@ -4530,19 +4532,18 @@ function renderSellingPrices(){
   };
 
   const tableRows = filtered.map(r=>{
-    const editing = sellingPriceEditing.has(r.item);
     const marginSourceNote = r.marginSource==="item" ? "" : r.marginSource==="category" ? `<span class="helptext"> (category)</span>` : `<span class="helptext"> (default)</span>`;
     const deltaHtml = r.priceDelta===null ? "" :
-      r.priceDelta===0 ? `<div class="helptext">matches suggested</div>` :
-      `<div class="helptext" style="color:${r.priceDelta>0?'var(--warn)':'var(--good)'};">${r.priceDelta>0?"▲":"▼"} ${money(Math.abs(r.priceDelta))} (${fmtNum(Math.abs(r.priceDeltaPct*100),1)}%) vs suggested</div>`;
+      r.priceDelta===0 ? `<div class="helptext">same as today's price</div>` :
+      `<div class="helptext" style="color:${r.priceDelta>0?'var(--warn)':'var(--good)'};">${r.priceDelta>0?"▲":"▼"} ${money(Math.abs(r.priceDelta))} (${fmtNum(Math.abs(r.priceDeltaPct*100),1)}%) vs today's price</div>`;
     const itemMarginVal = DATA.itemMarginPct[r.item]!==undefined && DATA.itemMarginPct[r.item]!==null ? round2(DATA.itemMarginPct[r.item]*100) : "";
     const itemMinPriceVal = DATA.itemMinPrice[r.item]!==undefined && DATA.itemMinPrice[r.item]!==null ? round2(DATA.itemMinPrice[r.item]) : "";
-    const quoteVal = r.suggestedPrice!==null?r.suggestedPrice:(r.currentPrice!==null?r.currentPrice:"");
     return `
     <tr>
       <td style="max-width:240px;">${esc(r.item)}</td>
       <td>${esc(r.category)}</td>
       <td class="num">${r.latestCost!==null?money(r.latestCost):"—"}</td>
+      <td class="num">${r.bufferedCost!==null?money(r.bufferedCost):"—"}${(r.latestCost!==null && r.bufferedCost!==null && r.latestCost>0 && r.bufferedCost!==r.latestCost) ? `<div class="helptext">+${fmtNum((r.bufferedCost/r.latestCost-1)*100,1)}% wastage</div>` : ""}</td>
       <td>${trendLabel(r)}</td>
       <td>
         <input class="rowinput num" data-itemmargin-input="${esc(r.item)}" value="${itemMarginVal}" data-pristine="${esc(itemMarginVal)}" placeholder="${fmtNum(r.marginPct*100,0)}" style="max-width:70px;">${marginSourceNote}
@@ -4551,17 +4552,10 @@ function renderSellingPrices(){
         <input class="rowinput num" data-itemminprice-input="${esc(r.item)}" value="${itemMinPriceVal}" data-pristine="${esc(itemMinPriceVal)}" placeholder="none" style="max-width:80px;">
       </td>
       <td class="num" style="font-weight:600;">${r.suggestedPrice!==null?money(r.suggestedPrice):"—"}${r.priceFloored ? `<div class="helptext" style="color:var(--warn);">held at floor</div>` : ""}</td>
+      <td class="num" style="font-weight:600;">${r.suggestedGpPct!==null ? fmtNum(r.suggestedGpPct*100,2)+"%" : "—"}</td>
       <td>
-        ${r.currentPrice!==null ? `${money(r.currentPrice)}<div class="helptext">${esc(r.currentPriceDate||"")}${r.currentPriceBy?" — "+esc(r.currentPriceBy):""}</div>` : `<span class="helptext">not set yet</span>`}
+        ${r.currentPrice!==null ? `${money(r.currentPrice)}<div class="helptext">${esc(r.currentPriceDate||"")}</div>${r.currentGpPct!==null ? `<div class="helptext" style="${r.currentGpPct<0.10?'color:var(--critical);font-weight:600;':''}">GP ${fmtNum(r.currentGpPct*100,2)}% at today's cost</div>` : ""}` : `<span class="helptext">not sent yet</span>`}
         ${deltaHtml}
-      </td>
-      <td>
-        ${editing ? `
-          <div style="display:flex;align-items:center;gap:4px;white-space:nowrap;">
-            <input type="number" step="0.01" class="pricequote-input" data-pricequote-input="${esc(r.item)}" value="${quoteVal}" data-pristine="${esc(quoteVal)}" style="width:90px;">
-            <button class="btn primary" data-pricequote-tick="${esc(r.item)}" title="Save" style="padding:2px 10px;font-size:12px;">✓</button>
-            <button class="btn" data-pricequote-cancel="${esc(r.item)}" style="padding:2px 6px;font-size:12px;" title="Close without saving">✕</button>
-          </div>` : `<button class="btn" data-pricequote-addnew="${esc(r.item)}" style="padding:2px 10px;font-size:12px;white-space:nowrap;">Update price</button>`}
       </td>
     </tr>`;
   }).join("");
@@ -4588,7 +4582,7 @@ function renderSellingPrices(){
 
   return `
     <div class="pagehead">
-      <div><h2>Sage Price Export</h2><p>One file for Sage with each item's selling price <em>and</em> cost, for a single purchase date — only the items that moved that day (the ones bought that day and any price you recorded), so it stays within Sage's ${SAGE_MAX_IMPORT_LINES}-line import limit. It can only be downloaded from the next calendar day, once every received delivery for that day has a confirmed price (Confirm Prices tab). Costs are the day's average cost plus the category wastage buffer below. A suggested selling price per item, built from the latest known cost (Purchase Costs / Receiving) plus a target margin — bumped automatically when the latest cost is running notably below the recent trend ("good deal" below). Suggested prices are rounded up to the nearest 50c so they read as normal retail prices. This builds up smarter over time as more cost and price history accumulates; for now it's a starting point to tweak or override, not a final answer.</p></div>
+      <div><h2>Sage Price Export</h2><p>One file for Sage with each item's selling price <em>and</em> cost, for a single purchase date — only the items that moved that day (the ones bought that day), so it stays within Sage's ${SAGE_MAX_IMPORT_LINES}-line import limit. It can only be downloaded from the next calendar day, once every received delivery for that day has a confirmed price (Confirm Prices tab). Costs are the day's average cost plus the category wastage buffer below. The selling price is always worked out by the system from that cost plus the target margin (bumped when the cost is running notably below the recent trend — "good deal" below), rounded up to the nearest 50c, and never below an item's Min price — so the gross profit on the file can't fall below your target margin. To charge more on an item, raise its margin % or its Min price below. Every price you download is recorded automatically as the "previous price" for next time; any price that moves more than ${Math.round(PRICE_JUMP_WARN_PCT*100)}% is flagged before you download.</p></div>
       <div class="actions">
         <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;">
           <div class="field" style="min-width:170px;"><label>Purchase date</label><input type="date" id="sellingCsvDate" value="${esc(sellingCsvDate)}"></div>
@@ -4601,10 +4595,11 @@ function renderSellingPrices(){
     ${(!tooEarly && unpricedLines.length) ? `<div class="banner critical"><span>🔒 ${unpricedLines.length} received line${unpricedLines.length===1?"":"s"} for ${esc(exportDate)} still need${unpricedLines.length===1?"s":""} a confirmed price (${unpricedLines.slice(0,6).map(p=>esc(p.baseProduct)).filter((v,ix,a)=>a.indexOf(v)===ix).join(", ")}${unpricedLines.length>6?"…":""}). The download unlocks once every received delivery for this date is priced.</span><button class="btn small" data-goto-tab="confirmprices">Go to Confirm Prices →</button></div>` : ""}
     ${(!tooEarly && !unpricedLines.length && undeliveredLines.length) ? `<div class="banner warn">ℹ ${undeliveredLines.length} order${undeliveredLines.length===1?"":"s"} for ${esc(exportDate)} haven't been received yet, so ${undeliveredLines.length===1?"it isn't":"they aren't"} in this export.</div>` : ""}
     ${zeroCostRows.length ? `<div class="banner critical">⚠ ${zeroCostRows.length} item${zeroCostRows.length===1?"":"s"} would export at R0 cost — a buy was logged (and received) with no price: ${zeroCostRows.slice(0,6).map(r=>esc(r.item)).join(", ")}${zeroCostRows.length>6?` and ${zeroCostRows.length-6} more`:""}. Download is blocked until a real price is entered in Purchase Costs or Confirm Prices.</div>` : ""}
-    ${(!tooEarly && !movedRows.length) ? `<div class="banner info">ℹ No items had a cost or price move on ${esc(exportDate||"this date")} (nothing was purchased and no price was recorded that day), so there is nothing to export.</div>` : ""}
+    ${jumpRows.length ? `<div class="banner warn">⚠ ${jumpRows.length} price${jumpRows.length===1?"":"s"} moved more than ${Math.round(PRICE_JUMP_WARN_PCT*100)}% against the last price sent to Sage — check the cost behind ${jumpRows.length===1?"it":"them"} (a mistyped price or the wrong unit shows up here): ${jumpRows.slice(0,6).map(r=>esc(r.item)+" "+(r.jumpPct>0?"▲":"▼")+fmtNum(Math.abs(r.jumpPct)*100,0)+"%").join(", ")}${jumpRows.length>6?` and ${jumpRows.length-6} more`:""}. Highlighted in the table below. You can still download — this is a check, not a block.</div>` : ""}
+    ${(!tooEarly && !movedRows.length) ? `<div class="banner info">ℹ No items had a cost move on ${esc(exportDate||"this date")} (nothing was purchased that day), so there is nothing to export.</div>` : ""}
     ${movedRows.length > SAGE_MAX_IMPORT_LINES ? `<div class="banner warn">ℹ ${movedRows.length} rows for ${esc(exportDate)} — more than Sage's ${SAGE_MAX_IMPORT_LINES}-line limit, so the download is split into ${csvParts} parts. Import them one after the other.</div>` : ""}
     <div class="card">
-      <div class="cardhead"><div><h3>Export for ${esc(exportDate||"—")}</h3><div class="desc">${movedRows.length} row${movedRows.length===1?"":"s"} — exactly what the download contains. Price = what you set with Update price (or the suggestion); Cost includes the wastage buffer.</div></div></div>
+      <div class="cardhead"><div><h3>Export for ${esc(exportDate||"—")}</h3><div class="desc">${movedRows.length} row${movedRows.length===1?"":"s"} — exactly what the download contains. Price = the formula price worked out from the Cost in this file (buffered cost + target margin, rounded up to 50c, never below the item's Min price); Cost includes the wastage buffer. Previous price = what was last sent to Sage.</div></div></div>
       <div class="cardbody" style="padding:0;">
         <div class="tablewrap" style="border:none;border-radius:0;max-height:420px;overflow-y:auto;">
           <table>
@@ -4638,7 +4633,7 @@ function renderSellingPrices(){
       <div class="stat"><div class="label">Missing a cost</div><div class="value small" style="color:${noCost?'var(--warn)':'inherit'}">${noCost}</div></div>
     </div>
     <div class="card">
-      <div class="cardhead"><div><h3>Target margin settings</h3><div class="desc">Margin is % of selling price (e.g. 35% margin on R10 cost suggests ~R15.38). "Good deal" bumps the margin further whenever the latest cost is down at least the threshold % against the trailing window average — the saving goes partly to margin instead of straight through to price.</div></div><button class="btn primary" id="saveSellingPriceSettings">Save settings</button></div>
+      <div class="cardhead"><div><h3>Target margin settings</h3><div class="desc">Margin is % of selling price, worked out on the buffered cost — the actual cost plus the category wastage buffer above (e.g. 35% margin on R10 buffered cost suggests ~R15.38). The GP % shown beside each suggestion is the exact gross profit after rounding the price up to the nearest 50c. "Good deal" bumps the margin further whenever the latest cost is down at least the threshold % against the trailing window average — the saving goes partly to margin instead of straight through to price.</div></div><button class="btn primary" id="saveSellingPriceSettings">Save settings</button></div>
       <div class="cardbody">
         <div class="formgrid">
           <div class="field"><label>Default target margin %</label><input type="number" step="1" min="0" max="90" id="defaultMarginPct" value="${round2((Number(plan.defaultMarginPct)||0)*100)}" data-pristine="${round2((Number(plan.defaultMarginPct)||0)*100)}"></div>
@@ -4654,31 +4649,29 @@ function renderSellingPrices(){
     </div>
     <div class="card">
       <div class="cardhead">
-        <div><h3>Suggested prices</h3><div class="desc">One row per sellable item. Edit a margin % or a "Min price" floor directly (both saved with the settings above) — a floor stops the suggestion from dropping below it even on a really good cost deal, without limiting how low you can set an actual price by hand. Or record the price you're actually going forward with via "Update price" — that builds the price history this gets smarter from over time.</div></div>
+        <div><h3>Suggested prices</h3><div class="desc">One row per sellable item. Actual cost is the latest purchase cost; Buffered cost adds the category wastage buffer (this is the Cost that exports to Sage and what the suggested price is built from); GP % is the exact gross profit on the buffered cost at the rounded suggested price. This is exactly the price the export will use (it is re-worked from each day's cost when you download). Edit a margin % or a "Min price" floor directly (both saved with the settings above) — a floor stops the price from dropping below it even on a really good cost deal. "Last sent to Sage" is for comparison only: it shows what the last downloaded export set, and its GP % at today's cost, so you can see if a price you sent earlier has been overtaken by a cost rise.</div></div>
         <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">
           <div class="field" style="min-width:170px;"><label>Search item</label><input type="text" id="sellingPriceSearchBox" placeholder="Search…" value="${esc(sellingPriceSearch)}"></div>
           <div class="field" style="min-width:170px;"><label>Filter by category</label><select id="sellingPriceCategoryFilterSel">${categoryFilterOptions}</select></div>
-          <button class="btn primary" id="updateAllShownPrices" ${updatableRows.length?"":'disabled title="Nothing to update — every item shown already matches its suggested price, or has no suggestion yet"'}>Update all shown (${updatableRows.length})</button>
         </div>
       </div>
-      ${(sellingPriceCategoryFilter || q) ? `<div class="helptext" style="padding:0 16px 12px;">"Update all shown" only applies to the ${filtered.length} item${filtered.length===1?"":"s"} matching your current search/category filter, not the full catalog.</div>` : ""}
       <div class="cardbody" style="padding:0;">
         <div class="tablewrap" style="border:none;border-radius:0;">
           <table>
-            <thead><tr><th>Item</th><th>Category</th><th class="num">Latest cost</th><th>Trend (${Number(plan.trendWindowDays)||21}d)</th><th>Margin</th><th>Min price</th><th class="num">Suggested price</th><th>Current price</th><th></th></tr></thead>
-            <tbody>${tableRows || `<tr><td colspan="9" class="empty">No items match.</td></tr>`}</tbody>
+            <thead><tr><th>Item</th><th>Category</th><th class="num">Actual cost</th><th class="num">Buffered cost</th><th>Trend (${Number(plan.trendWindowDays)||21}d)</th><th>Margin</th><th>Min price</th><th class="num">Suggested price</th><th class="num">GP %</th><th>Last sent to Sage</th></tr></thead>
+            <tbody>${tableRows || `<tr><td colspan="10" class="empty">No items match.</td></tr>`}</tbody>
           </table>
         </div>
       </div>
     </div>
     <div class="card">
-      <div class="cardhead"><div><h3>Recent price changes</h3><div class="desc">Every price recorded via "Update price" above for the item(s) currently shown, most recent first — the price history this feature builds up going forward. Use the search/category filter above to narrow this down too.</div></div></div>
+      <div class="cardhead"><div><h3>Price history (sent to Sage)</h3><div class="desc">Every price sent in a downloaded Price Export for the item(s) currently shown, most recent first (dated by purchase date). Use the search/category filter above to narrow this down too.</div></div></div>
       ${matchingQuotes.length > RECENT_QUOTES_LIMIT ? `<div class="helptext" style="padding:0 16px 12px;">Showing the most recent ${RECENT_QUOTES_LIMIT} of ${matchingQuotes.length} matching records — narrow with search or a category filter above to find an older one.</div>` : ""}
       <div class="cardbody" style="padding:0;">
         <div class="tablewrap" style="border:none;border-radius:0;max-height:400px;overflow-y:auto;">
           <table>
-            <thead><tr><th>Date</th><th>Item</th><th class="num">Price</th><th class="num">Cost at the time</th><th class="num">Margin</th><th>Set by</th></tr></thead>
-            <tbody>${recentRows || `<tr><td colspan="6" class="empty">No prices recorded yet${(sellingPriceCategoryFilter || q) ? " for the current filter" : ""} — use "Update price" above to start building history.</td></tr>`}</tbody>
+            <thead><tr><th>Date</th><th>Item</th><th class="num">Price</th><th class="num">Cost at the time</th><th class="num">Margin</th><th>Downloaded by</th></tr></thead>
+            <tbody>${recentRows || `<tr><td colspan="6" class="empty">No prices sent yet${(sellingPriceCategoryFilter || q) ? " for the current filter" : ""} — history builds up as exports are downloaded.</td></tr>`}</tbody>
           </table>
         </div>
       </div>
@@ -6222,60 +6215,6 @@ function wireTabEvents(){
       });
       persist("Pricing settings saved", ["pricingPlan","categoryMarginPct","itemMarginPct","itemMinPrice"]);
     });
-    document.querySelectorAll("[data-pricequote-addnew]").forEach(b=>{
-      b.addEventListener("click", ()=>{
-        sellingPriceEditing.add(b.dataset.pricequoteAddnew);
-        render();
-      });
-    });
-    document.querySelectorAll("[data-pricequote-cancel]").forEach(b=>{
-      b.addEventListener("click", ()=>{
-        sellingPriceEditing.delete(b.dataset.pricequoteCancel);
-        render();
-      });
-    });
-    document.querySelectorAll("[data-pricequote-tick]").forEach(b=>{
-      b.addEventListener("click", ()=>{
-        const item = b.dataset.pricequoteTick;
-        const row = document.querySelector(`[data-pricequote-input="${CSS.escape(item)}"]`);
-        const price = row ? Number(row.value) : NaN;
-        if(!row || row.value==="" || isNaN(price) || price<0){ toast("Enter a valid price first"); return; }
-        const suggestion = (pricingSuggestionsComputed().find(r=>r.item===item)) || {};
-        const entry = {
-          item, price: round2(price),
-          cost: suggestion.latestCost!==undefined ? suggestion.latestCost : null,
-          marginPct: suggestion.marginPct!==undefined ? suggestion.marginPct : null,
-          date: new Date().toISOString().slice(0,10),
-          time: new Date().toTimeString().slice(0,8),
-          setBy: currentUser ? currentUser.name : "",
-        };
-        DATA.priceQuotes.push(entry);
-        sellingPriceEditing.delete(item);
-        persist("Price recorded for " + item, ["priceQuotes"]);
-      });
-    });
-    const updateAllShownBtn = document.getElementById("updateAllShownPrices");
-    if(updateAllShownBtn){
-      updateAllShownBtn.addEventListener("click", ()=>{
-        // same search/category scoping as the table itself (see renderSellingPrices) — only what's
-        // actually shown gets bulk-updated, never the whole catalog behind an active filter.
-        const q = sellingPriceSearch.trim().toLowerCase();
-        let rows = pricingSuggestionsComputed();
-        if(sellingPriceCategoryFilter) rows = rows.filter(r=> r.category===sellingPriceCategoryFilter);
-        if(q) rows = rows.filter(r=> r.item.toLowerCase().includes(q));
-        rows = rows.filter(r=> r.suggestedPrice!==null && r.currentPrice!==r.suggestedPrice);
-        if(!rows.length){ toast("Nothing to update"); return; }
-        if(!confirm(`Set ${rows.length} item price(s) to today's suggested price? This adds a new price record for each — you can always update one individually afterwards.`)) return;
-        const date = new Date().toISOString().slice(0,10);
-        const time = new Date().toTimeString().slice(0,8);
-        const setBy = currentUser ? currentUser.name : "";
-        rows.forEach(r=>{
-          DATA.priceQuotes.push({item:r.item, price:r.suggestedPrice, cost:r.latestCost, marginPct:r.marginPct, date, time, setBy});
-        });
-        sellingPriceEditing.clear();
-        persist("Updated " + rows.length + " price" + (rows.length===1?"":"s"), ["priceQuotes"]);
-      });
-    }
     const sellingDateInput = document.getElementById("sellingCsvDate");
     if(sellingDateInput) sellingDateInput.addEventListener("change", (e)=>{ sellingCsvDate = e.target.value; render(); });
     const saveBuffersBtn = document.getElementById("saveSageBuffers");
@@ -6310,7 +6249,13 @@ function wireTabEvents(){
         const dlEntry = {id:newId(), exportDate:sellingCsvDate, downloadedBy: currentUser ? currentUser.name : "", rows: slice.length};
         DATA.costCsvDownloads = DATA.costCsvDownloads || [];
         DATA.costCsvDownloads.push(Object.assign({}, dlEntry, {downloadedDate: nowD.toISOString().slice(0,10), downloadedTime: nowD.toTimeString().slice(0,8)}));
-        persistPurchaseAction({action:"logCostCsvDownload", entry: dlEntry}, "Download started — recorded");
+        // Record the prices just sent as the "previous price" for the next export (replaces any record for the same
+        // purchase date + item, so re-downloading the same day never duplicates). Saved after the download log.
+        const stamp = {date: sellingCsvDate, time: nowD.toTimeString().slice(0,8), setBy: currentUser ? currentUser.name : ""};
+        const sentItems = new Set(slice.map(r=> r.item));
+        DATA.priceQuotes = (DATA.priceQuotes||[]).filter(q=> !(q.date===sellingCsvDate && sentItems.has(q.item)));
+        slice.forEach(r=> DATA.priceQuotes.push({item:r.item, price:r.price, cost:r.cost, marginPct:r.marginPct, date:stamp.date, time:stamp.time, setBy:stamp.setBy}));
+        persistPurchaseAction({action:"logCostCsvDownload", entry: dlEntry}, "Download started — recorded").then(()=> persist("Prices recorded as sent", ["priceQuotes"]));
       });
     });
   }
