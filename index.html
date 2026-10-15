@@ -529,7 +529,7 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 // day has had the chance to be received and priced first. Today's — or a future — purchase date is never allowed.
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
-const APP_BUILD = "2026-10-15 · Pallet tally: date range + reset archive · Merge-products card removed";
+const APP_BUILD = "2026-10-15 · Price Export carries every Sage price list (fixes zeroing) · Pallet tally range + archive";
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
 // often than it's audited in bulk, so opening the tab should land on today's entries, not the full history.
 let purchaseDateFilter = new Date().toISOString().slice(0,10);
@@ -590,6 +590,37 @@ let sellingPriceCategoryFilter = "";
 let sellingPriceSearch = "";
 let sellingCsvDate = yesterdaySA(); // Price Export: the purchase date the file covers — defaults to the day that is actually downloadable // Selling Prices: which day's moved prices the Selling Prices CSV covers
 const SAGE_MAX_IMPORT_LINES = 500; // Sage's import limit — a day with more moved prices is split into parts of this size
+// Sage Items export loaded on Price Export (in memory only — it must be a fresh export every time, so it is never saved).
+// WHY: a Sage product import sets any price list column that is missing from the file to 0 (it does NOT leave it alone) — the
+// Oct 2026 incident that zeroed every non-default list. So every export line carries the item's CURRENT value for every price
+// list, copied from a fresh Items export out of Sage. Sage stays the source of truth; nothing here can go stale.
+let sagePriceListFile = null; // {name, loadedAt, listCols:[header,...], byCode:{code:{header:value}}, rowCount}
+function parseSageItemsExport(text){
+  const lines = String(text||"").replace(/^\uFEFF/,"").split(/\r?\n/).filter(l=>l.trim());
+  if(!lines.length) return {error:"The file is empty."};
+  const head = csvParseLine(lines[0]);
+  const codeIdx = head.findIndex(h=> h.trim().toLowerCase()==="code");
+  if(codeIdx<0) return {error:"No \"Code\" column found — this doesn't look like a Sage Items export (Products & Services → Export)."};
+  const isDefault = h=> /^default price list/i.test(h);
+  const listCols = head.filter(h=> /\s-\s(Exclusive|Inclusive)$/i.test(h) && !isDefault(h));
+  const idx = {}; listCols.forEach(h=>{ idx[h] = head.indexOf(h); });
+  const byCode = {}; let rowCount = 0;
+  for(let n=1;n<lines.length;n++){
+    const p = csvParseLine(lines[n]);
+    const code = (p[codeIdx]||"").trim();
+    if(!code) continue;
+    const vals = {}; listCols.forEach(h=>{ vals[h] = p[idx[h]]!==undefined ? p[idx[h]] : ""; });
+    byCode[code] = vals; rowCount++;
+  }
+  if(!rowCount) return {error:"No item rows found in the file."};
+  if(!listCols.length) return {error:"No price list columns found besides the Default one. Export the full Items list from Sage — if those columns are missing from the file, importing would wipe them."};
+  return {listCols, byCode, rowCount};
+}
+// Which exported items can't be matched to the uploaded Items export — those would go to Sage with every list blank (= zero).
+function sagePriceListMissing(movedRows){
+  if(!sagePriceListFile) return null;
+  return movedRows.filter(r=> !r.itemCode || !sagePriceListFile.byCode[r.itemCode]);
+}
 // Market Statements (Costings) — which imported statement date is currently showing. Defaults to the
 // most recent date with data each time the tab is opened fresh (see renderMarketStatements()); "" only
 // means nothing has ever been imported yet.
@@ -4455,8 +4486,11 @@ function renderSellingPrices(){
   const jumpRows = movedRows.filter(r=> r.jumpFlag);
   const tooEarly = costCsvTooEarly(exportDate);
   const csvParts = Math.max(1, Math.ceil(movedRows.length / SAGE_MAX_IMPORT_LINES));
-  const canDownload = !tooEarly && !unpricedLines.length && !zeroCostRows.length && movedRows.length > 0;
-  const downloadTitle = tooEarly ? "A day's export can only be downloaded from the next morning" : unpricedLines.length ? "Confirm every received price first (Confirm Prices tab)" : zeroCostRows.length ? "Fix the R0 cost item(s) first" : "No items had a cost or price move on this date";
+  const plMissing = sagePriceListMissing(movedRows) || [];
+  const plReady = !!sagePriceListFile && !plMissing.length;
+  const plNames = sagePriceListFile ? Array.from(new Set(sagePriceListFile.listCols.map(h=>h.replace(/\s-\s(Exclusive|Inclusive)$/i,"")))) : [];
+  const canDownload = !tooEarly && !unpricedLines.length && !zeroCostRows.length && movedRows.length > 0 && plReady;
+  const downloadTitle = tooEarly ? "A day's export can only be downloaded from the next morning" : unpricedLines.length ? "Confirm every received price first (Confirm Prices tab)" : zeroCostRows.length ? "Fix the R0 cost item(s) first" : !sagePriceListFile ? "Upload a fresh Items export from Sage first (below) — otherwise Sage would zero every other price list" : plMissing.length ? "Some items aren't in the uploaded Sage Items export — see the red banner" : "No items had a cost or price move on this date";
   const partButtons = Array.from({length:csvParts}, (_,i)=>{
     const from = i*SAGE_MAX_IMPORT_LINES + 1, to = Math.min(movedRows.length, (i+1)*SAGE_MAX_IMPORT_LINES);
     const label = csvParts===1 ? "Download price export" : `Download part ${i+1} of ${csvParts} (rows ${from}–${to})`;
@@ -4560,7 +4594,7 @@ function renderSellingPrices(){
         <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;">
           <div class="field" style="min-width:170px;"><label>Purchase date</label><input type="date" id="sellingCsvDate" value="${esc(sellingCsvDate)}"></div>
           <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;">${partButtons}</div>
-          <div class="helptext" style="max-width:420px;text-align:right;">Code, Description, Default Price List - Exclusive, Cost, VAT Type Sales, VAT Type Purchases</div>
+          <div class="helptext" style="max-width:420px;text-align:right;">Code, Description, Default Price List (Excl + Incl), every other price list exactly as it is in Sage now, VAT Type Sales, VAT Type Purchases, Cost</div>
         </div>
       </div>
     </div>
@@ -4571,6 +4605,19 @@ function renderSellingPrices(){
     ${jumpRows.length ? `<div class="banner warn">⚠ ${jumpRows.length} price${jumpRows.length===1?"":"s"} moved more than ${Math.round(PRICE_JUMP_WARN_PCT*100)}% against the last price sent to Sage — check the cost behind ${jumpRows.length===1?"it":"them"} (a mistyped price or the wrong unit shows up here): ${jumpRows.slice(0,6).map(r=>esc(r.item)+" "+(r.jumpPct>0?"▲":"▼")+fmtNum(Math.abs(r.jumpPct)*100,0)+"%").join(", ")}${jumpRows.length>6?` and ${jumpRows.length-6} more`:""}. Highlighted in the table below. You can still download — this is a check, not a block.</div>` : ""}
     ${(!tooEarly && !movedRows.length) ? `<div class="banner info">ℹ No items had a cost move on ${esc(exportDate||"this date")} (nothing was purchased that day), so there is nothing to export.</div>` : ""}
     ${movedRows.length > SAGE_MAX_IMPORT_LINES ? `<div class="banner warn">ℹ ${movedRows.length} rows for ${esc(exportDate)} — more than Sage's ${SAGE_MAX_IMPORT_LINES}-line limit, so the download is split into ${csvParts} parts. Import them one after the other.</div>` : ""}
+    <div class="card">
+      <div class="cardhead"><div><h3>Step 1 — Sage price lists</h3><div class="desc"><b>Why this is needed:</b> when Sage imports a file it sets any price list that is <em>not in the file</em> to 0. So every export line has to carry every price list's current price. In Sage (Products &amp; Services → Export) download the full <b>Items</b> list <b>today, just before this export</b>, and upload it here — the app copies each item's FirstRand / Bidvest / Tsebo / Capitol / C3 (etc.) prices straight from it and only changes the Default price and Cost. It is never saved in the app, so it can't go stale.</div></div></div>
+      <div class="cardbody">
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+          <input type="file" id="sagePriceListInput" accept=".csv,text/csv,.txt">
+          ${sagePriceListFile ? `<button class="btn small" id="sagePriceListClear">Clear</button>` : ""}
+        </div>
+        <div id="sagePriceListStatus" style="margin-top:10px;"></div>
+        ${sagePriceListFile ? `<div class="banner ${plMissing.length?"critical":"info"}" style="margin-top:10px;">${plMissing.length
+          ? `⛔ ${plMissing.length} item${plMissing.length===1?"":"s"} in this export ${plMissing.length===1?"isn't":"aren't"} in the uploaded Items file (${plMissing.slice(0,8).map(r=>esc((r.itemCode||"no code")+" · "+r.item)).join("; ")}${plMissing.length>8?` and ${plMissing.length-8} more`:""}). Their price lists would be zeroed in Sage, so the download is blocked — check the Item code in Item Setup, or re-export the Items list from Sage.`
+          : `✓ <b>${esc(sagePriceListFile.name)}</b> loaded ${esc(sagePriceListFile.loadedAt)} — ${sagePriceListFile.rowCount} Sage items, ${plNames.length} other price list${plNames.length===1?"":"s"} (${esc(plNames.join(", "))}) will be carried unchanged on every line. Make sure this file was exported from Sage today.`}</div>` : `<div class="banner warn" style="margin-top:10px;">Upload the Sage Items export to unlock the download.</div>`}
+      </div>
+    </div>
     <div class="card">
       <div class="cardhead"><div><h3>Export for ${esc(exportDate||"—")}</h3><div class="desc">${movedRows.length} row${movedRows.length===1?"":"s"} — exactly what the download contains. Price = the formula price worked out from the Cost in this file (buffered cost + target margin, rounded up to 50c, never below the item's Min price); Cost includes the wastage buffer. Previous price = what was last sent to Sage.</div></div></div>
       <div class="cardbody" style="padding:0;">
@@ -6166,6 +6213,26 @@ function wireTabEvents(){
       });
       persist("Wastage buffers saved", ["categoryCostBuffers"]);
     });
+    const plInput = document.getElementById("sagePriceListInput");
+    if(plInput) plInput.addEventListener("change", ()=>{
+      const f = plInput.files && plInput.files[0]; if(!f) return;
+      const reader = new FileReader();
+      reader.onload = ()=>{
+        const res = parseSageItemsExport(String(reader.result||""));
+        if(res.error){
+          sagePriceListFile = null; render();
+          const st = document.getElementById("sagePriceListStatus");
+          if(st) st.innerHTML = `<div class="banner critical">⛔ ${esc(res.error)}</div>`;
+          return;
+        }
+        const n = new Date();
+        sagePriceListFile = {name:f.name, loadedAt:n.toISOString().slice(0,10)+" "+n.toTimeString().slice(0,5), listCols:res.listCols, byCode:res.byCode, rowCount:res.rowCount};
+        render();
+      };
+      reader.readAsText(f);
+    });
+    const plClear = document.getElementById("sagePriceListClear");
+    if(plClear) plClear.addEventListener("click", ()=>{ sagePriceListFile = null; render(); });
     document.querySelectorAll("[data-sellingcsv-part]").forEach(btn=>{
       btn.addEventListener("click", ()=>{
         const part = Number(btn.dataset.sellingcsvPart);
@@ -6176,10 +6243,17 @@ function wireTabEvents(){
         if(!moved.length){ toast("No items moved on this date — nothing to export"); return; }
         // A buy logged and received with no price computes to exactly R0, which must never reach Sage as a real cost.
         if(moved.some(r=> r.cost === 0)){ toast("Can't export — one or more items would show R0 cost. Fix the price first."); return; }
+        // Sage zeroes any price list column missing from an import — so the file must carry every list, copied from a fresh Items export.
+        if(!sagePriceListFile){ toast("Upload a fresh Items export from Sage first — otherwise Sage would zero the other price lists"); return; }
+        const plGone = sagePriceListMissing(moved);
+        if(plGone.length){ toast(plGone.length+" item(s) aren't in the uploaded Items export — download blocked so their price lists aren't zeroed"); return; }
         const slice = moved.slice(part*SAGE_MAX_IMPORT_LINES, (part+1)*SAGE_MAX_IMPORT_LINES);
-        const csv = "Code,Description,Default Price List - Exclusive,Cost,VAT Type Sales,VAT Type Purchases\n" + slice.map(r=>{
+        const plCols = sagePriceListFile.listCols;
+        const csv = ["Code","Description","Default Price List - Exclusive","Default Price List - Inclusive"].concat(plCols, ["VAT Type Sales","VAT Type Purchases","Cost"]).join(",") + "\n" + slice.map(r=>{
           const vatType = r.vatable ? "Standard Rate" : "Zero Rate";
-          return [toCsvField(r.itemCode), toCsvField(r.description), r.price, r.cost!==null ? r.cost : "", toCsvField(vatType), toCsvField(vatType)].join(",");
+          const incl = r.vatable ? (r.price*1.15).toFixed(2) : Number(r.price).toFixed(2);
+          const lists = sagePriceListFile.byCode[r.itemCode];
+          return [toCsvField(r.itemCode), toCsvField(r.description), Number(r.price).toFixed(2), incl].concat(plCols.map(h=> toCsvField(lists[h])), [toCsvField(vatType), toCsvField(vatType), r.cost!==null ? r.cost : ""]).join(",");
         }).join("\n");
         const parts = Math.ceil(moved.length / SAGE_MAX_IMPORT_LINES);
         browserDownload("sage_price_export_"+sellingCsvDate+(parts>1 ? "_part"+(part+1)+"of"+parts : "")+".csv", csv, "text/csv");
