@@ -529,7 +529,7 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 // day has had the chance to be received and priced first. Today's — or a future — purchase date is never allowed.
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
-const APP_BUILD = "2026-10-15 · Price Export: decluttered, Sage VAT carried as-is";
+const APP_BUILD = "2026-10-15 · Sign-off blocked until the price export is done";
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
 // often than it's audited in bulk, so opening the tab should land on today's entries, not the full history.
 let purchaseDateFilter = new Date().toISOString().slice(0,10);
@@ -3204,7 +3204,9 @@ function renderHomeDashboard(){
   const signoffRows = procurementUsers.map(u=> ({name:u.name, isSelf: !!(currentUser && currentUser.name===u.name), entry: todaysSignoffs.find(s=> s.user===u.name) || null}));
   const mySignoff = currentUser ? todaysSignoffs.find(s=> s.user===currentUser.name) : null;
   const canSignOff = !!(currentUser && currentUser.role==="procurement" && !mySignoff);
-  const signoffBlocked = needsActionRows.length > 0;
+  const exportDue = costCsvDueDate();
+  const exportStatus = priceExportStatus_(exportDue);
+  const signoffBlocked = needsActionRows.length > 0 || !exportStatus.complete;
   const outstandingNames = needsActionRows.map(r=>r.baseProduct);
   const shownOutstanding = outstandingNames.slice(0,8).map(esc).join(", ");
   const moreOutstanding = outstandingNames.length - 8;
@@ -3329,8 +3331,9 @@ function renderHomeDashboard(){
         ${canSignOff ? `
         <div style="margin-top:12px;">
           ${signoffBlocked
-            ? `<div class="helptext" style="margin-bottom:8px;">Still need action today before you can sign off: ${shownOutstanding}${moreOutstanding>0?` and ${moreOutstanding} more`:""}. ${goto("shoppinglist","Open Shopping List →")}</div>
-               <button class="btn primary" id="signoffBtn" disabled title="Clear every Critical/Consider Buying item first">Sign off for today</button>`
+            ? `${needsActionRows.length ? `<div class="helptext" style="margin-bottom:8px;">Still need action today before you can sign off: ${shownOutstanding}${moreOutstanding>0?` and ${moreOutstanding} more`:""}. ${goto("shoppinglist","Open Shopping List →")}</div>` : ""}
+               ${!exportStatus.complete ? `<div class="helptext" style="margin-bottom:8px;">The Sage price export for ${esc(shortDayLabel(exportDue))} hasn't been completed${exportStatus.parts>1?` (${exportStatus.got} of ${exportStatus.parts} parts downloaded)`:""}. ${goto("sellingprices","Open Price Export →")}</div>` : ""}
+               <button class="btn primary" id="signoffBtn" disabled title="${needsActionRows.length ? "Clear every Critical/Consider Buying item first" : "Complete the Sage price export first"}">Sign off for today</button>`
             : `<button class="btn primary" id="signoffBtn">Sign off for today</button>`}
         </div>` : (mySignoff ? `<div class="helptext" style="margin-top:12px;">You signed off for today at ${esc(fmtTime(mySignoff.time))}.</div>` : "")}
       </div>
@@ -4075,7 +4078,23 @@ function costCsvStatTile(){
   if(!due) return {label:"Price export", value:"No purchases", color:"var(--muted)"};
   const got = costCsvDownloadsFor(due);
   const last = got.length ? got[got.length-1] : null;
-  return {label:"Price export · "+shortDayLabel(due), value: last ? ("✓ " + (last.downloadedBy||"downloaded")) : "Not yet", color: last ? "var(--good)" : "var(--warn)"};
+  const st = priceExportStatus_(due);
+  if(last && !st.complete) return {label:"Price export · "+shortDayLabel(due), value: st.got+" of "+st.parts+" parts", color:"var(--warn)"};
+  return {label:"Price export · "+shortDayLabel(due), value: (last||st.complete) ? ("✓ " + ((last&&last.downloadedBy)||"done")) : "Not yet", color: (last||st.complete) ? "var(--good)" : "var(--warn)"};
+}
+// Has the price export for a purchase date been fully downloaded? Every part of the day's file must have been downloaded
+// (each download logs how many rows it held). A day with nothing to export counts as done. Used to gate the daily sign-off.
+function priceExportStatus_(date){
+  if(!date) return {date:"", total:0, parts:0, got:0, complete:true};
+  const n = sellingPricesMovedOn(date).length;
+  if(!n) return {date, total:0, parts:0, got:0, complete:true};
+  const sizes = [];
+  for(let i=0;i*SAGE_MAX_IMPORT_LINES<n;i++) sizes.push(Math.min(SAGE_MAX_IMPORT_LINES, n-i*SAGE_MAX_IMPORT_LINES));
+  const logged = costCsvDownloadsFor(date).map(d=> Number(d.rows)||0);
+  if(logged.some(r=> r>=n)) return {date, total:n, parts:sizes.length, got:sizes.length, complete:true}; // one file covering the whole day (older downloads)
+  const pool = logged.slice(); let got = 0;
+  sizes.forEach(sz=>{ const ix = pool.indexOf(sz); if(ix>=0){ pool.splice(ix,1); got++; } });
+  return {date, total:n, parts:sizes.length, got, complete: got>=sizes.length};
 }
 function renderConfirmPrices(){
   const todayStr = new Date().toISOString().slice(0,10);
@@ -5157,6 +5176,7 @@ function wireTabEvents(){
       const today = new Date().toISOString().slice(0,10);
       if(!DATA.procurementSignoffs) DATA.procurementSignoffs = [];
       if(DATA.procurementSignoffs.some(s=> s.date===today && s.user===currentUser.name)){ render(); return; }
+      { const ex = priceExportStatus_(costCsvDueDate()); if(!ex.complete){ toast("Complete the Sage price export for "+shortDayLabel(ex.date)+" first"); render(); return; } }
       const entry = {date:today, user:currentUser.name, time:new Date().toTimeString().slice(0,8)};
       DATA.procurementSignoffs.push(entry);
       const saved = await persist("Signed off for " + today, ["procurementSignoffs"]);
