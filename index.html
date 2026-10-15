@@ -529,7 +529,7 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 // day has had the chance to be received and priced first. Today's — or a future — purchase date is never allowed.
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
-const APP_BUILD = "2026-10-15 · Price Export: VAT kept in sync with Sage, all price lists carried";
+const APP_BUILD = "2026-10-15 · Price Export: separate Average Cost file restored";
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
 // often than it's audited in bulk, so opening the tab should land on today's entries, not the full history.
 let purchaseDateFilter = new Date().toISOString().slice(0,10);
@@ -4562,11 +4562,20 @@ function renderSellingPrices(){
   const plZeroLists = sagePriceListFile ? movedRows.filter(r=>{ const l = sagePriceListFile.byCode[r.itemCode]; return l && sagePriceListFile.listCols.some(h=> /exclusive$/i.test(h) && Number(l[h]||0)===0); }) : [];
   const plNames = sagePriceListFile ? Array.from(new Set(sagePriceListFile.listCols.map(h=>h.replace(/\s-\s(Exclusive|Inclusive)$/i,"")))) : [];
   const canDownload = !tooEarly && !unpricedLines.length && !zeroCostRows.length && movedRows.length > 0 && plReady && !plVatBlock.length;
+  // The cost file (Sage's "Item Code, Average Cost, Quantity On Hand" import) needs the same day-level gates as the price file,
+  // but NOT the Items-export upload: it carries no price lists, so it can't zero any.
+  const canCostDownload = !tooEarly && !unpricedLines.length && !zeroCostRows.length && movedRows.length > 0;
+  const costTitle = tooEarly ? "A day's export can only be downloaded from the next morning" : unpricedLines.length ? "Confirm every received price first (Confirm Prices tab)" : zeroCostRows.length ? "Fix the R0 cost item(s) first" : "No items had a cost move on this date";
   const downloadTitle = tooEarly ? "A day's export can only be downloaded from the next morning" : unpricedLines.length ? "Confirm every received price first (Confirm Prices tab)" : zeroCostRows.length ? "Fix the R0 cost item(s) first" : !sagePriceListFile ? "Upload a fresh Items export from Sage first (below) — otherwise Sage would zero every other price list" : plDupCodes.length ? "Two Item Setup rows share one Item code — see the red banner" : plVatBlock.length ? "Sage's VAT type differs from Item Setup for some of these items — sort that out in Step 1 first" : plMissing.length ? "Some items aren't in the uploaded Sage Items export — see the red banner" : "No items had a cost or price move on this date";
   const partButtons = Array.from({length:csvParts}, (_,i)=>{
     const from = i*SAGE_MAX_IMPORT_LINES + 1, to = Math.min(movedRows.length, (i+1)*SAGE_MAX_IMPORT_LINES);
     const label = csvParts===1 ? "Download price export" : `Download part ${i+1} of ${csvParts} (rows ${from}–${to})`;
     return `<button class="btn primary" data-sellingcsv-part="${i}" ${canDownload?"":`disabled title="${esc(downloadTitle)}"`}>${label}</button>`;
+  }).join("");
+  const costButtons = Array.from({length:csvParts}, (_,i)=>{
+    const from = i*SAGE_MAX_IMPORT_LINES + 1, to = Math.min(movedRows.length, (i+1)*SAGE_MAX_IMPORT_LINES);
+    const label = csvParts===1 ? "Download cost file" : `Cost file part ${i+1} of ${csvParts} (rows ${from}–${to})`;
+    return `<button class="btn" data-costcsv-part="${i}" ${canCostDownload?"":`disabled title="${esc(costTitle)}"`}>${label}</button>`;
   }).join("");
   const movedTableRows = movedRows.map(r=>`
     <tr${r.jumpFlag?' style="background:var(--warnbg, rgba(245,158,11,.12));"':''}>
@@ -4666,7 +4675,8 @@ function renderSellingPrices(){
         <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;">
           <div class="field" style="min-width:170px;"><label>Purchase date</label><input type="date" id="sellingCsvDate" value="${esc(sellingCsvDate)}"></div>
           <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;">${partButtons}</div>
-          <div class="helptext" style="max-width:420px;text-align:right;">Code, Description, Default Price List (Excl + Incl), every other price list exactly as it is in Sage now, VAT Type Sales, VAT Type Purchases, Cost</div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;">${costButtons}</div>
+          <div class="helptext" style="max-width:420px;text-align:right;"><b>Price file</b> (Sage product import): Code, Description, Default Price List (Excl + Incl), every other price list exactly as it is in Sage now, VAT Types, Cost.<br><b>Cost file</b> (Sage Average Cost import): Item Code, Average Cost, Quantity On Hand (0). Sage's product import did not apply the Cost column from the price file, so import <u>both</u> files.</div>
         </div>
       </div>
     </div>
@@ -6345,6 +6355,21 @@ function wireTabEvents(){
     });
     const plClear = document.getElementById("sagePriceListClear");
     if(plClear) plClear.addEventListener("click", ()=>{ sagePriceListFile = null; render(); });
+    document.querySelectorAll("[data-costcsv-part]").forEach(btn=>{
+      btn.addEventListener("click", ()=>{
+        const part = Number(btn.dataset.costcsvPart);
+        if(costCsvTooEarly(sellingCsvDate)){ toast("A day's export can only be downloaded from the next morning"); return; }
+        if(DATA.purchaseCosts.some(p=> p.baseProduct && p.date===sellingCsvDate && needsPriceConfirm(p))){ toast("Can't export — some received deliveries still need a confirmed price (Confirm Prices tab)."); return; }
+        const moved = sellingPricesMovedOn(sellingCsvDate);
+        if(!moved.length){ toast("No items moved on this date — nothing to export"); return; }
+        if(moved.some(r=> r.cost === 0 || r.cost === null)){ toast("Can't export — one or more items would show R0 / no cost. Fix the price first."); return; }
+        const slice = moved.slice(part*SAGE_MAX_IMPORT_LINES, (part+1)*SAGE_MAX_IMPORT_LINES);
+        const csv = "Item Code,Average Cost,Quantity On Hand\n" + slice.map(r=> [toCsvField(r.itemCode), r.cost, 0].join(",")).join("\n");
+        const parts = Math.ceil(moved.length / SAGE_MAX_IMPORT_LINES);
+        browserDownload("sage_average_cost_"+sellingCsvDate+(parts>1 ? "_part"+(part+1)+"of"+parts : "")+".csv", csv, "text/csv");
+        toast("Cost file downloaded — import it into Sage with the Average Cost import");
+      });
+    });
     document.querySelectorAll("[data-sellingcsv-part]").forEach(btn=>{
       btn.addEventListener("click", ()=>{
         const part = Number(btn.dataset.sellingcsvPart);
