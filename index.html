@@ -529,7 +529,7 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 // day has had the chance to be received and priced first. Today's — or a future — purchase date is never allowed.
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
-const APP_BUILD = "2026-10-15 · Price Export carries every Sage price list (fixes zeroing) · Pallet tally range + archive";
+const APP_BUILD = "2026-10-15 · Price Export: VAT kept in sync with Sage, all price lists carried";
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
 // often than it's audited in bulk, so opening the tab should land on today's entries, not the full history.
 let purchaseDateFilter = new Date().toISOString().slice(0,10);
@@ -604,12 +604,23 @@ function parseSageItemsExport(text){
   const isDefault = h=> /^default price list/i.test(h);
   const listCols = head.filter(h=> /\s-\s(Exclusive|Inclusive)$/i.test(h) && !isDefault(h));
   const idx = {}; listCols.forEach(h=>{ idx[h] = head.indexOf(h); });
+  const descIdx = head.findIndex(h=> h.trim().toLowerCase()==="description");
+  const vatSIdx = head.findIndex(h=> h.trim().toLowerCase()==="vat type sales");
+  const vatPIdx = head.findIndex(h=> h.trim().toLowerCase()==="vat type purchases");
+  const defExIdx = head.findIndex(h=> /^default price list\s-\sexclusive$/i.test(h.trim()));
+  const costIdx = head.findIndex(h=> h.trim().toLowerCase()==="cost");
+  if(vatSIdx<0 || vatPIdx<0) return {error:"No \"VAT Type Sales\" / \"VAT Type Purchases\" columns found — export the full Items list from Sage."};
   const byCode = {}; let rowCount = 0;
   for(let n=1;n<lines.length;n++){
     const p = csvParseLine(lines[n]);
     const code = (p[codeIdx]||"").trim();
     if(!code) continue;
     const vals = {}; listCols.forEach(h=>{ vals[h] = p[idx[h]]!==undefined ? p[idx[h]] : ""; });
+    // Description + VAT types ride along from Sage too: the import matches by Code and OVERWRITES both, so the file must
+    // carry Sage's own values (the app's checkbox/description can disagree with Sage and would silently change them).
+    vals.__desc = descIdx>=0 ? (p[descIdx]||"") : "";
+    vals.__vatS = (p[vatSIdx]||"").trim(); vals.__vatP = (p[vatPIdx]||"").trim();
+    vals.__defEx = defExIdx>=0 ? (p[defExIdx]||"") : ""; vals.__cost = costIdx>=0 ? (p[costIdx]||"") : "";
     byCode[code] = vals; rowCount++;
   }
   if(!rowCount) return {error:"No item rows found in the file."};
@@ -617,9 +628,62 @@ function parseSageItemsExport(text){
   return {listCols, byCode, rowCount};
 }
 // Which exported items can't be matched to the uploaded Items export — those would go to Sage with every list blank (= zero).
+// Two Item Setup rows sharing one Item code would be two lines for the same Sage product in one import — Sage rejects the
+// second ("Row not found or changed") after the first has already overwritten the description.
+function sageExportDuplicateCodes(movedRows){
+  const seen = {}, dup = {};
+  movedRows.forEach(r=>{ if(!r.itemCode) return; (seen[r.itemCode] = seen[r.itemCode]||[]).push(r); });
+  Object.keys(seen).forEach(c=>{ if(seen[c].length>1) dup[c] = seen[c]; });
+  return dup;
+}
 function sagePriceListMissing(movedRows){
   if(!sagePriceListFile) return null;
   return movedRows.filter(r=> !r.itemCode || !sagePriceListFile.byCode[r.itemCode]);
+}
+// ---- VAT types ----
+// Item Setup's VAT checkbox is the single source of truth for an item's VAT (ticked = Standard Rate, unticked = Zero Rate,
+// written to BOTH VAT Type Sales and VAT Type Purchases). A Sage product import OVERWRITES whatever VAT the item has, so the
+// app never lets an import change VAT silently: any item whose Sage VAT differs from Item Setup is listed on Price Export
+// and must be sorted first — either push the app's VAT to Sage (VAT correction file) or pull Sage's VAT into Item Setup.
+// The one exception: an item Sage has as "No VAT" (both columns) that isn't ticked in Item Setup is left as "No VAT".
+function exportVatTypes_(vatable, lists){
+  const want = vatable ? "Standard Rate" : "Zero Rate";
+  if(!vatable && lists && lists.__vatS==="No VAT" && lists.__vatP==="No VAT") return {s:"No VAT", p:"No VAT"};
+  return {s:want, p:want};
+}
+function sageVatMismatches(){
+  if(!sagePriceListFile) return [];
+  const out = [];
+  (DATA.itemSetup||[]).forEach(it=>{
+    if(!it.itemCode) return;
+    const l = sagePriceListFile.byCode[it.itemCode]; if(!l) return;
+    const w = exportVatTypes_(!!it.vatable, l);
+    if(l.__vatS!==w.s || l.__vatP!==w.p) out.push({item:it.item, itemCode:it.itemCode, sageS:l.__vatS, sageP:l.__vatP, wantS:w.s, wantP:w.p, vatable:!!it.vatable});
+  });
+  return out;
+}
+// VAT-inclusive price from an exclusive one (15% VAT, rounded half up to the cent). "" stays "".
+function sageInclFrom_(exStr, standard){
+  if(exStr===""||exStr===null||exStr===undefined) return "";
+  const ex = Number(exStr); if(isNaN(ex)) return exStr;
+  return (standard ? Math.round(ex*115 + 1e-9)/100 : Math.round(ex*100 + 1e-9)/100).toFixed(2);
+}
+// The Sage import file that makes Sage's VAT match Item Setup for the mismatched items. Carries every price list (a missing
+// column would be zeroed) with Sage's own prices, so only VAT — and the Inclusive figures that follow from it — change.
+function sageVatCorrectionCsv_(mismatches, part){
+  const f = sagePriceListFile;
+  const slice = mismatches.slice(part*SAGE_MAX_IMPORT_LINES, (part+1)*SAGE_MAX_IMPORT_LINES);
+  const head = ["Code","Description","Default Price List - Exclusive","Default Price List - Inclusive"].concat(f.listCols, ["VAT Type Sales","VAT Type Purchases","Cost"]);
+  const lines = slice.map(m=>{
+    const l = f.byCode[m.itemCode]; const std = m.wantS==="Standard Rate";
+    const cells = [toCsvField(m.itemCode), toCsvField(l.__desc||m.item), l.__defEx, sageInclFrom_(l.__defEx, std)];
+    f.listCols.forEach(h=>{
+      cells.push(toCsvField(/inclusive$/i.test(h) ? sageInclFrom_(l[h.replace(/inclusive$/i,"Exclusive")], std) : l[h]));
+    });
+    cells.push(toCsvField(m.wantS), toCsvField(m.wantP), l.__cost);
+    return cells.join(",");
+  });
+  return head.join(",") + "\n" + lines.join("\n");
 }
 // Market Statements (Costings) — which imported statement date is currently showing. Defaults to the
 // most recent date with data each time the tab is opened fresh (see renderMarketStatements()); "" only
@@ -4487,10 +4551,18 @@ function renderSellingPrices(){
   const tooEarly = costCsvTooEarly(exportDate);
   const csvParts = Math.max(1, Math.ceil(movedRows.length / SAGE_MAX_IMPORT_LINES));
   const plMissing = sagePriceListMissing(movedRows) || [];
-  const plReady = !!sagePriceListFile && !plMissing.length;
+  const plDup = sageExportDuplicateCodes(movedRows);
+  const plDupCodes = Object.keys(plDup);
+  const plReady = !!sagePriceListFile && !plMissing.length && !plDupCodes.length;
+  const plVatMis = sageVatMismatches();
+  const plVatMisCodes = new Set(plVatMis.map(m=>m.itemCode));
+  const plVatBlock = movedRows.filter(r=> plVatMisCodes.has(r.itemCode));
+  const plVatParts = Math.max(1, Math.ceil(plVatMis.length / SAGE_MAX_IMPORT_LINES));
+  // an item whose price list is R0 would invoice at R0 for that customer — worth seeing before it goes to Sage
+  const plZeroLists = sagePriceListFile ? movedRows.filter(r=>{ const l = sagePriceListFile.byCode[r.itemCode]; return l && sagePriceListFile.listCols.some(h=> /exclusive$/i.test(h) && Number(l[h]||0)===0); }) : [];
   const plNames = sagePriceListFile ? Array.from(new Set(sagePriceListFile.listCols.map(h=>h.replace(/\s-\s(Exclusive|Inclusive)$/i,"")))) : [];
-  const canDownload = !tooEarly && !unpricedLines.length && !zeroCostRows.length && movedRows.length > 0 && plReady;
-  const downloadTitle = tooEarly ? "A day's export can only be downloaded from the next morning" : unpricedLines.length ? "Confirm every received price first (Confirm Prices tab)" : zeroCostRows.length ? "Fix the R0 cost item(s) first" : !sagePriceListFile ? "Upload a fresh Items export from Sage first (below) — otherwise Sage would zero every other price list" : plMissing.length ? "Some items aren't in the uploaded Sage Items export — see the red banner" : "No items had a cost or price move on this date";
+  const canDownload = !tooEarly && !unpricedLines.length && !zeroCostRows.length && movedRows.length > 0 && plReady && !plVatBlock.length;
+  const downloadTitle = tooEarly ? "A day's export can only be downloaded from the next morning" : unpricedLines.length ? "Confirm every received price first (Confirm Prices tab)" : zeroCostRows.length ? "Fix the R0 cost item(s) first" : !sagePriceListFile ? "Upload a fresh Items export from Sage first (below) — otherwise Sage would zero every other price list" : plDupCodes.length ? "Two Item Setup rows share one Item code — see the red banner" : plVatBlock.length ? "Sage's VAT type differs from Item Setup for some of these items — sort that out in Step 1 first" : plMissing.length ? "Some items aren't in the uploaded Sage Items export — see the red banner" : "No items had a cost or price move on this date";
   const partButtons = Array.from({length:csvParts}, (_,i)=>{
     const from = i*SAGE_MAX_IMPORT_LINES + 1, to = Math.min(movedRows.length, (i+1)*SAGE_MAX_IMPORT_LINES);
     const label = csvParts===1 ? "Download price export" : `Download part ${i+1} of ${csvParts} (rows ${from}–${to})`;
@@ -4606,13 +4678,25 @@ function renderSellingPrices(){
     ${(!tooEarly && !movedRows.length) ? `<div class="banner info">ℹ No items had a cost move on ${esc(exportDate||"this date")} (nothing was purchased that day), so there is nothing to export.</div>` : ""}
     ${movedRows.length > SAGE_MAX_IMPORT_LINES ? `<div class="banner warn">ℹ ${movedRows.length} rows for ${esc(exportDate)} — more than Sage's ${SAGE_MAX_IMPORT_LINES}-line limit, so the download is split into ${csvParts} parts. Import them one after the other.</div>` : ""}
     <div class="card">
-      <div class="cardhead"><div><h3>Step 1 — Sage price lists</h3><div class="desc"><b>Why this is needed:</b> when Sage imports a file it sets any price list that is <em>not in the file</em> to 0. So every export line has to carry every price list's current price. In Sage (Products &amp; Services → Export) download the full <b>Items</b> list <b>today, just before this export</b>, and upload it here — the app copies each item's FirstRand / Bidvest / Tsebo / Capitol / C3 (etc.) prices straight from it and only changes the Default price and Cost. It is never saved in the app, so it can't go stale.</div></div></div>
+      <div class="cardhead"><div><h3>Step 1 — Sage price lists</h3><div class="desc"><b>Why this is needed:</b> when Sage imports a file it sets any price list that is <em>not in the file</em> to 0. So every export line has to carry every price list's current price. In Sage (Products &amp; Services → Export) download the full <b>Items</b> list <b>today, just before this export</b>, and upload it here — the app copies each item's FirstRand / Bidvest / Tsebo / Capitol / C3 (etc.) prices straight from it and only changes the Default price and Cost. It is never saved in the app, so it can't go stale. <b>If Sage reports "Row not found or changed" for a few rows</b>, those items were being sold while the file imported — just import the same file again when no invoices are being captured (it is safe to repeat).</div></div></div>
       <div class="cardbody">
         <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
           <input type="file" id="sagePriceListInput" accept=".csv,text/csv,.txt">
           ${sagePriceListFile ? `<button class="btn small" id="sagePriceListClear">Clear</button>` : ""}
         </div>
         <div id="sagePriceListStatus" style="margin-top:10px;"></div>
+        ${plDupCodes.length ? `<div class="banner critical" style="margin-top:10px;">⛔ Item code ${plDupCodes.slice(0,6).map(c=>esc(c)+" ("+plDup[c].map(r=>esc(r.item)).join(" / ")+")").join("; ")}${plDupCodes.length>6?` and ${plDupCodes.length-6} more`:""} is used by more than one Item Setup row. Sage can only update a product once per import (the second line fails with "Row not found or changed"), so the download is blocked — delete or re-code the stale row in Item Setup.</div>` : ""}
+        ${plVatMis.length ? `<div class="banner ${plVatBlock.length?"critical":"warn"}" style="margin-top:10px;">
+          <div><b>${plVatBlock.length?"⛔ ":"ℹ "}VAT types: ${plVatMis.length} item${plVatMis.length===1?"":"s"} where Sage's VAT differs from Item Setup</b>${plVatBlock.length?` — ${plVatBlock.length} of them ${plVatBlock.length===1?"is":"are"} in this export, so the download is blocked (an import would silently change their VAT)`:" (none are in this export, but a future import could change them)"}.<br>
+          <span class="helptext">${plVatMis.slice(0,8).map(m=>esc(m.itemCode)+": Sage "+esc(m.sageS)+" / "+esc(m.sageP)+" → Item Setup "+esc(m.wantS)+" / "+esc(m.wantP)).join(" · ")}${plVatMis.length>8?` · and ${plVatMis.length-8} more`:""}</span><br>
+          <b>Which one is right?</b> If <b>Item Setup</b> is right, download the correction, import it into Sage, then upload a fresh Items export. If <b>Sage</b> is right, copy its VAT into Item Setup.</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;">
+            ${Array.from({length:plVatParts},(_,i)=>`<button class="btn small" data-vatfix-part="${i}">${plVatParts===1?`Download VAT correction for Sage (${plVatMis.length} items)`:`VAT correction part ${i+1} of ${plVatParts}`}</button>`).join("")}
+            <button class="btn small" id="sageVatSyncBtn">Sage is right → copy its VAT into Item Setup</button>
+          </div>
+        </div>` : (sagePriceListFile ? `<div class="banner info" style="margin-top:10px;">✓ VAT types in Item Setup match Sage on every item.</div>` : "")}
+        ${(sagePriceListFile && !plVatMis.length) ? `<div style="margin-top:6px;"><button class="btn small" id="sageVatSyncBtn" title="Sets every Item Setup VAT tick from this file">Re-copy VAT from this file into Item Setup</button></div>` : ""}
+        ${plZeroLists.length ? `<div class="banner warn" style="margin-top:10px;">ℹ ${plZeroLists.length} item${plZeroLists.length===1?"":"s"} in this export ${plZeroLists.length===1?"has":"have"} a R0 price on at least one customer price list in Sage (${plZeroLists.slice(0,8).map(r=>esc(r.itemCode)).join(", ")}${plZeroLists.length>8?` and ${plZeroLists.length-8} more`:""}) — it would invoice at R0 for that customer. Set the price in Sage; the app carries it as it is.</div>` : ""}
         ${sagePriceListFile ? `<div class="banner ${plMissing.length?"critical":"info"}" style="margin-top:10px;">${plMissing.length
           ? `⛔ ${plMissing.length} item${plMissing.length===1?"":"s"} in this export ${plMissing.length===1?"isn't":"aren't"} in the uploaded Items file (${plMissing.slice(0,8).map(r=>esc((r.itemCode||"no code")+" · "+r.item)).join("; ")}${plMissing.length>8?` and ${plMissing.length-8} more`:""}). Their price lists would be zeroed in Sage, so the download is blocked — check the Item code in Item Setup, or re-export the Items list from Sage.`
           : `✓ <b>${esc(sagePriceListFile.name)}</b> loaded ${esc(sagePriceListFile.loadedAt)} — ${sagePriceListFile.rowCount} Sage items, ${plNames.length} other price list${plNames.length===1?"":"s"} (${esc(plNames.join(", "))}) will be carried unchanged on every line. Make sure this file was exported from Sage today.`}</div>` : `<div class="banner warn" style="margin-top:10px;">Upload the Sage Items export to unlock the download.</div>`}
@@ -6231,6 +6315,34 @@ function wireTabEvents(){
       };
       reader.readAsText(f);
     });
+    document.querySelectorAll("[data-vatfix-part]").forEach(btn=>{
+      btn.addEventListener("click", ()=>{
+        const mis = sageVatMismatches();
+        if(!sagePriceListFile || !mis.length){ toast("Nothing to correct"); return; }
+        const part = Number(btn.dataset.vatfixPart);
+        const parts = Math.ceil(mis.length / SAGE_MAX_IMPORT_LINES);
+        browserDownload("sage_vat_correction"+(parts>1 ? "_part"+(part+1)+"of"+parts : "")+".csv", sageVatCorrectionCsv_(mis, part), "text/csv");
+        toast("VAT correction downloaded — import it into Sage, then upload a fresh Items export");
+      });
+    });
+    const vatSync = document.getElementById("sageVatSyncBtn");
+    if(vatSync) vatSync.addEventListener("click", ()=>{
+      if(!sagePriceListFile) return;
+      const changes = [];
+      (DATA.itemSetup||[]).forEach(it=>{
+        if(!it.itemCode) return;
+        const l = sagePriceListFile.byCode[it.itemCode]; if(!l) return;
+        const std = l.__vatS==="Standard Rate" && l.__vatP==="Standard Rate";
+        if(!!it.vatable !== std) changes.push({it, std});
+      });
+      if(!changes.length){ toast("Item Setup already matches Sage's VAT types"); return; }
+      if(!confirm(`Copy Sage's VAT types into Item Setup?\n\n${changes.length} item${changes.length===1?"":"s"} will change (${changes.filter(c=>c.std).length} become VAT-able / Standard Rate, ${changes.filter(c=>!c.std).length} become Zero Rate / not VAT-able). Anything Sage has as Standard on sales but not on purchases (or the reverse) is treated as not VAT-able.`)) return;
+      const before = changes.map(c=>({it:c.it, prev:c.it.vatable}));
+      changes.forEach(c=>{ c.it.vatable = c.std; });
+      persist("Item Setup VAT types copied from the Sage Items export", ["itemSetup"]).then(ok=>{
+        if(ok===false){ before.forEach(b=>{ b.it.vatable = b.prev; }); render(); }
+      });
+    });
     const plClear = document.getElementById("sagePriceListClear");
     if(plClear) plClear.addEventListener("click", ()=>{ sagePriceListFile = null; render(); });
     document.querySelectorAll("[data-sellingcsv-part]").forEach(btn=>{
@@ -6247,13 +6359,17 @@ function wireTabEvents(){
         if(!sagePriceListFile){ toast("Upload a fresh Items export from Sage first — otherwise Sage would zero the other price lists"); return; }
         const plGone = sagePriceListMissing(moved);
         if(plGone.length){ toast(plGone.length+" item(s) aren't in the uploaded Items export — download blocked so their price lists aren't zeroed"); return; }
+        if(Object.keys(sageExportDuplicateCodes(moved)).length){ toast("Two Item Setup rows share one Item code — fix that first (see the red banner)"); return; }
+        { const misSet = new Set(sageVatMismatches().map(m=>m.itemCode)); if(moved.some(r=> misSet.has(r.itemCode))){ toast("Sage's VAT differs from Item Setup for some of these items — sort that out in Step 1 first"); return; } }
         const slice = moved.slice(part*SAGE_MAX_IMPORT_LINES, (part+1)*SAGE_MAX_IMPORT_LINES);
         const plCols = sagePriceListFile.listCols;
         const csv = ["Code","Description","Default Price List - Exclusive","Default Price List - Inclusive"].concat(plCols, ["VAT Type Sales","VAT Type Purchases","Cost"]).join(",") + "\n" + slice.map(r=>{
-          const vatType = r.vatable ? "Standard Rate" : "Zero Rate";
-          const incl = r.vatable ? (r.price*1.15).toFixed(2) : Number(r.price).toFixed(2);
           const lists = sagePriceListFile.byCode[r.itemCode];
-          return [toCsvField(r.itemCode), toCsvField(r.description), Number(r.price).toFixed(2), incl].concat(plCols.map(h=> toCsvField(lists[h])), [toCsvField(vatType), toCsvField(vatType), r.cost!==null ? r.cost : ""]).join(",");
+          // VAT comes from Item Setup (and is guaranteed to equal Sage's by the mismatch gate above); the description is Sage's own
+          // so an import can never rename a product.
+          const vt = exportVatTypes_(!!r.vatable, lists);
+          const incl = sageInclFrom_(Number(r.price).toFixed(2), vt.s==="Standard Rate");
+          return [toCsvField(r.itemCode), toCsvField(lists.__desc || r.description), Number(r.price).toFixed(2), incl].concat(plCols.map(h=> toCsvField(lists[h])), [toCsvField(vt.s), toCsvField(vt.p), r.cost!==null ? r.cost : ""]).join(",");
         }).join("\n");
         const parts = Math.ceil(moved.length / SAGE_MAX_IMPORT_LINES);
         browserDownload("sage_price_export_"+sellingCsvDate+(parts>1 ? "_part"+(part+1)+"of"+parts : "")+".csv", csv, "text/csv");
