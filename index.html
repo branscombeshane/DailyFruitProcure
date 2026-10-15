@@ -367,7 +367,7 @@ function emptyDataShape(){
     // the cold-start fallback, never something that overwrites a value he's already set.
     pricingPlan: {defaultMarginPct:0.32, goodDealThresholdPct:0.10, goodDealBonusPct:0.05, trendWindowDays:21},
     categoryMarginPct: {"Eggs":0.30, "Herbs":0.35, "Mixes":0.35}, itemMarginPct: {}, itemMinPrice: {}, priceQuotes: [],
-    palletTallyResets: [], costCsvDownloads: [],
+    palletTallyResets: [], palletTallyArchive: [], costCsvDownloads: [],
   };
 }
 
@@ -437,6 +437,7 @@ function applyDataDefaults(d){
   d.costCsvDownloads = d.costCsvDownloads.map(r=> Object.assign({}, r, {
     exportDate: normDayStr(r.exportDate), downloadedDate: normDayStr(r.downloadedDate), downloadedTime: normClockStr(r.downloadedTime)}));
   if(!d.palletTallyResets) d.palletTallyResets = []; // backward-compatible default for backups/sheets predating the owner-only Pallet tally reset
+  if(!d.palletTallyArchive) d.palletTallyArchive = []; // backward-compatible default for sheets predating the Pallet tally archive
   return d;
 }
 
@@ -528,7 +529,7 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 // day has had the chance to be received and priced first. Today's — or a future — purchase date is never allowed.
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
-const APP_BUILD = "2026-10-14 · Price Export: formula price, auto-recorded";
+const APP_BUILD = "2026-10-15 · Pallet tally: date range + reset archive · Merge-products card removed";
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
 // often than it's audited in bulk, so opening the tab should land on today's entries, not the full history.
 let purchaseDateFilter = new Date().toISOString().slice(0,10);
@@ -2099,74 +2100,6 @@ function findLikelyDuplicateBaseProducts(){
   DATA.purchaseCosts.forEach(p=> record(p.baseProduct));
   return Object.values(groups).filter(g=>g.length>1).map(g=>g.slice().sort());
 }
-// Every Base Product name that exists ANYWHERE — not just the ones currently used by an Item Setup row
-// (that's distinctBaseProducts() above). A Base Product has no record of its own; it's just whatever
-// text happens to sit in Item Setup's Base Product field, so once an Item Setup row is edited to point
-// somewhere else, the old name can keep right on existing — quietly, as a key in productCycles/
-// productCeilings/baseProductCategories, as the baseProduct on old Purchase Costs/Purchase Issues/Stock
-// Takes rows, as a Market Product Mapping target, or as a key in an archived day's sales demand — with
-// nothing left in Item Setup to say so. Shane's report: "If I change a product in product setup to a
-// new base product we have 2 variants of a product without the ability to delete the other." This is
-// the full list those two variants are drawn from, feeding Manage Base Products (renderManageBaseProducts)
-// below so both the live one and the orphaned one show up and can be merged or cleared out.
-function allKnownBaseProductNames(){
-  const set = new Set();
-  DATA.itemSetup.forEach(it=> it.baseProduct && set.add(it.baseProduct));
-  DATA.purchaseCosts.forEach(p=> p.baseProduct && set.add(p.baseProduct));
-  DATA.purchaseIssues.forEach(p=> p.baseProduct && set.add(p.baseProduct));
-  DATA.stockTakes.forEach(r=> r.baseProduct && set.add(r.baseProduct));
-  Object.keys(DATA.productCycles||{}).forEach(n=> set.add(n));
-  Object.keys(DATA.productCeilings||{}).forEach(n=> set.add(n));
-  Object.keys(DATA.baseProductCategories||{}).forEach(n=> set.add(n));
-  (DATA.marketProductMap||[]).forEach(r=> r.baseProduct && set.add(r.baseProduct));
-  (DATA.salesHistory||[]).forEach(h=>{ if(h.demand) Object.keys(h.demand).forEach(n=> set.add(n)); });
-  return set;
-}
-// How much is actually attached to one Base Product name, across every place that can hold one — used
-// both to describe a row in Manage Base Products and to decide whether plain Delete is safe to offer
-// (see hasHistory below: Delete only ever clears settings/mappings, never real transactional records —
-// anything with history has to go through Merge instead, so nothing financial is ever silently erased).
-function baseProductUsageStats(name){
-  const activeItems = DATA.itemSetup.filter(it=>it.baseProduct===name).length;
-  const purchaseCount = DATA.purchaseCosts.filter(p=>p.baseProduct===name).length;
-  const issueCount = DATA.purchaseIssues.filter(p=>p.baseProduct===name).length;
-  const stockTakeCount = DATA.stockTakes.filter(r=>r.baseProduct===name).length;
-  const salesDays = (DATA.salesHistory||[]).filter(h=> h.demand && Object.prototype.hasOwnProperty.call(h.demand, name)).length;
-  const mapCount = (DATA.marketProductMap||[]).filter(r=>r.baseProduct===name).length;
-  const hasHistory = purchaseCount>0 || issueCount>0 || stockTakeCount>0 || salesDays>0;
-  return {activeItems, purchaseCount, issueCount, stockTakeCount, salesDays, mapCount, hasHistory};
-}
-// Moves everything recorded under one Base Product name onto another — used by Manage Base Products'
-// "Merge into…" action. Repoints every Item Setup row, purchase/issue/stock-take record and Market
-// Product Mapping entry; for the per-product settings dicts the target's own value wins if it already
-// has one (so merging a stray duplicate into the real product never clobbers a deliberate override),
-// otherwise the source's value carries over so nothing is silently lost. Sales history demand is the one
-// place both names can legitimately hold a real, independent number for the very same day (two spellings
-// both logged real sales) — those get added together rather than one replacing the other.
-function mergeBaseProduct_(source, target){
-  DATA.itemSetup.forEach(it=>{ if(it.baseProduct===source) it.baseProduct = target; });
-  DATA.purchaseCosts.forEach(p=>{ if(p.baseProduct===source) p.baseProduct = target; });
-  DATA.purchaseIssues.forEach(p=>{ if(p.baseProduct===source) p.baseProduct = target; });
-  DATA.stockTakes.forEach(r=>{ if(r.baseProduct===source) r.baseProduct = target; });
-  (DATA.marketProductMap||[]).forEach(r=>{ if(r.baseProduct===source) r.baseProduct = target; });
-  if(DATA.productCycles[source]!==undefined){
-    if(DATA.productCycles[target]===undefined || DATA.productCycles[target]===null) DATA.productCycles[target] = DATA.productCycles[source];
-    delete DATA.productCycles[source];
-  }
-  if(DATA.productCeilings[source]!==undefined){
-    if(DATA.productCeilings[target]===undefined || DATA.productCeilings[target]===null) DATA.productCeilings[target] = DATA.productCeilings[source];
-    delete DATA.productCeilings[source];
-  }
-  if(DATA.baseProductCategories[source]!==undefined){
-    if(!DATA.baseProductCategories[target]) DATA.baseProductCategories[target] = DATA.baseProductCategories[source];
-    delete DATA.baseProductCategories[source];
-  }
-  (DATA.salesHistory||[]).forEach(h=>{
-    if(!h.demand || !Object.prototype.hasOwnProperty.call(h.demand, source)) return;
-    h.demand[target] = (Number(h.demand[target])||0) + (Number(h.demand[source])||0);
-    delete h.demand[source];
-  });
-}
 function categoryFor(baseProduct){
   if(!baseProduct) return "";
   return DATA.baseProductCategories[baseProduct] || "";
@@ -2231,56 +2164,6 @@ function renderManageCategories(){
         <div class="tablewrap"><table>
           <thead><tr><th>Category</th><th>Hidden from Shopping List / Quick Buy</th><th></th></tr></thead>
           <tbody>${rows || `<tr><td colspan="3" class="empty">No categories yet.</td></tr>`}</tbody>
-        </table></div>
-      </div>
-    </div>`;
-}
-// Lives on Item Setup, right alongside Manage Categories, for the same reason: this is where Base
-// Products are actually created and renamed, so cleaning them up belongs here too. Lists every name
-// allKnownBaseProductNames() finds anywhere — both the ones currently live in Item Setup and any
-// orphaned leftovers from an old rename/typo — with two self-saving actions per row: Merge folds one
-// name's history into another (see mergeBaseProduct_), Delete clears a name that has nothing of
-// substance attached (only ever enabled once hasHistory is false, so real purchase/stock/sales records
-// can never be destroyed this way — merge is the only path for those).
-function renderManageBaseProducts(){
-  const names = Array.from(allKnownBaseProductNames()).sort();
-  const activeSet = new Set(distinctBaseProducts());
-  const rows = names.map(name=>{
-    const stats = baseProductUsageStats(name);
-    const isActive = activeSet.has(name);
-    const statusHtml = isActive
-      ? chip(`Active — ${stats.activeItems} Item Setup row${stats.activeItems===1?"":"s"}`, "good")
-      : chip("Orphaned — no Item Setup row", "warn");
-    const histParts = [];
-    if(stats.purchaseCount) histParts.push(`${stats.purchaseCount} purchase${stats.purchaseCount===1?"":"s"}`);
-    if(stats.issueCount) histParts.push(`${stats.issueCount} unable-to-buy log${stats.issueCount===1?"":"s"}`);
-    if(stats.stockTakeCount) histParts.push(`${stats.stockTakeCount} stock take${stats.stockTakeCount===1?"":"s"}`);
-    if(stats.salesDays) histParts.push(`${stats.salesDays} day${stats.salesDays===1?"":"s"} of sales history`);
-    if(stats.mapCount) histParts.push(`${stats.mapCount} market mapping${stats.mapCount===1?"":"s"}`);
-    const histHtml = histParts.length ? esc(histParts.join(", ")) : "No history";
-    const canDelete = !isActive && !stats.hasHistory;
-    const delTitle = isActive
-      ? "Still used by an Item Setup row — change that row's Base Product (or merge) first."
-      : "Has purchase, stock take or sales history attached — merge it into the correct Base Product instead, so that history isn't lost.";
-    const delBtn = canDelete
-      ? `<button class="delbtn" data-bpdelete="${esc(name)}" title="Delete base product">✕</button>`
-      : `<button class="delbtn" disabled title="${esc(delTitle)}" style="opacity:0.35;cursor:not-allowed;">✕</button>`;
-    return `
-    <tr>
-      <td style="max-width:220px;">${esc(name)}</td>
-      <td>${statusHtml}</td>
-      <td class="helptext">${histHtml}</td>
-      <td><div style="display:flex;gap:6px;"><input class="rowinput" data-bpmerge-input="${esc(name)}" list="baseProductsDL" placeholder="Merge into…" style="min-width:150px;" data-pristine=""><button class="btn small" data-bpmerge-btn="${esc(name)}">Merge</button></div></td>
-      <td>${delBtn}</td>
-    </tr>`;
-  }).join("");
-  return `
-    <div class="card">
-      <div class="cardhead"><div><h3>Manage base products</h3><div class="desc">Every Base Product name found anywhere — Item Setup, Purchase Costs, Stock Takes, Market Product Mapping and per-product settings. "Orphaned" means no Item Setup row uses it any more (e.g. after fixing a typo or consolidating a duplicate there) — <strong>merge</strong> it into the correct Base Product to bring any history along with it, or <strong>delete</strong> it if it's just a leftover with nothing attached. Both actions save immediately.</div></div></div>
-      <div class="cardbody">
-        <div class="tablewrap"><table>
-          <thead><tr><th>Base product</th><th>Status</th><th>History</th><th>Merge into…</th><th></th></tr></thead>
-          <tbody>${rows || `<tr><td colspan="5" class="empty">No base products yet — add some above.</td></tr>`}</tbody>
         </table></div>
       </div>
     </div>`;
@@ -3633,7 +3516,6 @@ function renderItemSetup(){
       </div>
     </div>
     ${renderManageCategories()}
-    ${renderManageBaseProducts()}
     <div class="card">
       <div class="cardhead">
         <div><h3>Items</h3><div class="desc">Edit the input columns, then Save changes once. Category applies to every variant of that Base Product. For a Product Mix (assembled from other stock, not bought directly), set Category to "Mixes" — Base Product, Procurement Unit and Qty per Unit don't apply and blank out automatically. Tick Vatable for a product that carries standard-rate VAT (most fresh produce is zero-rated, so this stays unticked by default) — feeds the VAT Type columns on the Price Export.</div></div>
@@ -4302,11 +4184,15 @@ function latestPalletTallyReset(){
 // column on marketProductMap in Code.gs.
 function isMapIgnored(m){ return !!m && (m.ignored===true || String(m.ignored||"").toLowerCase()==="yes" || String(m.ignored||"").toLowerCase()==="true"); }
 
-function marketPalletTallyComputed(){
+// Pallet tally for statements dated AFTER afterDate ("" = no lower bound) and up to and including uptoDate
+// ("" = no upper bound). The live tally is (latest reset date, no upper bound); the archive uses the same
+// function to rebuild a period that was zeroed before archiving existed.
+function palletTallyRowsFor_(afterDate, uptoDate){
   const map = {};
-  const reset = latestPalletTallyReset();
   (DATA.palletLedger||[]).forEach(r=>{
-    if(reset && !(String(r.statementDate||"") > String(reset.resetDate))) return; // counted before the last reset
+    const sd = String(r.statementDate||"");
+    if(afterDate && !(sd > String(afterDate))) return; // counted before the lower bound
+    if(uptoDate && sd > String(uptoDate)) return;      // after the upper bound
     const market = r.market || "Unknown market";
     const type = r.palletType || "Unknown pallet type";
     const key = market + "::" + type;
@@ -4323,6 +4209,55 @@ function marketPalletTallyComputed(){
     else { map[key].feesPaid += Math.abs(total); }
   });
   return Object.keys(map).sort().map(key=> map[key]);
+}
+
+function marketPalletTallyComputed(){
+  const reset = latestPalletTallyReset();
+  return palletTallyRowsFor_(reset ? reset.resetDate : "", "");
+}
+
+// The first and last statement dates actually counted by a tally (same bounds as palletTallyRowsFor_), and
+// how many distinct statement days that is — shown on the tally so it's always clear which dates the current
+// numbers cover.
+function palletTallyPeriod(afterDate, uptoDate){
+  const days = new Set();
+  (DATA.palletLedger||[]).forEach(r=>{
+    const sd = String(r.statementDate||"");
+    if(!sd) return;
+    if(afterDate && !(sd > String(afterDate))) return;
+    if(uptoDate && sd > String(uptoDate)) return;
+    days.add(sd);
+  });
+  const sorted = Array.from(days).sort();
+  return {from: sorted[0]||"", to: sorted[sorted.length-1]||"", days: sorted.length};
+}
+
+// Every past tally that was zeroed, newest first. Real archived snapshots (written at the moment of a
+// reset, one row per market+pallet type under a shared archiveId) take priority; a reset made BEFORE
+// archiving existed is rebuilt from the ledger (which is never deleted) and flagged "reconstructed".
+function palletTallyArchiveGroups(){
+  const byId = {};
+  (DATA.palletTallyArchive||[]).forEach(r=>{
+    if(!r.archiveId) return;
+    if(!byId[r.archiveId]) byId[r.archiveId] = {archiveId:r.archiveId, resetDate:r.resetDate||"", periodFrom:r.periodFrom||"", periodTo:r.periodTo||"", archivedAt:r.archivedAt||"", archivedBy:r.archivedBy||"", reconstructed:false, rows:[]};
+    byId[r.archiveId].rows.push({
+      market:r.market, palletType:r.palletType,
+      held:Number(r.held)||0, depositsPaid:Number(r.depositsPaid)||0, depositsRefunded:Number(r.depositsRefunded)||0, feesPaid:Number(r.feesPaid)||0,
+    });
+  });
+  const groups = Object.keys(byId).map(k=> byId[k]);
+  const archivedResetDates = new Set(groups.map(g=> String(g.resetDate)));
+  const resets = (DATA.palletTallyResets||[]).filter(r=> r.resetDate).slice().sort((a,b)=> String(a.resetDate).localeCompare(String(b.resetDate)));
+  resets.forEach((r,i)=>{
+    if(archivedResetDates.has(String(r.resetDate))) return;
+    const prev = i>0 ? resets[i-1].resetDate : "";
+    const rows = palletTallyRowsFor_(prev, r.resetDate);
+    if(!rows.length) return;
+    const p = palletTallyPeriod(prev, r.resetDate);
+    groups.push({archiveId:"rebuilt_"+r.resetDate, resetDate:r.resetDate, periodFrom:p.from, periodTo:p.to, archivedAt:r.resetAt||"", archivedBy:r.resetBy||"", reconstructed:true, rows});
+  });
+  groups.sort((a,b)=> String(b.resetDate).localeCompare(String(a.resetDate)) || String(b.archivedAt).localeCompare(String(a.archivedAt)));
+  return groups;
 }
 
 function renderMarketStatements(){
@@ -4404,6 +4339,38 @@ function renderMarketStatements(){
       <td class="num">${money(tallyTotals.fees)}</td>
     </tr>` : "";
   const lastReset = latestPalletTallyReset();
+  const tallyPeriod = palletTallyPeriod(lastReset ? lastReset.resetDate : "", "");
+  const tallyPeriodLine = tallyPeriod.days
+    ? `<b>Showing statements dated ${esc(tallyPeriod.from)} to ${esc(tallyPeriod.to)}</b> (${tallyPeriod.days} statement day${tallyPeriod.days===1?"":"s"}).`
+    : (lastReset ? `<b>No statements dated after the last reset (${esc(lastReset.resetDate)}) yet.</b>` : `<b>No statements imported yet.</b>`);
+  const archiveGroups = palletTallyArchiveGroups();
+  const archiveCards = archiveGroups.map(g=>{
+    const tot = g.rows.reduce((a,t)=>({held:a.held+t.held, paid:a.paid+t.depositsPaid, refunded:a.refunded+t.depositsRefunded, fees:a.fees+t.feesPaid}), {held:0,paid:0,refunded:0,fees:0});
+    const rows = g.rows.slice().sort((x,y)=> (String(x.market)+String(x.palletType)).localeCompare(String(y.market)+String(y.palletType))).map(t=>`
+      <tr>
+        <td>${chip(t.market||"—","neutral")}</td>
+        <td>${esc(t.palletType)}</td>
+        <td class="num">${fmtNum(t.held,0)}</td>
+        <td class="num">${money(t.depositsPaid)}</td>
+        <td class="num">${money(t.depositsRefunded)}</td>
+        <td class="num" style="font-weight:600;">${money(round2(t.depositsPaid - t.depositsRefunded))}</td>
+        <td class="num">${money(t.feesPaid)}</td>
+      </tr>`).join("");
+    return `
+      <details style="border-top:1px solid var(--line);">
+        <summary style="padding:10px 14px;cursor:pointer;">
+          <b>${esc(g.periodFrom||"—")} to ${esc(g.periodTo||"—")}</b>
+          <span class="helptext"> · zeroed ${esc(g.archivedAt||g.resetDate||"")}${g.archivedBy ? ` by ${esc(g.archivedBy)}` : ""} · held then: ${fmtNum(tot.held,0)} · cost then: ${money(round2(tot.paid - tot.refunded))}</span>
+          ${g.reconstructed ? chip("rebuilt from statement history","neutral") : ""}
+        </summary>
+        <div class="tablewrap" style="border:none;border-radius:0;"><table>
+          <thead><tr><th>Market</th><th>Pallet type</th><th class="num">Held</th><th class="num">Deposits paid</th><th class="num">Deposits refunded</th><th class="num">Cost (paid − refunded)</th><th class="num">Fees paid</th></tr></thead>
+          <tbody>${rows}
+            <tr style="font-weight:700;border-top:2px solid var(--line);"><td colspan="2">Total</td><td class="num">${fmtNum(tot.held,0)}</td><td class="num">${money(tot.paid)}</td><td class="num">${money(tot.refunded)}</td><td class="num">${money(round2(tot.paid - tot.refunded))}</td><td class="num">${money(tot.fees)}</td></tr>
+          </tbody>
+        </table></div>
+      </details>`;
+  }).join("");
 
   const unmappedCount = dayLines.filter(r=>{ const m = mapLookup.get(marketMapKey(r.market, r.commodity)); return !isMapIgnored(m) && !(m||{}).baseProduct; }).length;
   const missingPackSizeCount = dayLines.filter(r=>{
@@ -4441,7 +4408,7 @@ function renderMarketStatements(){
     </div>
     <div class="card">
       <div class="cardhead">
-        <div><h3>Pallet tally${lastReset ? " (since last reset)" : " (all time)"}</h3><div class="desc">Running count of pallets currently held, per market and pallet type${lastReset ? `, counting only statements dated after the last reset (${esc(lastReset.resetDate)}${lastReset.resetBy ? `, by ${esc(lastReset.resetBy)}` : ""})` : ", across every statement imported so far"}. A pallet going out to the buyer adds to the tally; a pallet coming back (a refund, same-day refund, or cancelled sale) subtracts — a usage/rental fee alone doesn't change the count. "Current cost" is deposits paid minus deposits refunded: the money still tied up in pallets. See the note on marketPalletTallyComputed for how "out"/"in" is worked out per market — flag it if a count here ever looks wrong.</div></div>
+        <div><h3>Pallet tally${lastReset ? " (since last reset)" : " (all time)"}</h3><div class="desc">${tallyPeriodLine} Running count of pallets currently held, per market and pallet type${lastReset ? `, counting only statements dated after the last reset (${esc(lastReset.resetDate)}${lastReset.resetBy ? `, by ${esc(lastReset.resetBy)}` : ""})` : ", across every statement imported so far"}. A pallet going out to the buyer adds to the tally; a pallet coming back (a refund, same-day refund, or cancelled sale) subtracts — a usage/rental fee alone doesn't change the count. "Current cost" is deposits paid minus deposits refunded: the money still tied up in pallets. See the note on marketPalletTallyComputed for how "out"/"in" is worked out per market — flag it if a count here ever looks wrong.</div></div>
         ${isOwner() ? `<button class="btn" id="resetPalletTallyBtn" title="Owner only — zeroes the tally; the underlying statement history is kept">Reset tally to zero</button>` : ""}
       </div>
       <div class="cardbody" style="padding:0;">
@@ -4449,6 +4416,12 @@ function renderMarketStatements(){
           <thead><tr><th>Market</th><th>Pallet type</th><th class="num">Currently held</th><th class="num">Deposits paid</th><th class="num">Deposits refunded</th><th class="num">Current cost (paid − refunded)</th><th class="num">Fees paid</th></tr></thead>
           <tbody>${tallyRows || `<tr><td colspan="7" class="empty">${lastReset ? "Nothing since the last reset." : "No pallet activity imported yet."}</td></tr>`}${tallyTotalsRow}</tbody>
         </table></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="cardhead"><div><h3>Pallet tally archive</h3><div class="desc">Every time the tally is reset to zero, the numbers it showed just before are saved here with the date range they covered, who reset it and when. Click a period to open it.</div></div></div>
+      <div class="cardbody" style="padding:0;">
+        ${archiveCards || `<div class="empty" style="padding:14px;">Nothing archived yet — the next reset saves the tally it zeroes here.</div>`}
       </div>
     </div>`;
 }
@@ -5972,40 +5945,6 @@ function wireTabEvents(){
         persist("Deleted category " + name, ["categories","itemSetup","baseProductCategories","categoryBuffers"]);
       });
     });
-    // Manage base products (see renderManageBaseProducts/mergeBaseProduct_ above). Each action saves
-    // itself immediately, same convention as Manage Categories just above — a merge or delete here
-    // reaches well beyond Item Setup (Purchase Costs, Stock Takes, Market Product Mapping, sales
-    // history), so it shouldn't be sitting unsaved alongside an unrelated in-progress Item Setup edit.
-    document.querySelectorAll("[data-bpmerge-btn]").forEach(btn=>{
-      btn.addEventListener("click", ()=>{
-        const source = btn.dataset.bpmergeBtn;
-        const input = document.querySelector(`[data-bpmerge-input="${CSS.escape(source)}"]`);
-        const typed = (input.value||"").trim();
-        if(!typed){ toast("Type the Base Product to merge into"); return; }
-        if(typed===source){ toast("That's the same Base Product — nothing to merge"); return; }
-        const known = allKnownBaseProductNames();
-        let target = known.has(typed) ? typed : null;
-        if(!target){
-          const canonical = Array.from(known).find(n=> n.toLowerCase()===typed.toLowerCase());
-          if(canonical) target = canonical;
-        }
-        if(!target){ toast(`"${typed}" isn't an existing Base Product — pick one from the list, or add/fix it in Item Setup first.`); return; }
-        if(!confirm(`Merge "${source}" into "${target}"?\n\nEvery Item Setup row, Purchase Cost, Stock Take, Purchase Issue, Market Product Mapping and setting currently under "${source}" moves to "${target}". This can't be undone, and saves immediately.`)) return;
-        mergeBaseProduct_(source, target);
-        persist(`Merged "${source}" into "${target}"`, ["itemSetup","purchaseCosts","purchaseIssues","stockTakes","marketProductMap","productCycles","productCeilings","baseProductCategories","salesHistory"]);
-      });
-    });
-    document.querySelectorAll("[data-bpdelete]").forEach(btn=>{
-      btn.addEventListener("click", ()=>{
-        const name = btn.dataset.bpdelete;
-        if(!confirm(`Delete base product "${name}"?\n\nIt isn't used by any Item Setup row and has no purchase, stock take or sales history, so this just clears any leftover cycle/ceiling/category settings. Any Market Product Mapping row pointing to it goes back to unmapped rather than disappearing. This saves immediately.`)) return;
-        delete DATA.productCycles[name];
-        delete DATA.productCeilings[name];
-        delete DATA.baseProductCategories[name];
-        (DATA.marketProductMap||[]).forEach(r=>{ if(r.baseProduct===name) r.baseProduct = ""; });
-        persist(`Deleted base product "${name}"`, ["productCycles","productCeilings","baseProductCategories","marketProductMap"]);
-      });
-    });
   }
 
   if(currentTab==="recipes"){
@@ -6393,17 +6332,33 @@ function wireTabEvents(){
       if(!latest){ toast("No pallet activity to reset yet"); return; }
       const prev = latestPalletTallyReset();
       if(prev && String(prev.resetDate) >= latest){ toast("Already at zero — nothing new since the last reset"); return; }
-      if(!confirm(`Reset the pallet tally to zero?\n\nEvery count and total in the Pallet tally goes to zero, and only statements dated after ${latest} count from here on. No statement or pallet history is deleted — it all stays on file and in the per-day Pallets view above. This saves immediately.`)) return;
+      const snapshot = marketPalletTallyComputed();
+      const snapPeriod = palletTallyPeriod(prev ? prev.resetDate : "", "");
+      if(!confirm(`Reset the pallet tally to zero?\n\nThe tally you see now (statements ${snapPeriod.from || "—"} to ${snapPeriod.to || "—"}) is saved to the Pallet tally archive first, then every count and total goes to zero and only statements dated after ${latest} count from here on. No statement or pallet history is deleted — it all stays on file and in the per-day Pallets view above. This saves immediately.`)) return;
       if(!DATA.palletTallyResets) DATA.palletTallyResets = [];
-      DATA.palletTallyResets.push({
+      if(!DATA.palletTallyArchive) DATA.palletTallyArchive = [];
+      const stamp = new Date().toISOString().slice(0,19).replace("T"," ");
+      const who = currentUser ? currentUser.name : "";
+      const archiveId = "pa_" + Date.now().toString(36) + Math.random().toString(36).slice(2,6);
+      const archiveRows = snapshot.map((t,i)=>({
+        id: archiveId + "_" + i, archiveId, resetDate: latest,
+        periodFrom: snapPeriod.from, periodTo: snapPeriod.to, archivedAt: stamp, archivedBy: who,
+        market: t.market, palletType: t.palletType,
+        held: t.held, depositsPaid: round2(t.depositsPaid), depositsRefunded: round2(t.depositsRefunded), feesPaid: round2(t.feesPaid),
+      }));
+      archiveRows.forEach(r=> DATA.palletTallyArchive.push(r));
+      const resetRow = {
         id: "pr_" + Date.now().toString(36) + Math.random().toString(36).slice(2,6),
         resetDate: latest,
-        resetAt: new Date().toISOString().slice(0,19).replace("T"," "),
-        resetBy: currentUser ? currentUser.name : "",
-      });
-      const saved = await persist("Pallet tally reset", ["palletTallyResets"]);
+        resetAt: stamp,
+        resetBy: who,
+      };
+      DATA.palletTallyResets.push(resetRow);
+      const saved = await persist("Pallet tally reset — old tally archived", ["palletTallyResets","palletTallyArchive"]);
       if(!saved){
-        DATA.palletTallyResets.pop(); // not saved — don't leave an unsaved reset sitting in memory looking real
+        // not saved — don't leave an unsaved reset (or archive) sitting in memory looking real
+        DATA.palletTallyResets = DATA.palletTallyResets.filter(r=> r!==resetRow);
+        DATA.palletTallyArchive = DATA.palletTallyArchive.filter(r=> r.archiveId!==archiveId);
         render();
       }
     });
