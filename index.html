@@ -529,7 +529,7 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 // day has had the chance to be received and priced first. Today's — or a future — purchase date is never allowed.
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
-const APP_BUILD = "2026-10-16 · Items export drop box, Logged by column on Confirm Prices";
+const APP_BUILD = "2026-10-16 · Price Export: company picker + wrong-company guard";
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
 // often than it's audited in bulk, so opening the tab should land on today's entries, not the full history.
 let purchaseDateFilter = new Date().toISOString().slice(0,10);
@@ -596,6 +596,19 @@ const SAGE_MAX_IMPORT_LINES = 150; // Lines per Sage import file. Sage's hard li
 // Oct 2026 incident that zeroed every non-default list. So every export line carries the item's CURRENT value for every price
 // list, copied from a fresh Items export out of Sage. Sage stays the source of truth; nothing here can go stale.
 let sagePriceListFile = null; // {name, loadedAt, listCols:[header,...], byCode:{code:{header:value}}, rowCount}
+// The two Sage companies share this page but NOT their price lists, so a price file must only ever be built from (and imported
+// into) the company it was made for. Each company is recognised by price lists that exist only in its own Sage.
+const SAGE_COMPANIES = {
+  dfv:    {key:"dfv",    name:"Daily Fruit – Veg", short:"DailyFruitVeg", signature:["FirstRand Group","Capitol"]},
+  pyroca: {key:"pyroca", name:"Pyroca 79",         short:"Pyroca79",      signature:["Ucook","Fixed Weekly","Less 10% Weekly","Less 5% Weekly","CSG Food Solutions","FG La Pasta","Reef Catering"]}
+};
+let sageExportCompany = ""; // chosen on Price Export every visit — deliberately never remembered, so it is always a conscious pick
+function sageListBase_(h){ return String(h).replace(/\s-\s(Exclusive|Inclusive)$/i,"").trim().toLowerCase(); }
+// Which company's Items export is this? Returns the keys whose signature price lists appear in it (normally exactly one).
+function sageCompaniesInExport_(listCols){
+  const have = new Set(listCols.map(sageListBase_));
+  return Object.keys(SAGE_COMPANIES).filter(k=> SAGE_COMPANIES[k].signature.some(n=> have.has(n.toLowerCase())));
+}
 function parseSageItemsExport(text){
   const lines = String(text||"").replace(/^\uFEFF/,"").split(/\r?\n/).filter(l=>l.trim());
   if(!lines.length) return {error:"The file is empty."};
@@ -3332,7 +3345,7 @@ function renderHomeDashboard(){
         <div style="margin-top:12px;">
           ${signoffBlocked
             ? `${needsActionRows.length ? `<div class="helptext" style="margin-bottom:8px;">Still need action today before you can sign off: ${shownOutstanding}${moreOutstanding>0?` and ${moreOutstanding} more`:""}. ${goto("shoppinglist","Open Shopping List →")}</div>` : ""}
-               ${!exportStatus.complete ? `<div class="helptext" style="margin-bottom:8px;">The Sage price export for ${esc(shortDayLabel(exportDue))} hasn't been completed${exportStatus.parts>1?` (${exportStatus.got} of ${exportStatus.parts} parts downloaded)`:""}. ${goto("sellingprices","Open Price Export →")}</div>` : ""}
+               ${!exportStatus.complete ? `<div class="helptext" style="margin-bottom:8px;">The Sage price export for ${esc(shortDayLabel(exportDue))} hasn't been completed (${exportStatus.companies.map(c=> esc(c.name)+": "+(c.complete?"done":(c.got?c.got+" of "+c.parts+" parts":"not downloaded"))).join(" · ")}). ${goto("sellingprices","Open Price Export →")}</div>` : ""}
                <button class="btn primary" id="signoffBtn" disabled title="${needsActionRows.length ? "Clear every Critical/Consider Buying item first" : "Complete the Sage price export first"}">Sign off for today</button>`
             : `<button class="btn primary" id="signoffBtn">Sign off for today</button>`}
         </div>` : (mySignoff ? `<div class="helptext" style="margin-top:12px;">You signed off for today at ${esc(fmtTime(mySignoff.time))}.</div>` : "")}
@@ -4079,22 +4092,28 @@ function costCsvStatTile(){
   const got = costCsvDownloadsFor(due);
   const last = got.length ? got[got.length-1] : null;
   const st = priceExportStatus_(due);
-  if(last && !st.complete) return {label:"Price export · "+shortDayLabel(due), value: st.got+" of "+st.parts+" parts", color:"var(--warn)"};
+  if(last && !st.complete){ const todo = st.companies.filter(c=>!c.complete).length; return {label:"Price export · "+shortDayLabel(due), value: todo+" of "+st.companies.length+" companies to go", color:"var(--warn)"}; }
   return {label:"Price export · "+shortDayLabel(due), value: (last||st.complete) ? ("✓ " + ((last&&last.downloadedBy)||"done")) : "Not yet", color: (last||st.complete) ? "var(--good)" : "var(--warn)"};
 }
 // Has the price export for a purchase date been fully downloaded? Every part of the day's file must have been downloaded
 // (each download logs how many rows it held). A day with nothing to export counts as done. Used to gate the daily sign-off.
 function priceExportStatus_(date){
-  if(!date) return {date:"", total:0, parts:0, got:0, complete:true};
+  const none = {date:date||"", total:0, parts:0, got:0, complete:true, companies:[]};
+  if(!date) return none;
   const n = sellingPricesMovedOn(date).length;
-  if(!n) return {date, total:0, parts:0, got:0, complete:true};
+  if(!n) return none;
   const sizes = [];
   for(let i=0;i*SAGE_MAX_IMPORT_LINES<n;i++) sizes.push(Math.min(SAGE_MAX_IMPORT_LINES, n-i*SAGE_MAX_IMPORT_LINES));
-  const logged = costCsvDownloadsFor(date).map(d=> Number(d.rows)||0);
-  if(logged.some(r=> r>=n)) return {date, total:n, parts:sizes.length, got:sizes.length, complete:true}; // one file covering the whole day (older downloads)
-  const pool = logged.slice(); let got = 0;
-  sizes.forEach(sz=>{ const ix = pool.indexOf(sz); if(ix>=0){ pool.splice(ix,1); got++; } });
-  return {date, total:n, parts:sizes.length, got, complete: got>=sizes.length};
+  const all = costCsvDownloadsFor(date);
+  // Every Sage company needs its own price file. Downloads logged before the company was recorded (no company) count for both.
+  const companies = Object.values(SAGE_COMPANIES).map(c=>{
+    const logged = all.filter(d=> !d.company || d.company===c.key).map(d=> Number(d.rows)||0);
+    if(logged.some(r=> r>=n)) return {key:c.key, name:c.name, got:sizes.length, parts:sizes.length, complete:true};
+    const pool = logged.slice(); let got = 0;
+    sizes.forEach(sz=>{ const ix = pool.indexOf(sz); if(ix>=0){ pool.splice(ix,1); got++; } });
+    return {key:c.key, name:c.name, got, parts:sizes.length, complete: got>=sizes.length};
+  });
+  return {date, total:n, parts:sizes.length, got:companies.reduce((a,c)=>a+c.got,0), complete:companies.every(c=>c.complete), companies};
 }
 function renderConfirmPrices(){
   const todayStr = new Date().toISOString().slice(0,10);
@@ -4537,16 +4556,17 @@ function renderSellingPrices(){
   const plMissing = sagePriceListMissing(movedRows) || [];
   const plDup = sageExportDuplicateCodes(movedRows);
   const plDupCodes = Object.keys(plDup);
-  const plReady = !!sagePriceListFile && !plMissing.length && !plDupCodes.length;
+  const plCo = SAGE_COMPANIES[sageExportCompany] || null;
+  const plReady = !!plCo && !!sagePriceListFile && sagePriceListFile.company===sageExportCompany && !plMissing.length && !plDupCodes.length;
   const canDownload = !tooEarly && !unpricedLines.length && !zeroCostRows.length && movedRows.length > 0 && plReady;
   // The cost file (Sage's "Item Code, Average Cost, Quantity On Hand" import) needs the same day-level gates as the price file,
   // but NOT the Items-export upload: it carries no price lists, so it can't zero any.
   const canCostDownload = !tooEarly && !unpricedLines.length && !zeroCostRows.length && movedRows.length > 0;
   const costTitle = tooEarly ? "A day's export can only be downloaded from the next morning" : unpricedLines.length ? "Confirm every received price first (Confirm Prices tab)" : zeroCostRows.length ? "Fix the R0 cost item(s) first" : "No items had a cost move on this date";
-  const downloadTitle = tooEarly ? "A day's export can only be downloaded from the next morning" : unpricedLines.length ? "Confirm every received price first (Confirm Prices tab)" : zeroCostRows.length ? "Fix the R0 cost item(s) first" : !sagePriceListFile ? "Upload a fresh Items export from Sage first (below) — otherwise Sage would zero every other price list" : plDupCodes.length ? "Two Item Setup rows share one Item code — see the red banner" : plMissing.length ? "Some items aren't in the uploaded Sage Items export — see the red banner" : "No items had a cost or price move on this date";
+  const downloadTitle = tooEarly ? "A day's export can only be downloaded from the next morning" : unpricedLines.length ? "Confirm every received price first (Confirm Prices tab)" : zeroCostRows.length ? "Fix the R0 cost item(s) first" : !plCo ? "Choose the Sage company first (Step 1)" : !sagePriceListFile ? "Upload a fresh Items export from "+plCo.name+" first (below) — otherwise Sage would zero every other price list" : plDupCodes.length ? "Two Item Setup rows share one Item code — see the red banner" : plMissing.length ? "Some items aren't in the uploaded Sage Items export — see the red banner" : "No items had a cost or price move on this date";
   const partButtons = Array.from({length:csvParts}, (_,i)=>{
     const from = i*SAGE_MAX_IMPORT_LINES + 1, to = Math.min(movedRows.length, (i+1)*SAGE_MAX_IMPORT_LINES);
-    const label = csvParts===1 ? "Download price export" : `Download part ${i+1} of ${csvParts} (rows ${from}–${to})`;
+    const label = (plCo ? plCo.name+" · " : "") + (csvParts===1 ? "Download price file" : `price file part ${i+1} of ${csvParts} (rows ${from}–${to})`);
     return `<button class="btn primary" data-sellingcsv-part="${i}" ${canDownload?"":`disabled title="${esc(downloadTitle)}"`}>${label}</button>`;
   }).join("");
   const costParts = Math.max(1, Math.ceil(movedRows.length / SAGE_MAX_COST_LINES));
@@ -4664,13 +4684,18 @@ function renderSellingPrices(){
     ${jumpRows.length ? `<div class="banner warn">⚠ ${jumpRows.length} price${jumpRows.length===1?"":"s"} moved more than ${Math.round(PRICE_JUMP_WARN_PCT*100)}% since the last export — highlighted below (${jumpRows.slice(0,3).map(r=>esc(r.item)+" "+(r.jumpPct>0?"▲":"▼")+fmtNum(Math.abs(r.jumpPct)*100,0)+"%").join(", ")}${jumpRows.length>3?" …":""}). A check, not a block.</div>` : ""}
     ${(!tooEarly && !movedRows.length) ? `<div class="banner info">ℹ No items had a cost move on ${esc(exportDate||"this date")} (nothing was purchased that day), so there is nothing to export.</div>` : ""}
     <div class="card">
-      <div class="cardhead"><div><h3>Step 1 — Upload today's Sage Items export</h3><div class="desc">Sage: Products &amp; Services → Export. Upload it here so every other price list is carried unchanged. If Sage says "Row not found or changed" on a few rows, just import the same file again.</div></div>
+      <div class="cardhead"><div><h3>Step 1 — Choose the Sage company, then upload its Items export</h3><div class="desc">Sage: Products &amp; Services → Export. Upload it here so every other price list is carried unchanged. If Sage says "Row not found or changed" on a few rows, just import the same file again.</div></div>
       <div class="cardbody">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;align-items:center;">
+          ${Object.values(SAGE_COMPANIES).map(c=>`<button class="btn ${sageExportCompany===c.key?"primary":""}" data-sage-company="${c.key}" style="font-weight:700;padding:8px 16px;">${esc(c.name)}</button>`).join("")}
+          ${plCo ? "" : `<span class="helptext">Pick the company you are about to import into. The price file is built for that company only.</span>`}
+        </div>
+        ${plCo ? `<div class="banner critical" style="margin-bottom:12px;font-weight:700;">🏢 This price file is for ${esc(plCo.name.toUpperCase())}. Switch Sage to the ${esc(plCo.name)} company before importing it — never into the other one.</div>` : ""}
         <div style="display:flex;gap:10px;align-items:stretch;flex-wrap:wrap;">
-          <label class="dropzone" id="sagePriceListDrop" style="flex:1;min-width:260px;padding:${sagePriceListFile?"14px":"26px"} 16px;">
-            <div class="dztitle">${sagePriceListFile ? "Drop a newer Items export here to replace it" : "Drop the Sage Items export here, or click to browse"}</div>
-            <div class="dzsub">CSV exported from Sage → Products &amp; Services → Export</div>
-            <input type="file" id="sagePriceListInput" accept=".csv,text/csv,.txt">
+          <label class="dropzone" id="sagePriceListDrop" style="flex:1;min-width:260px;padding:${sagePriceListFile?"14px":"26px"} 16px;${plCo?"":"opacity:.45;pointer-events:none;"}">
+            <div class="dztitle">${!plCo ? "Choose the company above first" : sagePriceListFile ? "Drop a newer "+esc(plCo.name)+" Items export here to replace it" : "Drop the "+esc(plCo.name)+" Items export here, or click to browse"}</div>
+            <div class="dzsub">CSV exported from Sage → Products &amp; Services → Export (while signed into ${plCo?esc(plCo.name):"that company"})</div>
+            <input type="file" id="sagePriceListInput" accept=".csv,text/csv,.txt" ${plCo?"":"disabled"}>
           </label>
           ${sagePriceListFile ? `<button class="btn small" id="sagePriceListClear" style="align-self:center;">Clear</button>` : ""}
         </div>
@@ -4678,7 +4703,7 @@ function renderSellingPrices(){
         ${plDupCodes.length ? `<div class="banner critical" style="margin-top:10px;">⛔ Item code ${plDupCodes.slice(0,6).map(c=>esc(c)+" ("+plDup[c].map(r=>esc(r.item)).join(" / ")+")").join("; ")}${plDupCodes.length>6?` and ${plDupCodes.length-6} more`:""} is used by more than one Item Setup row. Sage can only update a product once per import (the second line fails with "Row not found or changed"), so the download is blocked — delete or re-code the stale row in Item Setup.</div>` : ""}
         ${sagePriceListFile ? `<div class="banner ${plMissing.length?"critical":"info"}" style="margin-top:10px;">${plMissing.length
           ? `⛔ ${plMissing.length} item${plMissing.length===1?"":"s"} in this export ${plMissing.length===1?"isn't":"aren't"} in the uploaded Items file (${plMissing.slice(0,8).map(r=>esc((r.itemCode||"no code")+" · "+r.item)).join("; ")}${plMissing.length>8?` and ${plMissing.length-8} more`:""}). Their price lists would be zeroed in Sage, so the download is blocked — check the Item code in Item Setup, or re-export the Items list from Sage.`
-          : `✓ <b>${esc(sagePriceListFile.name)}</b> loaded — ${sagePriceListFile.rowCount} Sage items. `}</div>` : `<div class="banner warn" style="margin-top:10px;">Upload the Sage Items export to unlock the download.</div>`}
+          : `✓ <b>${esc(sagePriceListFile.name)}</b> loaded — ${esc(plCo ? plCo.name : "")}, ${sagePriceListFile.rowCount} Sage items. `}</div>` : `<div class="banner warn" style="margin-top:10px;">${plCo ? "Upload the "+esc(plCo.name)+" Items export to unlock the download." : "Choose the Sage company to unlock the download."}</div>`}
       </div>
     </div>
     <div class="card">
@@ -6282,8 +6307,18 @@ function wireTabEvents(){
     });
     const plInput = document.getElementById("sagePriceListInput");
     const plDrop = document.getElementById("sagePriceListDrop");
+    document.querySelectorAll("[data-sage-company]").forEach(btn=>{
+      btn.addEventListener("click", ()=>{
+        const k = btn.dataset.sageCompany;
+        if(k===sageExportCompany) return;
+        sageExportCompany = k;
+        sagePriceListFile = null; // an export belongs to one company — never carried across a switch
+        render();
+      });
+    });
     const loadSageItemsFile = (f)=>{
       if(!f) return;
+      if(!sageExportCompany){ toast("Choose the Sage company first"); return; }
       const reader = new FileReader();
       reader.onload = ()=>{
         const res = parseSageItemsExport(String(reader.result||""));
@@ -6293,8 +6328,17 @@ function wireTabEvents(){
           if(st) st.innerHTML = `<div class="banner critical">⛔ ${esc(res.error)}</div>`;
           return;
         }
+        // The export must belong to the company that was chosen: its price lists must include one of that company's own and none of the other's.
+        const who = sageCompaniesInExport_(res.listCols), want = SAGE_COMPANIES[sageExportCompany];
+        if(!who.includes(sageExportCompany) || who.some(k=> k!==sageExportCompany)){
+          sagePriceListFile = null; render();
+          const other = who.find(k=> k!==sageExportCompany);
+          const st = document.getElementById("sagePriceListStatus");
+          if(st) st.innerHTML = `<div class="banner critical">⛔ <b>Wrong company.</b> ${other ? `This is the <b>${esc(SAGE_COMPANIES[other].name)}</b> Items export (it has the price lists ${esc(SAGE_COMPANIES[other].signature.filter(n=>res.listCols.some(h=>sageListBase_(h)===n.toLowerCase())).join(", "))}), but you chose <b>${esc(want.name)}</b>. Nothing was loaded.` : `Its price lists (${esc(Array.from(new Set(res.listCols.map(h=>h.replace(/\s-\s(Exclusive|Inclusive)$/i,"")))).join(", "))}) don't match ${esc(want.name)}'s. Nothing was loaded.`} Export the Items list from the ${esc(want.name)} company in Sage, or pick the other company above.</div>`;
+          return;
+        }
         const n = new Date();
-        sagePriceListFile = {name:f.name, loadedAt:n.toISOString().slice(0,10)+" "+n.toTimeString().slice(0,5), listCols:res.listCols, byCode:res.byCode, rowCount:res.rowCount};
+        sagePriceListFile = {name:f.name, company:sageExportCompany, loadedAt:n.toISOString().slice(0,10)+" "+n.toTimeString().slice(0,5), listCols:res.listCols, byCode:res.byCode, rowCount:res.rowCount};
         render();
       };
       reader.onerror = ()=> toast("Could not read that file");
@@ -6337,7 +6381,11 @@ function wireTabEvents(){
         // A buy logged and received with no price computes to exactly R0, which must never reach Sage as a real cost.
         if(moved.some(r=> r.cost === 0)){ toast("Can't export — one or more items would show R0 cost. Fix the price first."); return; }
         // Sage zeroes any price list column missing from an import — so the file must carry every list, copied from a fresh Items export.
+        if(!sageExportCompany){ toast("Choose the Sage company first"); return; }
         if(!sagePriceListFile){ toast("Upload a fresh Items export from Sage first — otherwise Sage would zero the other price lists"); return; }
+        if(sagePriceListFile.company!==sageExportCompany || !sageCompaniesInExport_(sagePriceListFile.listCols).includes(sageExportCompany)){ toast("The uploaded Items export isn't from "+SAGE_COMPANIES[sageExportCompany].name+" — upload the right one"); return; }
+        const co = SAGE_COMPANIES[sageExportCompany];
+        if(!confirm("This is the "+co.name.toUpperCase()+" price file.\n\nImport it ONLY into the "+co.name+" company in Sage — check which company Sage is on before you import.\n\nDownload it?")) return;
         const plGone = sagePriceListMissing(moved);
         if(plGone.length){ toast(plGone.length+" item(s) aren't in the uploaded Items export — download blocked so their price lists aren't zeroed"); return; }
         if(Object.keys(sageExportDuplicateCodes(moved)).length){ toast("Two Item Setup rows share one Item code — fix that first (see the red banner)"); return; }
@@ -6351,10 +6399,10 @@ function wireTabEvents(){
           return [toCsvField(r.itemCode), toCsvField(lists.__desc || r.description), Number(r.price).toFixed(2), incl].concat(plCols.map(h=> toCsvField(lists[h])), [toCsvField(vt.s), toCsvField(vt.p), r.cost!==null ? r.cost : ""]).join(",");
         }).join("\n");
         const parts = Math.ceil(moved.length / SAGE_MAX_IMPORT_LINES);
-        browserDownload("sage_price_export_"+sellingCsvDate+(parts>1 ? "_part"+(part+1)+"of"+parts : "")+".csv", csv, "text/csv");
+        browserDownload("sage_price_export_"+co.short+"_"+sellingCsvDate+(parts>1 ? "_part"+(part+1)+"of"+parts : "")+".csv", csv, "text/csv");
         // Record the download (who/when/for which purchase date) so it can be audited — the server stamps the real time.
         const nowD = new Date();
-        const dlEntry = {id:newId(), exportDate:sellingCsvDate, downloadedBy: currentUser ? currentUser.name : "", rows: slice.length};
+        const dlEntry = {id:newId(), exportDate:sellingCsvDate, downloadedBy: currentUser ? currentUser.name : "", rows: slice.length, company: co.key};
         DATA.costCsvDownloads = DATA.costCsvDownloads || [];
         DATA.costCsvDownloads.push(Object.assign({}, dlEntry, {downloadedDate: nowD.toISOString().slice(0,10), downloadedTime: nowD.toTimeString().slice(0,8)}));
         // Record the prices just sent as the "previous price" for the next export (replaces any record for the same
