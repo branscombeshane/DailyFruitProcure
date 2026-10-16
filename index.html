@@ -529,7 +529,7 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 // day has had the chance to be received and priced first. Today's — or a future — purchase date is never allowed.
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
-const APP_BUILD = "2026-10-16 · Price Export: company picker + wrong-company guard";
+const APP_BUILD = "2026-10-16 · Price export check tolerant of row-count drift";
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
 // often than it's audited in bulk, so opening the tab should land on today's entries, not the full history.
 let purchaseDateFilter = new Date().toISOString().slice(0,10);
@@ -4092,7 +4092,7 @@ function costCsvStatTile(){
   const got = costCsvDownloadsFor(due);
   const last = got.length ? got[got.length-1] : null;
   const st = priceExportStatus_(due);
-  if(last && !st.complete){ const todo = st.companies.filter(c=>!c.complete).length; return {label:"Price export · "+shortDayLabel(due), value: todo+" of "+st.companies.length+" companies to go", color:"var(--warn)"}; }
+  if(last && !st.complete){ return {label:"Price export · "+shortDayLabel(due), value: st.companies.filter(c=>!c.complete).map(c=> c.name+": "+(c.got ? c.got+" of "+c.parts+" parts" : "not done")).join(" · "), color:"var(--warn)"}; }
   return {label:"Price export · "+shortDayLabel(due), value: (last||st.complete) ? ("✓ " + ((last&&last.downloadedBy)||"done")) : "Not yet", color: (last||st.complete) ? "var(--good)" : "var(--warn)"};
 }
 // Has the price export for a purchase date been fully downloaded? Every part of the day's file must have been downloaded
@@ -4102,18 +4102,21 @@ function priceExportStatus_(date){
   if(!date) return none;
   const n = sellingPricesMovedOn(date).length;
   if(!n) return none;
-  const sizes = [];
-  for(let i=0;i*SAGE_MAX_IMPORT_LINES<n;i++) sizes.push(Math.min(SAGE_MAX_IMPORT_LINES, n-i*SAGE_MAX_IMPORT_LINES));
+  // A day's file is split into full parts of SAGE_MAX_IMPORT_LINES plus one shorter tail part. The day's row count can drift a
+  // little after the download (a late-priced delivery, a Product Mix that becomes priceable), so completeness is judged on the
+  // SHAPE of what was downloaded — enough full-size parts and, if there is a tail, one shorter part — not on an exact row count.
+  const fullParts = Math.floor(n / SAGE_MAX_IMPORT_LINES), hasTail = n % SAGE_MAX_IMPORT_LINES > 0, parts = fullParts + (hasTail ? 1 : 0);
   const all = costCsvDownloadsFor(date);
   // Every Sage company needs its own price file. Downloads logged before the company was recorded (no company) count for both.
   const companies = Object.values(SAGE_COMPANIES).map(c=>{
     const logged = all.filter(d=> !d.company || d.company===c.key).map(d=> Number(d.rows)||0);
-    if(logged.some(r=> r>=n)) return {key:c.key, name:c.name, got:sizes.length, parts:sizes.length, complete:true};
-    const pool = logged.slice(); let got = 0;
-    sizes.forEach(sz=>{ const ix = pool.indexOf(sz); if(ix>=0){ pool.splice(ix,1); got++; } });
-    return {key:c.key, name:c.name, got, parts:sizes.length, complete: got>=sizes.length};
+    if(logged.some(r=> r>=n)) return {key:c.key, name:c.name, got:parts, parts, complete:true}; // one file covering the whole day (older downloads)
+    const fullGot = Math.min(fullParts, logged.filter(r=> r>=SAGE_MAX_IMPORT_LINES).length);
+    const tailGot = hasTail && logged.some(r=> r>0 && r<SAGE_MAX_IMPORT_LINES) ? 1 : 0;
+    const got = fullGot + tailGot;
+    return {key:c.key, name:c.name, got, parts, complete: got>=parts};
   });
-  return {date, total:n, parts:sizes.length, got:companies.reduce((a,c)=>a+c.got,0), complete:companies.every(c=>c.complete), companies};
+  return {date, total:n, parts, got:companies.reduce((a,c)=>a+c.got,0), complete:companies.every(c=>c.complete), companies};
 }
 function renderConfirmPrices(){
   const todayStr = new Date().toISOString().slice(0,10);
