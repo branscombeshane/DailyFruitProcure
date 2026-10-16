@@ -529,7 +529,7 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 // day has had the chance to be received and priced first. Today's — or a future — purchase date is never allowed.
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
-const APP_BUILD = "2026-10-15 · Sign-off blocked until the price export is done";
+const APP_BUILD = "2026-10-16 · Items export drop box, Logged by column on Confirm Prices";
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
 // often than it's audited in bulk, so opening the tab should land on today's entries, not the full history.
 let purchaseDateFilter = new Date().toISOString().slice(0,10);
@@ -4116,6 +4116,7 @@ function renderConfirmPrices(){
     return `
     <tr data-price-row="${esc(p.id||"")}">
       <td>${esc(p.baseProduct)}</td>
+      <td class="helptext">${esc(p.loggedBy||"—")}<div>${esc(p.date||"")}${p.loggedTime ? " " + esc(fmtTime(p.loggedTime)) : ""}</div></td>
       <td class="helptext">${esc(p.receivedDate||"—")}${p.receivedTime ? " " + esc(fmtTime(p.receivedTime)) : ""}<div>received by ${esc(p.receivedBy||"—")}</div></td>
       <td class="num">${fmtNum(p.receivedQty)}</td>
       <td>${esc(p.supplier||"—")}</td>
@@ -4169,8 +4170,8 @@ function renderConfirmPrices(){
       <div class="cardhead"><div><h3>Awaiting price</h3><div class="desc">${cpq ? `${awaiting.length} of ${awaitingAll.length}` : awaiting.length} received line${awaiting.length===1?"":"s"} with no confirmed price yet, oldest first.</div></div></div>
       <div class="cardbody" style="padding:0;">
         <div class="tablewrap" style="border:none;border-radius:0;"><table>
-          <thead><tr><th>Base product</th><th>Received</th><th class="num">Qty received</th><th>Supplier</th><th>Order price</th><th>Buying price</th><th></th></tr></thead>
-          <tbody>${awaitingRows || `<tr><td colspan="7" class="empty">${cpq ? `No lines awaiting a price match "${esc(confirmPricesSearch)}".` : "Nothing waiting — every received delivery has a confirmed price."}</td></tr>`}</tbody>
+          <thead><tr><th>Base product</th><th>Logged by</th><th>Received</th><th class="num">Qty received</th><th>Supplier</th><th>Order price</th><th>Buying price</th><th></th></tr></thead>
+          <tbody>${awaitingRows || `<tr><td colspan="8" class="empty">${cpq ? `No lines awaiting a price match "${esc(confirmPricesSearch)}".` : "Nothing waiting — every received delivery has a confirmed price."}</td></tr>`}</tbody>
         </table></div>
       </div>
     </div>
@@ -4665,9 +4666,13 @@ function renderSellingPrices(){
     <div class="card">
       <div class="cardhead"><div><h3>Step 1 — Upload today's Sage Items export</h3><div class="desc">Sage: Products &amp; Services → Export. Upload it here so every other price list is carried unchanged. If Sage says "Row not found or changed" on a few rows, just import the same file again.</div></div>
       <div class="cardbody">
-        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
-          <input type="file" id="sagePriceListInput" accept=".csv,text/csv,.txt">
-          ${sagePriceListFile ? `<button class="btn small" id="sagePriceListClear">Clear</button>` : ""}
+        <div style="display:flex;gap:10px;align-items:stretch;flex-wrap:wrap;">
+          <label class="dropzone" id="sagePriceListDrop" style="flex:1;min-width:260px;padding:${sagePriceListFile?"14px":"26px"} 16px;">
+            <div class="dztitle">${sagePriceListFile ? "Drop a newer Items export here to replace it" : "Drop the Sage Items export here, or click to browse"}</div>
+            <div class="dzsub">CSV exported from Sage → Products &amp; Services → Export</div>
+            <input type="file" id="sagePriceListInput" accept=".csv,text/csv,.txt">
+          </label>
+          ${sagePriceListFile ? `<button class="btn small" id="sagePriceListClear" style="align-self:center;">Clear</button>` : ""}
         </div>
         <div id="sagePriceListStatus" style="margin-top:10px;"></div>
         ${plDupCodes.length ? `<div class="banner critical" style="margin-top:10px;">⛔ Item code ${plDupCodes.slice(0,6).map(c=>esc(c)+" ("+plDup[c].map(r=>esc(r.item)).join(" / ")+")").join("; ")}${plDupCodes.length>6?` and ${plDupCodes.length-6} more`:""} is used by more than one Item Setup row. Sage can only update a product once per import (the second line fails with "Row not found or changed"), so the download is blocked — delete or re-code the stale row in Item Setup.</div>` : ""}
@@ -5268,6 +5273,7 @@ function wireTabEvents(){
         if(costVal!==""){ entry.cost = Number(costVal); } // left blank when not yet invoiced — see the comment above
         if(supplierVal.trim()) entry.supplier = supplierVal.trim();
         if(currentUser) entry.loggedBy = currentUser.name;
+        entry.loggedTime = new Date().toTimeString().slice(0,8);
         if(overThreshold){ entry.overBuyReason = overReasonInput.value.trim(); entry.overBuySuggested = suggested; }
         if(existingRow && existingRow.receivedDate){
           entry.receivedQty = existingRow.receivedQty;
@@ -5482,6 +5488,7 @@ function wireTabEvents(){
           if(costVal!==""){ entry.cost = Number(costVal); } // left blank when not yet invoiced — see the comment above
           if(supplierVal.trim()) entry.supplier = supplierVal.trim();
           if(currentUser) entry.loggedBy = currentUser.name;
+          entry.loggedTime = new Date().toTimeString().slice(0,8);
           if(overThreshold){ entry.overBuyReason = overReasonInput.value.trim(); entry.overBuySuggested = suggested; }
           if(existingRow && existingRow.receivedDate){
             entry.receivedQty = existingRow.receivedQty;
@@ -5821,6 +5828,7 @@ function wireTabEvents(){
         const entry = {id:newId(), date:today, baseProduct:bp, receivedQty:Number(qtyVal), receivedDate:today, receivedTime:new Date().toTimeString().slice(0,8)};
         if(supplierVal) entry.supplier = supplierVal;
         if(currentUser){ entry.loggedBy = currentUser.name; entry.receivedBy = currentUser.name; }
+        entry.loggedTime = entry.receivedTime;
         DATA.purchaseCosts = DATA.purchaseCosts.filter(p=> p.id !== entry.id);
         DATA.purchaseIssues = DATA.purchaseIssues.filter(p=> !(p.baseProduct===bp && p.date===today));
         DATA.purchaseCosts.push(entry);
@@ -6273,8 +6281,9 @@ function wireTabEvents(){
       persist("Wastage buffers saved", ["categoryCostBuffers"]);
     });
     const plInput = document.getElementById("sagePriceListInput");
-    if(plInput) plInput.addEventListener("change", ()=>{
-      const f = plInput.files && plInput.files[0]; if(!f) return;
+    const plDrop = document.getElementById("sagePriceListDrop");
+    const loadSageItemsFile = (f)=>{
+      if(!f) return;
       const reader = new FileReader();
       reader.onload = ()=>{
         const res = parseSageItemsExport(String(reader.result||""));
@@ -6288,8 +6297,18 @@ function wireTabEvents(){
         sagePriceListFile = {name:f.name, loadedAt:n.toISOString().slice(0,10)+" "+n.toTimeString().slice(0,5), listCols:res.listCols, byCode:res.byCode, rowCount:res.rowCount};
         render();
       };
+      reader.onerror = ()=> toast("Could not read that file");
       reader.readAsText(f);
-    });
+    };
+    if(plInput) plInput.addEventListener("change", ()=>{ loadSageItemsFile(plInput.files && plInput.files[0]); plInput.value = ""; });
+    if(plDrop){
+      plDrop.addEventListener("dragover", (e)=>{ e.preventDefault(); plDrop.classList.add("dragover"); });
+      plDrop.addEventListener("dragleave", ()=>{ plDrop.classList.remove("dragover"); });
+      plDrop.addEventListener("drop", (e)=>{
+        e.preventDefault(); plDrop.classList.remove("dragover");
+        loadSageItemsFile(e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]);
+      });
+    }
     const plClear = document.getElementById("sagePriceListClear");
     if(plClear) plClear.addEventListener("click", ()=>{ sagePriceListFile = null; render(); });
     document.querySelectorAll("[data-costcsv-part]").forEach(btn=>{
