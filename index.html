@@ -110,7 +110,8 @@
   .stat{background:var(--surface); border:1px solid var(--line); border-radius:10px; padding:14px 16px; box-shadow:var(--shadow);}
   .stat .label{font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin-bottom:6px;}
   .stat .value{font-size:22px; font-weight:600; font-family:"IBM Plex Mono",monospace;}
-  .stat .value.small{font-size:15px; font-family:"IBM Plex Sans",sans-serif; font-weight:600;}
+  /* every stat tile number uses the same size/face — ".small" is kept as a no-op so older markup still renders consistently */
+  .stat .value.small{font-size:22px; font-family:"IBM Plex Mono",monospace; font-weight:600;}
   .stat.clickable{cursor:pointer; transition:box-shadow .12s ease, border-color .12s ease; -webkit-tap-highlight-color:transparent;}
   .stat.clickable:hover{border-color:var(--accent);}
   .stat.clickable.active{border-color:var(--accent); box-shadow:0 0 0 2px var(--accent-soft) inset, var(--shadow);}
@@ -529,7 +530,7 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 // day has had the chance to be received and priced first. Today's — or a future — purchase date is never allowed.
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
-const APP_BUILD = "2026-10-16 · Price export check tolerant of row-count drift";
+const APP_BUILD = "2026-10-17 · Stat tile numbers all one size";
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
 // often than it's audited in bulk, so opening the tab should land on today's entries, not the full history.
 let purchaseDateFilter = new Date().toISOString().slice(0,10);
@@ -1808,6 +1809,39 @@ async function persist(successMsg, changedKeys){
 // handlePurchaseAction_), so two people logging purchases around the same time — e.g. two buyers at
 // the market — never overwrite each other and never need to reload. No version check applies here;
 // there's nothing for it to conflict with.
+// Quietly stamps "last logged in" for a user on the server (see handleRecordLogin_ in Code.gs). Fire-and-forget: no toast, no
+// render, and a failure (old Code.gs, offline) is simply ignored — it must never get in the way of logging in.
+async function recordLogin_(name){
+  try{
+    const res = await fetch(API_URL, {method:"POST", headers:{"Content-Type":"text/plain;charset=utf-8"}, body:JSON.stringify({action:"recordLogin", name})});
+    const r = await res.json();
+    if(r && r.ok && r.lastLogin){
+      const u = (DATA.users||[]).find(x=> String(x.name).toLowerCase()===String(name).toLowerCase());
+      if(u) u.lastLogin = r.lastLogin;
+    }
+  }catch(e){ /* ignore */ }
+}
+// A disabled user keeps their row (so they can be switched back on) but cannot log in and is ignored by the daily sign-off.
+function isUserDisabled_(u){ return !!u && (u.disabled===true || String(u.disabled||"").toLowerCase()==="yes"); }
+// After DATA is swapped for a fresh copy: a user who has been removed or disabled elsewhere must not stay logged in.
+function dropSessionIfNoAccess_(){
+  if(!currentUser) return;
+  const me = (DATA.users||[]).find(u=> u.name===currentUser.name);
+  if(!me || isUserDisabled_(me)){
+    currentUser = null;
+    try{ sessionStorage.removeItem("dailyFruitUser"); }catch(e){}
+    loginError = "Your access has been switched off — ask the owner.";
+  }
+}
+// "2026-10-16 07:31:05" -> {text:"2026-10-16 07:31", days:1, rel:"yesterday"}; blank -> null
+function lastLoginInfo_(s){
+  if(!s) return null;
+  const d = new Date(String(s).replace(" ","T"));
+  if(isNaN(d.getTime())) return {text:String(s), days:null, rel:""};
+  const days = Math.floor((new Date(todaySA()+"T00:00:00").getTime() - new Date(String(s).slice(0,10)+"T00:00:00").getTime())/86400000);
+  return {text:String(s).slice(0,16), days, rel: days<=0 ? "today" : days===1 ? "yesterday" : days+" days ago"};
+}
+let usersLoginsFetchedAt = 0;
 async function persistPurchaseAction(payload, successMsg, onSuccess){
   setSyncBusy(true);
   let ok = false;
@@ -1914,8 +1948,10 @@ function wireLoginEvents(){
     const u = (DATA.users||[]).find(x=> String(x.name).toLowerCase() === trimmedName.toLowerCase());
     if(!u){ loginError = "Name not recognized"; render(); return; }
     if(String(u.pin) !== String(pin)){ loginError = "Incorrect PIN"; render(); return; }
+    if(isUserDisabled_(u)){ loginError = "This account has been switched off — ask the owner."; render(); return; }
     currentUser = {name:u.name, role:u.role};
     try{ sessionStorage.setItem("dailyFruitUser", JSON.stringify(currentUser)); }catch(e){}
+    recordLogin_(u.name);
     // Land on the Dashboard every time Owner/Procurement logs in, regardless of whatever tab this
     // browser had open last time — that's the whole point of it being the landing page. Stock Taker and
     // Receiving don't have a "home" tab at all (see ROLE_TABS), so they're left on whatever they had
@@ -2800,7 +2836,7 @@ function renderShoppingArchive(){
     // shoppingArchiveDate directly rather than needing any backend/snapshot changes. Shane's ask: the
     // Archive should show WHO signed off and WHEN for a given day, same "✓ Signed off at HH:MM" / "Not
     // signed off" wording as the live Daily sign-off card on the Dashboard (renderHomeDashboard).
-    const archiveProcurementUsers = (DATA.users||[]).filter(u=>u.role==="procurement");
+    const archiveProcurementUsers = (DATA.users||[]).filter(u=>u.role==="procurement" && !isUserDisabled_(u));
     const archiveDateSignoffs = (DATA.procurementSignoffs||[]).filter(s=> s.date===shoppingArchiveDate);
     const signoffHtml = archiveProcurementUsers.length ? `
     <div class="card">
@@ -3212,7 +3248,7 @@ function renderHomeDashboard(){
   // recomputing "what's outstanding" a second way) as the single gate, so this can never show "all
   // clear" while "Needs buying today" still lists something, or vice versa. Resets every new day since
   // it's keyed on today's date, same convention as archiveSalesSnapshot's DATA.salesHistory.
-  const procurementUsers = (DATA.users||[]).filter(u=>u.role==="procurement");
+  const procurementUsers = (DATA.users||[]).filter(u=>u.role==="procurement" && !isUserDisabled_(u));
   const todaysSignoffs = (DATA.procurementSignoffs||[]).filter(s=> s.date===today);
   const signoffRows = procurementUsers.map(u=> ({name:u.name, isSelf: !!(currentUser && currentUser.name===u.name), entry: todaysSignoffs.find(s=> s.user===u.name) || null}));
   const mySignoff = currentUser ? todaysSignoffs.find(s=> s.user===currentUser.name) : null;
@@ -4602,6 +4638,7 @@ function renderSellingPrices(){
     <tr>
       <td style="font-weight:600;">${esc(d.exportDate||"all dates")}</td>
       <td class="helptext">${esc(d.downloadedDate||"—")} ${esc(fmtTime(d.downloadedTime))}</td>
+      <td>${d.company && SAGE_COMPANIES[d.company] ? `<b>${esc(SAGE_COMPANIES[d.company].name)}</b>` : `<span class="helptext" title="Logged before the company was recorded">—</span>`}</td>
       <td>${esc(d.downloadedBy||"—")}</td>
       <td class="num">${esc(d.rows===undefined||d.rows===null?"":d.rows)}</td>
     </tr>`).join("");
@@ -4733,8 +4770,8 @@ function renderSellingPrices(){
       <div class="cardbody">
         <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;">${dlStrip}</div>
         <div class="tablewrap" style="max-height:260px;overflow-y:auto;"><table>
-          <thead><tr><th>Purchase date</th><th>Downloaded</th><th>By</th><th class="num">Rows</th></tr></thead>
-          <tbody>${dlRows || `<tr><td colspan="4" class="empty">No downloads recorded yet.</td></tr>`}</tbody>
+          <thead><tr><th>Purchase date</th><th>Downloaded</th><th>Company</th><th>By</th><th class="num">Rows</th></tr></thead>
+          <tbody>${dlRows || `<tr><td colspan="5" class="empty">No downloads recorded yet.</td></tr>`}</tbody>
         </table></div>
       </div>
     </div>
@@ -5021,11 +5058,14 @@ function renderUsers(){
 
   const rows = users.map((u,i)=>{
     const isSelf = currentUser && currentUser.name===u.name;
+    const off = isUserDisabled_(u);
     return `
-    <tr>
-      <td>${esc(u.name)}${isSelf ? ` <span class="helptext">(you)</span>` : ""}</td>
+    <tr${off?' style="opacity:.55;"':''}>
+      <td>${esc(u.name)}${isSelf ? ` <span class="helptext">(you)</span>` : ""}${off ? " " + chip("disabled","critical") : ""}</td>
+      <td>${(()=>{ const li = lastLoginInfo_(u.lastLogin); if(!li) return `<span class="helptext">No login recorded yet</span>`; return esc(li.text) + (li.rel ? ` <span class="helptext">(${esc(li.rel)})</span>` : "") + (li.days!==null && li.days>=30 ? " " + chip("inactive","warn") : ""); })()}</td>
       <td><select class="rowinput" data-idx="${i}" data-field="role" data-pristine="${esc(u.role)}">${roleOptionsFor(u.role)}</select></td>
       <td><input class="rowinput num" data-idx="${i}" data-field="pin" value="${esc(u.pin)}" data-pristine="${esc(u.pin)}" style="max-width:110px;"></td>
+      <td>${isSelf ? `<span class="helptext">—</span>` : `<button class="btn small" data-toggle-user="${i}" title="${off?"Let this user log in again":"Stop this user logging in (can be switched back on)"}">${off?"Enable":"Disable"}</button>`}</td>
       <td><button class="delbtn" data-del-user="${i}" title="Remove user">✕</button></td>
     </tr>`;
   }).join("");
@@ -5047,13 +5087,13 @@ function renderUsers(){
     </div>
     <div class="card">
       <div class="cardhead">
-        <div><h3>Existing users</h3><div class="desc">${users.length} user(s). Edit role or PIN below, then save.</div></div>
+        <div><h3>Existing users</h3><div class="desc">${users.length} user(s). Edit role or PIN below, then save. <b>Disable</b> stops a user logging in (and logs them out within about 20 seconds) without deleting them — click Enable to bring them back. "Last logged in" only started recording when this update went live, so "No login recorded yet" means they haven't logged in since — check again in a week or two before removing anyone.</div></div>
         <button class="btn primary" id="saveUsersBtn">Save changes</button>
       </div>
       <div class="cardbody" style="padding:0;">
         <div class="tablewrap" style="border:none;border-radius:0;"><table>
-          <thead><tr><th>Name</th><th>Role</th><th class="num">PIN</th><th></th></tr></thead>
-          <tbody>${rows || `<tr><td colspan="4" class="empty">No users yet.</td></tr>`}</tbody>
+          <thead><tr><th>Name</th><th>Last logged in</th><th>Role</th><th class="num">PIN</th><th>Access</th><th></th></tr></thead>
+          <tbody>${rows || `<tr><td colspan="6" class="empty">No users yet.</td></tr>`}</tbody>
         </table></div>
       </div>
     </div>
@@ -6498,6 +6538,19 @@ function wireTabEvents(){
   }
 
   if(currentTab==="users"){
+    // Logins are stamped on the server without bumping the data version, so this tab's copy can be behind — pull just the
+    // lastLogin values fresh when the tab opens (at most every 30s) and redraw only if something actually changed.
+    if(Date.now() - usersLoginsFetchedAt > 30000){
+      usersLoginsFetchedAt = Date.now();
+      loadData().then(fresh=>{
+        let changed = false;
+        (fresh.users||[]).forEach(fu=>{
+          const u = (DATA.users||[]).find(x=> x.name===fu.name);
+          if(u && (u.lastLogin||"") !== (fu.lastLogin||"")){ u.lastLogin = fu.lastLogin; changed = true; }
+        });
+        if(changed && currentTab==="users") render();
+      }).catch(()=>{});
+    }
     document.getElementById("addUserBtn").addEventListener("click", ()=>{
       const name = document.getElementById("newUserName").value.trim();
       const pin = document.getElementById("newUserPin").value.trim();
@@ -6523,6 +6576,19 @@ function wireTabEvents(){
         }
       }
       persist("Users updated", ["users"]);
+    });
+    document.querySelectorAll("[data-toggle-user]").forEach(b=>{
+      b.addEventListener("click", async ()=>{
+        const u = DATA.users[Number(b.dataset.toggleUser)];
+        if(!u) return;
+        if(currentUser && u.name===currentUser.name){ toast("You can't disable the user you're logged in as"); return; }
+        const turningOff = !isUserDisabled_(u);
+        if(turningOff && u.role==="owner" && !(DATA.users||[]).some(x=> x!==u && x.role==="owner" && !isUserDisabled_(x))){ toast("Can't disable the last active owner"); return; }
+        const prev = u.disabled;
+        if(turningOff) u.disabled = "yes"; else delete u.disabled;
+        const ok = await persist((turningOff ? "Disabled " : "Enabled ") + u.name, ["users"]);
+        if(ok===false){ if(prev===undefined) delete u.disabled; else u.disabled = prev; render(); }
+      });
     });
     document.querySelectorAll("[data-del-user]").forEach(b=>{
       b.addEventListener("click", ()=>{
@@ -6783,6 +6849,7 @@ async function checkForUpdates(){
       DATA = fresh;
       lastKnownDataVersion = DATA.dataVersion || null;
       staleDataAvailable = false;
+      dropSessionIfNoAccess_();
       render();
     }catch(e){
       // leave everything as-is — the next poll will just notice the same staleness and try again
@@ -6806,6 +6873,7 @@ async function fastDataRefresh(){
     DATA = fresh;
     lastKnownDataVersion = DATA.dataVersion || null;
     staleDataAvailable = false;
+    dropSessionIfNoAccess_();
     render();
     return true;
   }catch(e){
@@ -6850,9 +6918,14 @@ async function boot(){
     staleDataAvailable = false; // a fresh load is by definition current, even if it was triggered by the "Reload now" button on a stale-data banner
     // now that real data is in, re-validate the tentatively-restored session: a user removed
     // (or whose role changed) elsewhere since this session logged in shouldn't keep stale access
-    if(currentUser && !DATA.users.some(u=>u.name===currentUser.name && u.role===currentUser.role)){
+    if(currentUser && !DATA.users.some(u=>u.name===currentUser.name && u.role===currentUser.role && !isUserDisabled_(u))){
       currentUser = null;
       try{ sessionStorage.removeItem("dailyFruitUser"); }catch(e){}
+    } else if(currentUser){
+      // a restored session (page reloaded, same tab) counts as use too — but only re-stamp if the last stamp is a few hours old
+      const me = DATA.users.find(u=> u.name===currentUser.name);
+      const t = me && me.lastLogin ? new Date(String(me.lastLogin).replace(" ","T")).getTime() : 0;
+      if(!t || Date.now()-t > 4*3600000) recordLogin_(currentUser.name);
     }
   }catch(e){
     dataLoadError = (e && e.message) ? e.message : "Unknown error";
