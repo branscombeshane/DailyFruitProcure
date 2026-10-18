@@ -530,7 +530,7 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 // day has had the chance to be received and priced first. Today's — or a future — purchase date is never allowed.
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
-const APP_BUILD = "2026-10-17 · Stat tile numbers all one size";
+const APP_BUILD = "2026-10-18 · Received-date grouping, changed-since-download check";
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
 // often than it's audited in bulk, so opening the tab should land on today's entries, not the full history.
 let purchaseDateFilter = new Date().toISOString().slice(0,10);
@@ -1283,6 +1283,13 @@ function purchaseCostMap(date){
   return weightedCostMap_(entries);
 }
 
+// Same weighted average, but grouped by the day each line was RECEIVED (not the day it was ordered). The Price Export works
+// off this: a delivery belongs to the export for the day it physically arrived, so an order placed on the 16th and delivered
+// on the 17th can never fall between two exports.
+function receivedCostMap(date){
+  return weightedCostMap_(DATA.purchaseCosts.filter(p=> isReceived(p) && p.receivedDate===date));
+}
+
 // All purchase LINES logged for a base product on a given date (there can be more than one — different
 // suppliers, different prices — since multi-supplier same-day buying was added). Regardless of received
 // status — this is used for DISPLAYING what's ordered/received on Shopping List/Quick Buy, not costing.
@@ -1393,9 +1400,11 @@ function latestPurchaseCostMap(){
     // matching fix for the case where that same date also has a real-cost line from another supplier.
     const hasCost = p.receivedCost!==undefined && p.receivedCost!==null && p.receivedCost!=="";
     if(!hasCost) continue;
-    if(!latestDate[p.baseProduct] || (p.date||"") >= latestDate[p.baseProduct]) latestDate[p.baseProduct] = p.date||"";
+    // Grouped by the day it was RECEIVED (same as the Price Export), so the suggested price and the exported price always agree.
+    const rd = p.receivedDate||"";
+    if(!latestDate[p.baseProduct] || rd >= latestDate[p.baseProduct]) latestDate[p.baseProduct] = rd;
   }
-  const entries = DATA.purchaseCosts.filter(p=> p.baseProduct && (p.date||"")===latestDate[p.baseProduct]);
+  const entries = DATA.purchaseCosts.filter(p=> p.baseProduct && isReceived(p) && (p.receivedDate||"")===latestDate[p.baseProduct]);
   return weightedCostMap_(entries);
 }
 
@@ -1522,7 +1531,7 @@ function applyCostBuffers_(pm){
 
 function sageImportComputed(date){
   const derived = itemSetupDerived();
-  const pm = applyCostBuffers_(purchaseCostMap(date));
+  const pm = applyCostBuffers_(receivedCostMap(date));
   // Fallback for a Product Mix's ingredients only (see itemCostPerUnit above) — a plain, non-mix item
   // is unaffected and still needs a same-day purchase cost to price at all.
   const latestPm = applyCostBuffers_(latestPurchaseCostMap());
@@ -3381,7 +3390,7 @@ function renderHomeDashboard(){
         <div style="margin-top:12px;">
           ${signoffBlocked
             ? `${needsActionRows.length ? `<div class="helptext" style="margin-bottom:8px;">Still need action today before you can sign off: ${shownOutstanding}${moreOutstanding>0?` and ${moreOutstanding} more`:""}. ${goto("shoppinglist","Open Shopping List →")}</div>` : ""}
-               ${!exportStatus.complete ? `<div class="helptext" style="margin-bottom:8px;">The Sage price export for ${esc(shortDayLabel(exportDue))} hasn't been completed (${exportStatus.companies.map(c=> esc(c.name)+": "+(c.complete?"done":(c.got?c.got+" of "+c.parts+" parts":"not downloaded"))).join(" · ")}). ${goto("sellingprices","Open Price Export →")}</div>` : ""}
+               ${!exportStatus.complete ? `<div class="helptext" style="margin-bottom:8px;">The Sage price export for ${esc(shortDayLabel(exportDue))} hasn't been completed (${exportStatus.companies.map(c=> esc(c.name)+": "+(c.complete?"done":(c.stale?"prices changed since it was downloaded — download again":(c.got?c.got+" of "+c.parts+" parts":"not downloaded")))).join(" · ")}). ${goto("sellingprices","Open Price Export →")}</div>` : ""}
                <button class="btn primary" id="signoffBtn" disabled title="${needsActionRows.length ? "Clear every Critical/Consider Buying item first" : "Complete the Sage price export first"}">Sign off for today</button>`
             : `<button class="btn primary" id="signoffBtn">Sign off for today</button>`}
         </div>` : (mySignoff ? `<div class="helptext" style="margin-top:12px;">You signed off for today at ${esc(fmtTime(mySignoff.time))}.</div>` : "")}
@@ -4113,12 +4122,12 @@ function costCsvDownloadsFor(purchaseDate){
     .slice().sort((a,b)=> (String(a.downloadedDate)+String(a.downloadedTime)).localeCompare(String(b.downloadedDate)+String(b.downloadedTime)));
 }
 function shortDayLabel(d){ return new Date(d+"T00:00:00Z").toUTCString().slice(5,11); } // "12 Oct"
-// The purchase date whose cost CSV is currently "due": the most recent day BEFORE today that has a received line.
+// The date whose price export is currently "due": the most recent day BEFORE today on which a delivery was received.
 function costCsvDueDate(){
   const todayStr = todaySA(); // today's purchases aren't due until tomorrow (see costCsvTooEarly)
   let best = "";
   DATA.purchaseCosts.forEach(p=>{
-    if(p.baseProduct && isReceived(p) && !isNotReceived(p) && p.date && p.date<todayStr && p.date>best) best = p.date;
+    if(p.baseProduct && isReceived(p) && !isNotReceived(p) && p.receivedDate && p.receivedDate<todayStr && p.receivedDate>best) best = p.receivedDate;
   });
   return best;
 }
@@ -4128,31 +4137,48 @@ function costCsvStatTile(){
   const got = costCsvDownloadsFor(due);
   const last = got.length ? got[got.length-1] : null;
   const st = priceExportStatus_(due);
-  if(last && !st.complete){ return {label:"Price export · "+shortDayLabel(due), value: st.companies.filter(c=>!c.complete).map(c=> c.name+": "+(c.got ? c.got+" of "+c.parts+" parts" : "not done")).join(" · "), color:"var(--warn)"}; }
+  if(last && !st.complete){ return {label:"Price export · "+shortDayLabel(due), value: st.companies.filter(c=>!c.complete).map(c=> c.name+": "+(c.stale ? "changed since download" : (c.got ? c.got+" of "+c.parts+" parts" : "not done"))).join(" · "), color:"var(--warn)"}; }
   return {label:"Price export · "+shortDayLabel(due), value: (last||st.complete) ? ("✓ " + ((last&&last.downloadedBy)||"done")) : "Not yet", color: (last||st.complete) ? "var(--good)" : "var(--warn)"};
 }
 // Has the price export for a purchase date been fully downloaded? Every part of the day's file must have been downloaded
 // (each download logs how many rows it held). A day with nothing to export counts as done. Used to gate the daily sign-off.
-function priceExportStatus_(date){
+// A short fingerprint of one downloaded part (which items, at which price and cost). Logged with each download so the app can
+// tell later whether what was sent to Sage still matches what the app would send now.
+function partSig_(slice){
+  const str = slice.map(r=> r.item+"|"+Number(r.price).toFixed(2)+"|"+((r.cost===null||r.cost===undefined||r.cost==="")?"":Number(r.cost).toFixed(2))).join("\n");
+  let h = 5381; for(let i=0;i<str.length;i++) h = ((h*33) ^ str.charCodeAt(i)) >>> 0;
+  return h.toString(36)+"."+slice.length;
+}
+function priceExportStatus_(date, suggestionRows){
   const none = {date:date||"", total:0, parts:0, got:0, complete:true, companies:[]};
   if(!date) return none;
-  const n = sellingPricesMovedOn(date).length;
+  const moved = sellingPricesMovedOn(date, suggestionRows);
+  const n = moved.length;
   if(!n) return none;
   // A day's file is split into full parts of SAGE_MAX_IMPORT_LINES plus one shorter tail part. The day's row count can drift a
   // little after the download (a late-priced delivery, a Product Mix that becomes priceable), so completeness is judged on the
   // SHAPE of what was downloaded — enough full-size parts and, if there is a tail, one shorter part — not on an exact row count.
   const fullParts = Math.floor(n / SAGE_MAX_IMPORT_LINES), hasTail = n % SAGE_MAX_IMPORT_LINES > 0, parts = fullParts + (hasTail ? 1 : 0);
   const all = costCsvDownloadsFor(date);
+  // What each downloaded part should look like right now. A download whose fingerprint no longer matches was made from prices/costs
+  // that have since changed (a correction after the download, a late-priced delivery), so Sage is out of date for those items.
+  const expectedSigs = []; for(let i=0;i<parts;i++) expectedSigs.push(partSig_(moved.slice(i*SAGE_MAX_IMPORT_LINES, (i+1)*SAGE_MAX_IMPORT_LINES)));
+  const sentQuote = {}; (DATA.priceQuotes||[]).forEach(q=>{ if(q.date===date) sentQuote[q.item] = q; });
+  const changedItems = all.length ? moved.filter(r=>{ const q = sentQuote[r.item]; return !q || Math.abs(Number(q.price)-r.price)>=0.005 || Math.abs((Number(q.cost)||0)-(r.cost||0))>=0.005; }).map(r=>r.item) : [];
   // Every Sage company needs its own price file. Downloads logged before the company was recorded (no company) count for both.
   const companies = Object.values(SAGE_COMPANIES).map(c=>{
     const logged = all.filter(d=> !d.company || d.company===c.key).map(d=> Number(d.rows)||0);
-    if(logged.some(r=> r>=n)) return {key:c.key, name:c.name, got:parts, parts, complete:true}; // one file covering the whole day (older downloads)
+    const mine = all.filter(d=> !d.company || d.company===c.key);
+    // Only judged when EVERY download for this company+day carries a fingerprint (older downloads don't, and are judged on their shape).
+    const sigKnown = mine.length>0 && mine.every(d=> d.sig);
+    const stale = sigKnown && !expectedSigs.every(sg=> mine.some(d=> d.sig===sg));
+    if(!stale && logged.some(r=> r>=n)) return {key:c.key, name:c.name, got:parts, parts, complete:true, stale:false}; // one file covering the whole day (older downloads)
     const fullGot = Math.min(fullParts, logged.filter(r=> r>=SAGE_MAX_IMPORT_LINES).length);
     const tailGot = hasTail && logged.some(r=> r>0 && r<SAGE_MAX_IMPORT_LINES) ? 1 : 0;
     const got = fullGot + tailGot;
-    return {key:c.key, name:c.name, got, parts, complete: got>=parts};
+    return {key:c.key, name:c.name, got, parts, complete: got>=parts && !stale, stale};
   });
-  return {date, total:n, parts, got:companies.reduce((a,c)=>a+c.got,0), complete:companies.every(c=>c.complete), companies};
+  return {date, total:n, parts, got:companies.reduce((a,c)=>a+c.got,0), complete:companies.every(c=>c.complete), companies, changedItems: companies.some(c=>c.stale) ? changedItems : []};
 }
 function renderConfirmPrices(){
   const todayStr = new Date().toISOString().slice(0,10);
@@ -4585,9 +4611,8 @@ function renderSellingPrices(){
   const exportDate = sellingCsvDate;
   // Gates (all must pass): the date is a past day (next-morning rule), every RECEIVED line for it has a confirmed price,
   // and nothing would export at R0 cost. Lines still awaiting delivery don't block it — they aren't costed yet — but are named.
-  const dayLines = DATA.purchaseCosts.filter(p=> p.baseProduct && p.date===exportDate && !isNotReceived(p));
+  const dayLines = DATA.purchaseCosts.filter(p=> p.baseProduct && isReceived(p) && p.receivedDate===exportDate && !isNotReceived(p));
   const unpricedLines = dayLines.filter(p=> needsPriceConfirm(p));
-  const undeliveredLines = dayLines.filter(p=> !isReceived(p));
   const zeroCostRows = movedRows.filter(r=> r.cost === 0);
   const jumpRows = movedRows.filter(r=> r.jumpFlag);
   const tooEarly = costCsvTooEarly(exportDate);
@@ -4629,8 +4654,11 @@ function renderSellingPrices(){
     const d = dd.toISOString().slice(0,10); // a PURCHASE date (South African calendar day)
     const got = costCsvDownloadsFor(d);
     const label = new Date(d+"T00:00:00Z").toUTCString().slice(0,11).replace(",","");
-    const hadPurchases = DATA.purchaseCosts.some(p=> p.baseProduct && p.date===d && isReceived(p) && !isNotReceived(p));
-    if(got.length) return chip("✓ " + label + " · " + got.map(g=>g.downloadedBy||"?").filter((v,ix,a)=>a.indexOf(v)===ix).join("/"), "good");
+    const hadPurchases = DATA.purchaseCosts.some(p=> p.baseProduct && isReceived(p) && p.receivedDate===d && !isNotReceived(p));
+    if(got.length){
+      if(hadPurchases && priceExportStatus_(d, rows).companies.some(c=>c.stale)) return chip("⚠ " + label + " · changed since download", "warn");
+      return chip("✓ " + label + " · " + got.map(g=>g.downloadedBy||"?").filter((v,ix,a)=>a.indexOf(v)===ix).join("/"), "good");
+    }
     if(!hadPurchases) return chip("– " + label, "neutral");
     return chip("✗ " + label, i===0 ? "neutral" : "warn");
   }).join(" ");
@@ -4707,10 +4735,10 @@ function renderSellingPrices(){
 
   return `
     <div class="pagehead">
-      <div><h2>Sage Price Export</h2><p>Selling prices and costs for the items bought on one purchase date, as two Sage imports. Available from the next day, once every received delivery is price-confirmed. Price = cost + wastage buffer + target margin, rounded up to 50c, never below the item's Min price.</p></div>
+      <div><h2>Sage Price Export</h2><p>Selling prices and costs for the items <b>received</b> on one date, as two Sage imports. Available from the next day, once every received delivery is price-confirmed. Price = cost + wastage buffer + target margin, rounded up to 50c, never below the item's Min price.</p></div>
       <div class="actions">
         <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;">
-          <div class="field" style="min-width:170px;"><label>Purchase date</label><input type="date" id="sellingCsvDate" value="${esc(sellingCsvDate)}"></div>
+          <div class="field" style="min-width:170px;"><label>Received date</label><input type="date" id="sellingCsvDate" value="${esc(sellingCsvDate)}"></div>
           <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;">${partButtons}</div>
           <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;">${costButtons}</div>
           <div class="helptext" style="max-width:420px;text-align:right;">Import the price file(s), then the cost file (Average Cost import).</div>
@@ -4719,7 +4747,7 @@ function renderSellingPrices(){
     </div>
     ${tooEarly ? `<div class="banner critical">🔒 The price export for ${esc(exportDate||"this date")} can only be downloaded from the next calendar day, so every delivery has the chance to be received and priced first. Pick an earlier purchase date.</div>` : ""}
     ${(!tooEarly && unpricedLines.length) ? `<div class="banner critical"><span>🔒 ${unpricedLines.length} received line${unpricedLines.length===1?"":"s"} for ${esc(exportDate)} still need${unpricedLines.length===1?"s":""} a confirmed price (${unpricedLines.slice(0,6).map(p=>esc(p.baseProduct)).filter((v,ix,a)=>a.indexOf(v)===ix).join(", ")}${unpricedLines.length>6?"…":""}). The download unlocks once every received delivery for this date is priced.</span><button class="btn small" data-goto-tab="confirmprices">Go to Confirm Prices →</button></div>` : ""}
-    ${(!tooEarly && !unpricedLines.length && undeliveredLines.length) ? `<div class="banner warn">ℹ ${undeliveredLines.length} order${undeliveredLines.length===1?"":"s"} for ${esc(exportDate)} haven't been received yet, so ${undeliveredLines.length===1?"it isn't":"they aren't"} in this export.</div>` : ""}
+    ${(()=>{ if(tooEarly) return ""; const st = priceExportStatus_(exportDate, rows); const stale = st.companies.filter(c=>c.stale); if(!stale.length) return ""; return `<div class="banner warn">⚠ Prices or costs for ${esc(exportDate)} changed after they were downloaded (${esc(stale.map(c=>c.name).join(" and "))}). Sage still has the old figures${st.changedItems.length ? " for: "+st.changedItems.slice(0,6).map(esc).join(", ")+(st.changedItems.length>6?" and "+(st.changedItems.length-6)+" more":"") : ""}. Download the price and cost files again for ${stale.length>1?"each company":esc(stale[0].name)} and import them — importing the same day twice is safe.</div>`; })()}
     ${zeroCostRows.length ? `<div class="banner critical">⚠ ${zeroCostRows.length} item${zeroCostRows.length===1?"":"s"} would export at R0 cost — a buy was logged (and received) with no price: ${zeroCostRows.slice(0,6).map(r=>esc(r.item)).join(", ")}${zeroCostRows.length>6?` and ${zeroCostRows.length-6} more`:""}. Download is blocked until a real price is entered in Purchase Costs or Confirm Prices.</div>` : ""}
     ${jumpRows.length ? `<div class="banner warn">⚠ ${jumpRows.length} price${jumpRows.length===1?"":"s"} moved more than ${Math.round(PRICE_JUMP_WARN_PCT*100)}% since the last export — highlighted below (${jumpRows.slice(0,3).map(r=>esc(r.item)+" "+(r.jumpPct>0?"▲":"▼")+fmtNum(Math.abs(r.jumpPct)*100,0)+"%").join(", ")}${jumpRows.length>3?" …":""}). A check, not a block.</div>` : ""}
     ${(!tooEarly && !movedRows.length) ? `<div class="banner info">ℹ No items had a cost move on ${esc(exportDate||"this date")} (nothing was purchased that day), so there is nothing to export.</div>` : ""}
@@ -4766,11 +4794,11 @@ function renderSellingPrices(){
       </div>
     </div>
     <div class="card">
-      <div class="cardhead"><div><h3>Download record</h3><div class="desc">Every price export download is logged with who and when. Each day below is a <strong>purchase date</strong> — ✓ means the price export for that day's buying has been downloaded (whenever it was downloaded), ✗ means it hasn't, – means nothing was received that day. Last 14 purchase dates (today first):</div></div></div>
+      <div class="cardhead"><div><h3>Download record</h3><div class="desc">Every price export download is logged with who and when. Each day below is a <strong>received date</strong> (deliveries are exported on the day they arrive, whichever day they were ordered) — ✓ means the price export for that day's buying has been downloaded (whenever it was downloaded), ✗ means it hasn't, – means nothing was received that day. Last 14 purchase dates (today first):</div></div></div>
       <div class="cardbody">
         <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;">${dlStrip}</div>
         <div class="tablewrap" style="max-height:260px;overflow-y:auto;"><table>
-          <thead><tr><th>Purchase date</th><th>Downloaded</th><th>Company</th><th>By</th><th class="num">Rows</th></tr></thead>
+          <thead><tr><th>Received date</th><th>Downloaded</th><th>Company</th><th>By</th><th class="num">Rows</th></tr></thead>
           <tbody>${dlRows || `<tr><td colspan="5" class="empty">No downloads recorded yet.</td></tr>`}</tbody>
         </table></div>
       </div>
@@ -5748,7 +5776,7 @@ function wireTabEvents(){
         const wasAlreadyReceived = isReceived(existing);
         existing.receivedQty = Number(qtyVal);
         if(currentUser) existing.receivedBy = currentUser.name;
-        existing.receivedDate = existing.receivedDate || new Date().toISOString().slice(0,10);
+        existing.receivedDate = existing.receivedDate || todaySA(); // South African calendar day (the UTC date is a day behind between 00:00 and 02:00)
         // Shane's ask: a discrepancy needs a clock time to check against the camera system, not just a
         // date — captured once, at the moment delivery is FIRST confirmed (same preserve-on-correction
         // pattern as receivedDate above), so a later price/qty correction never overwrites the time the
@@ -5887,7 +5915,7 @@ function wireTabEvents(){
           }
         }
         if(!qtyVal){ toast("Enter the quantity received"); return; }
-        const today = new Date().toISOString().slice(0,10);
+        const today = todaySA();
         // Deliberately no entry.qty/entry.cost — there was never an order logged for this delivery, so
         // there's nothing to compare the count against. isReceived/purchaseLineChip/receivingDiscrepancy
         // all already treat a missing qty as "no order figure on file" rather than a discrepancy, and the
@@ -6402,7 +6430,7 @@ function wireTabEvents(){
       btn.addEventListener("click", ()=>{
         const part = Number(btn.dataset.costcsvPart);
         if(costCsvTooEarly(sellingCsvDate)){ toast("A day's export can only be downloaded from the next morning"); return; }
-        if(DATA.purchaseCosts.some(p=> p.baseProduct && p.date===sellingCsvDate && needsPriceConfirm(p))){ toast("Can't export — some received deliveries still need a confirmed price (Confirm Prices tab)."); return; }
+        if(DATA.purchaseCosts.some(p=> p.baseProduct && p.receivedDate===sellingCsvDate && needsPriceConfirm(p))){ toast("Can't export — some received deliveries still need a confirmed price (Confirm Prices tab)."); return; }
         const moved = sellingPricesMovedOn(sellingCsvDate);
         if(!moved.length){ toast("No items moved on this date — nothing to export"); return; }
         if(moved.some(r=> r.cost === 0 || r.cost === null)){ toast("Can't export — one or more items would show R0 / no cost. Fix the price first."); return; }
@@ -6418,7 +6446,7 @@ function wireTabEvents(){
         const part = Number(btn.dataset.sellingcsvPart);
         // Same gates as the (disabled) button — see renderSellingPrices — re-checked here so it can't be bypassed.
         if(costCsvTooEarly(sellingCsvDate)){ toast("A day's export can only be downloaded from the next morning"); return; }
-        if(DATA.purchaseCosts.some(p=> p.baseProduct && p.date===sellingCsvDate && needsPriceConfirm(p))){ toast("Can't export — some received deliveries still need a confirmed price (Confirm Prices tab)."); return; }
+        if(DATA.purchaseCosts.some(p=> p.baseProduct && p.receivedDate===sellingCsvDate && needsPriceConfirm(p))){ toast("Can't export — some received deliveries still need a confirmed price (Confirm Prices tab)."); return; }
         const moved = sellingPricesMovedOn(sellingCsvDate);
         if(!moved.length){ toast("No items moved on this date — nothing to export"); return; }
         // A buy logged and received with no price computes to exactly R0, which must never reach Sage as a real cost.
@@ -6445,7 +6473,7 @@ function wireTabEvents(){
         browserDownload("sage_price_export_"+co.short+"_"+sellingCsvDate+(parts>1 ? "_part"+(part+1)+"of"+parts : "")+".csv", csv, "text/csv");
         // Record the download (who/when/for which purchase date) so it can be audited — the server stamps the real time.
         const nowD = new Date();
-        const dlEntry = {id:newId(), exportDate:sellingCsvDate, downloadedBy: currentUser ? currentUser.name : "", rows: slice.length, company: co.key};
+        const dlEntry = {id:newId(), exportDate:sellingCsvDate, downloadedBy: currentUser ? currentUser.name : "", rows: slice.length, company: co.key, sig: partSig_(slice)};
         DATA.costCsvDownloads = DATA.costCsvDownloads || [];
         DATA.costCsvDownloads.push(Object.assign({}, dlEntry, {downloadedDate: nowD.toISOString().slice(0,10), downloadedTime: nowD.toTimeString().slice(0,8)}));
         // Record the prices just sent as the "previous price" for the next export (replaces any record for the same
