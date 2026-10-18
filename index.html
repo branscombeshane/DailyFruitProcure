@@ -530,7 +530,7 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 // day has had the chance to be received and priced first. Today's — or a future — purchase date is never allowed.
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
-const APP_BUILD = "2026-10-18 · Received-date grouping, changed-since-download check";
+const APP_BUILD = "2026-10-18 · Received-date grouping, changed-since-download check, queued download saves";
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
 // often than it's audited in bulk, so opening the tab should land on today's entries, not the full history.
 let purchaseDateFilter = new Date().toISOString().slice(0,10);
@@ -603,7 +603,26 @@ const SAGE_COMPANIES = {
   dfv:    {key:"dfv",    name:"Daily Fruit – Veg", short:"DailyFruitVeg", signature:["FirstRand Group","Capitol"]},
   pyroca: {key:"pyroca", name:"Pyroca 79",         short:"Pyroca79",      signature:["Ucook","Fixed Weekly","Less 10% Weekly","Less 5% Weekly","CSG Food Solutions","FG La Pasta","Reef Catering"]}
 };
-let sageExportCompany = ""; // chosen on Price Export every visit — deliberately never remembered, so it is always a conscious pick
+let dlSaveChain = Promise.resolve(); // Price Export: downloads record themselves one after another (see the download handler)
+let sageExportCompany = ""; // chosen on Price Export every visit — never remembered on its own, so it is always a conscious pick
+// A loaded Items export (and the company it belongs to) survives a page reload for the rest of the day, in this tab only — a reload
+// (e.g. after the "data changed" banner) used to throw it away and send you back to choosing the company and uploading again.
+// It is dropped when the tab closes, the day changes, or Clear / a company switch is used, so a stale export can never linger.
+function sageRememberFile_(){
+  try{
+    if(sagePriceListFile && sageExportCompany) sessionStorage.setItem("dfSageItemsExport", JSON.stringify({day:todaySA(), company:sageExportCompany, file:sagePriceListFile}));
+    else sessionStorage.removeItem("dfSageItemsExport");
+  }catch(e){ /* storage full or blocked — just means no restore after a reload */ }
+}
+(function sageRestoreFile_(){
+  try{
+    const raw = sessionStorage.getItem("dfSageItemsExport"); if(!raw) return;
+    const st = JSON.parse(raw);
+    if(!st || st.day!==todaySA() || !SAGE_COMPANIES[st.company] || !st.file || st.file.company!==st.company || !st.file.byCode || !Array.isArray(st.file.listCols)){ sessionStorage.removeItem("dfSageItemsExport"); return; }
+    if(!sageCompaniesInExport_(st.file.listCols).includes(st.company)){ sessionStorage.removeItem("dfSageItemsExport"); return; }
+    sageExportCompany = st.company; sagePriceListFile = st.file;
+  }catch(e){ /* ignore */ }
+})();
 function sageListBase_(h){ return String(h).replace(/\s-\s(Exclusive|Inclusive)$/i,"").trim().toLowerCase(); }
 // Which company's Items export is this? Returns the keys whose signature price lists appear in it (normally exactly one).
 function sageCompaniesInExport_(listCols){
@@ -6384,6 +6403,7 @@ function wireTabEvents(){
         if(k===sageExportCompany) return;
         sageExportCompany = k;
         sagePriceListFile = null; // an export belongs to one company — never carried across a switch
+        sageRememberFile_();
         render();
       });
     });
@@ -6394,7 +6414,7 @@ function wireTabEvents(){
       reader.onload = ()=>{
         const res = parseSageItemsExport(String(reader.result||""));
         if(res.error){
-          sagePriceListFile = null; render();
+          sagePriceListFile = null; sageRememberFile_(); render();
           const st = document.getElementById("sagePriceListStatus");
           if(st) st.innerHTML = `<div class="banner critical">⛔ ${esc(res.error)}</div>`;
           return;
@@ -6402,7 +6422,7 @@ function wireTabEvents(){
         // The export must belong to the company that was chosen: its price lists must include one of that company's own and none of the other's.
         const who = sageCompaniesInExport_(res.listCols), want = SAGE_COMPANIES[sageExportCompany];
         if(!who.includes(sageExportCompany) || who.some(k=> k!==sageExportCompany)){
-          sagePriceListFile = null; render();
+          sagePriceListFile = null; sageRememberFile_(); render();
           const other = who.find(k=> k!==sageExportCompany);
           const st = document.getElementById("sagePriceListStatus");
           if(st) st.innerHTML = `<div class="banner critical">⛔ <b>Wrong company.</b> ${other ? `This is the <b>${esc(SAGE_COMPANIES[other].name)}</b> Items export (it has the price lists ${esc(SAGE_COMPANIES[other].signature.filter(n=>res.listCols.some(h=>sageListBase_(h)===n.toLowerCase())).join(", "))}), but you chose <b>${esc(want.name)}</b>. Nothing was loaded.` : `Its price lists (${esc(Array.from(new Set(res.listCols.map(h=>h.replace(/\s-\s(Exclusive|Inclusive)$/i,"")))).join(", "))}) don't match ${esc(want.name)}'s. Nothing was loaded.`} Export the Items list from the ${esc(want.name)} company in Sage, or pick the other company above.</div>`;
@@ -6410,6 +6430,7 @@ function wireTabEvents(){
         }
         const n = new Date();
         sagePriceListFile = {name:f.name, company:sageExportCompany, loadedAt:n.toISOString().slice(0,10)+" "+n.toTimeString().slice(0,5), listCols:res.listCols, byCode:res.byCode, rowCount:res.rowCount};
+        sageRememberFile_();
         render();
       };
       reader.onerror = ()=> toast("Could not read that file");
@@ -6425,7 +6446,7 @@ function wireTabEvents(){
       });
     }
     const plClear = document.getElementById("sagePriceListClear");
-    if(plClear) plClear.addEventListener("click", ()=>{ sagePriceListFile = null; render(); });
+    if(plClear) plClear.addEventListener("click", ()=>{ sagePriceListFile = null; sageRememberFile_(); render(); });
     document.querySelectorAll("[data-costcsv-part]").forEach(btn=>{
       btn.addEventListener("click", ()=>{
         const part = Number(btn.dataset.costcsvPart);
@@ -6482,7 +6503,11 @@ function wireTabEvents(){
         const sentItems = new Set(slice.map(r=> r.item));
         DATA.priceQuotes = (DATA.priceQuotes||[]).filter(q=> !(q.date===sellingCsvDate && sentItems.has(q.item)));
         slice.forEach(r=> DATA.priceQuotes.push({item:r.item, price:r.price, cost:r.cost, marginPct:r.marginPct, date:stamp.date, time:stamp.time, setBy:stamp.setBy}));
-        persistPurchaseAction({action:"logCostCsvDownload", entry: dlEntry}, "Download started — recorded").then(()=> persist("Prices recorded as sent", ["priceQuotes"]));
+        // One download at a time through the save queue. Clicking part 1 and part 2 in quick succession used to fire their saves
+        // side by side; the server's replies could come back out of order, this tab ended up holding an older data version than
+        // the server, and the next poll then wrongly said "someone else saved". Queued, each save finishes (and absorbs its own
+        // version) before the next one starts.
+        dlSaveChain = dlSaveChain.then(()=> persistPurchaseAction({action:"logCostCsvDownload", entry: dlEntry}, "Download started — recorded")).then(()=> persist("Prices recorded as sent", ["priceQuotes"])).catch(()=>{});
       });
     });
   }
