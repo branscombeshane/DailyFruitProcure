@@ -530,7 +530,7 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 // day has had the chance to be received and priced first. Today's — or a future — purchase date is never allowed.
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
-const APP_BUILD = "2026-10-18 · Received-date grouping, changed-since-download check, queued download saves";
+const APP_BUILD = "2026-10-18 · Received-date grouping, changed-since-download check, queued download saves, lighter saves";
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
 // often than it's audited in bulk, so opening the tab should land on today's entries, not the full history.
 let purchaseDateFilter = new Date().toISOString().slice(0,10);
@@ -1799,7 +1799,17 @@ async function persist(successMsg, changedKeys){
   setSyncBusy(true);
   let ok = false;
   try{
-    const payload = changedKeys ? Object.assign({}, DATA, {changedKeys}) : DATA;
+    // A save that names its changed keys only needs to SEND those keys (the backend reads nothing else — see writeChangedData_ in
+    // Code.gs), plus the version it was loaded at. Sending the whole of DATA (every purchase line, the sales history, price log...)
+    // for a one-line edit is what made small saves like adding a Product Mix line take so long. The three settings blocks are
+    // written together by the backend, so they travel together.
+    let payload = DATA;
+    if(changedKeys){
+      payload = {changedKeys, syncVersion: DATA.syncVersion};
+      const keys = changedKeys.slice();
+      if(keys.some(k=> k==="procurementPlan" || k==="shoppingList" || k==="pricingPlan")) ["procurementPlan","shoppingList","pricingPlan"].forEach(k=>{ if(!keys.includes(k)) keys.push(k); });
+      keys.forEach(k=>{ payload[k] = DATA[k]; });
+    }
     // Content-Type: text/plain keeps this a CORS "simple request" — Apps Script Web Apps don't
     // handle the OPTIONS preflight a real "application/json" content-type would trigger. The
     // backend parses the body as JSON regardless of the header (see Code.gs's doPost).
@@ -6189,6 +6199,7 @@ function wireTabEvents(){
         percent: pctRaw ? Number(pctRaw)/100 : null,
         fixedQty: fixedRaw ? Number(fixedRaw) : null,
       });
+      render(); // show the new line straight away; the save runs behind the "saving" overlay
       persist("Product mix line added", ["recipes"]);
     });
     document.querySelectorAll("[data-del-recipe]").forEach(b=>{
