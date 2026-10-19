@@ -145,6 +145,10 @@
   .rowinput{width:100%; min-width:90px; padding:5px 7px; font-size:12.5px; border-radius:5px; border:1px solid var(--line); background:var(--surface);}
   .rowinput:focus-visible{outline:2px solid var(--accent);}
   .rowinput.bad{border-color:var(--critical); background:var(--critical-soft);}
+  .accgrid{display:flex; flex-wrap:wrap; gap:14px 28px;}
+  .accgroup{min-width:200px;}
+  .accgroup-h{font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin-bottom:3px;}
+  label.acc{display:flex; align-items:center; gap:6px; font-size:13px; padding:2px 0; cursor:pointer;}
   .rowinput:disabled{background:var(--surface-2); color:var(--muted); cursor:not-allowed;}
 
   /* Shane's ask: Receiving's price inputs should read as Rand values, not bare numbers. The "R" is a
@@ -531,7 +535,7 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 // day has had the chance to be received and priced first. Today's — or a future — purchase date is never allowed.
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
-const APP_BUILD = "2026-10-18 · Received-date grouping, changed-since-download check, queued download saves, lighter saves, stock take completeness checks";
+const APP_BUILD = "2026-10-18 · Received-date grouping, changed-since-download check, queued download saves, lighter saves, stock take completeness checks, tick-box page access";
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
 // often than it's audited in bulk, so opening the tab should land on today's entries, not the full history.
 let purchaseDateFilter = new Date().toISOString().slice(0,10);
@@ -810,14 +814,47 @@ function hasUnsavedInlineEdit(){
 function roleCanAccessTab(role, tabId){
   return (ROLE_TABS[role]||[]).includes(tabId);
 }
+// ---- Per-user access (tick boxes on the Users page) ----
+// Each user carries their own list of pages (and a few "functions") in their `tabs` field. The role is only the STARTING template: a user
+// with no list saved yet (every user before this feature) simply gets their role's usual pages, so nothing changes until someone ticks boxes.
+// Stored as comma-separated ids; "-" means "ticked nothing"; blank means "use the role's usual pages". Owners always see every page.
+const ACCESS_FUNCS = [
+  {id:"signoff", label:"Does the daily procurement sign-off", help:"appears in the Dashboard's Daily sign-off and must sign off each day"},
+];
+const ROLE_FUNCS = {procurement:["signoff"]};
+function roleDefaultAccess_(role){ return (ROLE_TABS[role]||[]).concat(ROLE_FUNCS[role]||[]); }
+function accessListFor_(rec){
+  if(!rec) return [];
+  const allTabs = TABS.map(t=>t.id);
+  const raw = (rec.tabs===undefined || rec.tabs===null) ? "" : String(rec.tabs).trim();
+  const ids = raw && raw!=="-" ? raw.split(",").map(x=>x.trim()).filter(Boolean) : [];
+  if(rec.role==="owner") return allTabs.concat(ids.filter(id=> ACCESS_FUNCS.some(f=>f.id===id)));
+  if(raw==="-") return [];
+  if(!raw) return roleDefaultAccess_(rec.role);
+  return ids;
+}
+function userRecFor_(user){
+  if(!user) return null;
+  return (DATA.users||[]).find(u=> u.name===user.name) || user; // the live record (so edits made on the Users page apply at once); falls back to the session copy until data has loaded
+}
+function userCanAccessTab(user, tabId){ return accessListFor_(userRecFor_(user)).includes(tabId); }
+function userHasFn_(user, fnId){ return accessListFor_(userRecFor_(user)).includes(fnId); }
+function userTabCount_(user){ return accessListFor_(userRecFor_(user)).filter(id=> TABS.some(t=>t.id===id)).length; }
+// what gets stored for a ticked set: blank when it is exactly the role's usual set (stays "role default"), "-" for nothing ticked
+function encodeAccess_(role, ticked){
+  if(role==="owner") return ticked.filter(id=> ACCESS_FUNCS.some(f=>f.id===id)).join(",");
+  const def = roleDefaultAccess_(role);
+  if(ticked.length===def.length && ticked.every(id=> def.includes(id))) return "";
+  return ticked.length ? ticked.join(",") : "-";
+}
 function canManagePurchases(){
-  return !!currentUser && (currentUser.role==="owner" || currentUser.role==="procurement");
+  return !!currentUser && userCanAccessTab(currentUser, "shoppinglist");
 }
 // Confirming a delivery used to be a different capability from logging one (Owner/Receiving only,
 // Procurement read-only) — Shane asked to let Procurement receive too, since they're often the ones
 // on hand when a delivery actually arrives. See renderReceiving().
 function canManageReceiving(){
-  return !!currentUser && (currentUser.role==="owner" || currentUser.role==="receiving" || currentUser.role==="procurement" || currentUser.role==="stocktaker");
+  return !!currentUser && userCanAccessTab(currentUser, "receiving");
 }
 // Deleting a confirmed "Recently received" line outright (as opposed to correcting its qty/cost, which
 // any receiving-capable role can already do) is a step further than a routine count correction — Shane's
@@ -1930,7 +1967,7 @@ function renderNav(){
   if(!currentUser){ nav.innerHTML = ""; }
   else {
     nav.innerHTML = NAV.map(section=>{
-      const items = section.items.filter(t=> roleCanAccessTab(currentUser.role, t.id));
+      const items = section.items.filter(t=> userCanAccessTab(currentUser, t.id));
       if(!items.length) return "";
       const itemsHtml = items.map(t=>
         `<button class="navbtn ${t.id===currentTab?'active':''}" data-tab="${t.id}"><span class="dot"></span>${esc(t.label)}</button>`
@@ -2001,7 +2038,7 @@ function wireLoginEvents(){
     // browser had open last time — that's the whole point of it being the landing page. Stock Taker and
     // Receiving don't have a "home" tab at all (see ROLE_TABS), so they're left on whatever they had
     // open before, same as always.
-    if(roleCanAccessTab(u.role, "home")) setCurrentTab("home");
+    if(userCanAccessTab(u, "home")) setCurrentTab("home");
     loginNameInput = "";
     loginError = "";
     render();
@@ -2016,7 +2053,7 @@ function wireLoginEvents(){
 function render(){
   // Computed up-front (not just inside the logged-in branch below) so the sync-overlay offset toggle
   // near the end of this function can always run, whichever branch actually executes.
-  const kiosk = !!currentUser && currentUser.role === "receiving";
+  const kiosk = !!currentUser && currentUser.role === "receiving" && userTabCount_(currentUser) === 1 && userCanAccessTab(currentUser, "receiving");
   const syncOverlayEl = document.getElementById("syncOverlay");
   // The kiosk top bar's own right-hand content (name + Logout) sits in the same top-right corner the
   // floating sync pill normally uses — nudge the pill down below the bar just for that one role so the
@@ -2064,14 +2101,16 @@ function render(){
     // sidebar footer, moves into the kiosk top bar below since the sidebar is gone. (`kiosk` itself is
     // computed once, up top of render() — reused here rather than redeclared.)
     if(sidebar) sidebar.style.display = kiosk ? "none" : "";
-    if(!roleCanAccessTab(currentUser.role, currentTab)){
-      const firstAllowed = TABS.find(t=> roleCanAccessTab(currentUser.role, t.id));
+    if(!userCanAccessTab(currentUser, currentTab)){
+      const firstAllowed = TABS.find(t=> userCanAccessTab(currentUser, t.id));
       if(firstAllowed) setCurrentTab(firstAllowed.id);
     }
     renderNav();
     const main = document.getElementById("main");
     let pageHtml = "";
-    if(currentTab==="home") pageHtml = renderHomeDashboard();
+    const noPages = userTabCount_(currentUser) === 0;
+    if(noPages) pageHtml = `<div class="card"><div class="cardbody"><h3>No pages switched on for you</h3><p class="helptext">Your account is set up but has no pages ticked yet. Ask the owner to tick the pages you need on the Users page.</p></div></div>`;
+    else if(currentTab==="home") pageHtml = renderHomeDashboard();
     else if(currentTab==="shoppinglist") pageHtml = renderShoppingList();
     else if(currentTab==="quickbuy") pageHtml = renderQuickBuy();
     else if(currentTab==="shoppingarchive") pageHtml = renderShoppingArchive();
@@ -2095,7 +2134,7 @@ function render(){
     // save) takes priority over staleDataAvailable (just a heads-up, nothing lost yet) when somehow both
     // are true at once.
     main.innerHTML = (kiosk ? renderKioskTopBar() : "") + (saveConflict ? renderSaveConflictBanner(saveConflict) : (staleDataAvailable ? renderStaleDataBanner() : "")) + pageHtml;
-    wireTabEvents();
+    if(!noPages) wireTabEvents();
     const reloadBtn = document.getElementById("saveConflictReload");
     if(reloadBtn) reloadBtn.addEventListener("click", ()=> location.reload());
     const staleReloadBtn = document.getElementById("staleDataReload");
@@ -2903,7 +2942,7 @@ function renderShoppingArchive(){
     // shoppingArchiveDate directly rather than needing any backend/snapshot changes. Shane's ask: the
     // Archive should show WHO signed off and WHEN for a given day, same "✓ Signed off at HH:MM" / "Not
     // signed off" wording as the live Daily sign-off card on the Dashboard (renderHomeDashboard).
-    const archiveProcurementUsers = (DATA.users||[]).filter(u=>u.role==="procurement" && !isUserDisabled_(u));
+    const archiveProcurementUsers = (DATA.users||[]).filter(u=> userHasFn_(u,"signoff") && !isUserDisabled_(u));
     const archiveDateSignoffs = (DATA.procurementSignoffs||[]).filter(s=> s.date===shoppingArchiveDate);
     const signoffHtml = archiveProcurementUsers.length ? `
     <div class="card">
@@ -3263,7 +3302,7 @@ function renderHomeDashboard(){
   const today = new Date().toISOString().slice(0,10);
   // Calculated Holdings is Owner-only (see ROLE_TABS) — Procurement still gets told a number is flagged
   // there since it affects what they should be buying, just without a dead link they can't follow.
-  const canSeeHoldings = roleCanAccessTab(currentUser.role, "dashboard");
+  const canSeeHoldings = userCanAccessTab(currentUser, "dashboard");
 
   // ---- Shopping List: what's still outstanding today ----
   const hiddenCats = hiddenCategorySet();
@@ -3316,11 +3355,11 @@ function renderHomeDashboard(){
   // recomputing "what's outstanding" a second way) as the single gate, so this can never show "all
   // clear" while "Needs buying today" still lists something, or vice versa. Resets every new day since
   // it's keyed on today's date, same convention as archiveSalesSnapshot's DATA.salesHistory.
-  const procurementUsers = (DATA.users||[]).filter(u=>u.role==="procurement" && !isUserDisabled_(u));
+  const procurementUsers = (DATA.users||[]).filter(u=> userHasFn_(u,"signoff") && !isUserDisabled_(u));
   const todaysSignoffs = (DATA.procurementSignoffs||[]).filter(s=> s.date===today);
   const signoffRows = procurementUsers.map(u=> ({name:u.name, isSelf: !!(currentUser && currentUser.name===u.name), entry: todaysSignoffs.find(s=> s.user===u.name) || null}));
   const mySignoff = currentUser ? todaysSignoffs.find(s=> s.user===currentUser.name) : null;
-  const canSignOff = !!(currentUser && currentUser.role==="procurement" && !mySignoff);
+  const canSignOff = !!(currentUser && userHasFn_(currentUser,"signoff") && !mySignoff);
   const exportDue = costCsvDueDate();
   const exportStatus = priceExportStatus_(exportDue);
   const stockCover = stockCountCoverage_();
@@ -5162,6 +5201,18 @@ function renderStockVariance(){
 }
 
 // ---------- Users ----------
+let usersAccessOpen = new Set(); // names of users whose "Pages" tick-list is expanded on the Users page
+function accessGridHtml_(ticked, role, attrs){
+  const isOwnerRole = role==="owner";
+  const box = (id,label,help)=>{
+    const on = isOwnerRole && !ACCESS_FUNCS.some(f=>f.id===id) ? true : ticked.includes(id);
+    const dis = isOwnerRole && !ACCESS_FUNCS.some(f=>f.id===id);
+    return `<label class="acc"><input type="checkbox" data-acc="${esc(id)}" ${attrs} ${on?"checked":""} ${dis?"disabled":""} data-pristine="${on?"true":"false"}"> ${esc(label)}${help?` <span class="helptext">— ${esc(help)}</span>`:""}</label>`;
+  };
+  return `<div class="accgrid">` + NAV.map(sec=>`<div class="accgroup"><div class="accgroup-h">${esc(sec.group||"")}</div>${sec.items.map(t=> box(t.id, t.label + (t.id==="users" ? " (can change everyone's access)" : ""))).join("")}</div>`).join("")
+    + `<div class="accgroup"><div class="accgroup-h">Functions</div>${ACCESS_FUNCS.map(f=> box(f.id, f.label, f.help)).join("")}</div></div>`
+    + (isOwnerRole ? `<div class="helptext" style="margin-top:6px;">Owners always see every page.</div>` : "");
+}
 function renderUsers(){
   const users = DATA.users || [];
   const roleLabel = {owner:"Owner", procurement:"Procurement", stocktaker:"Stock Taker", receiving:"Receiving", market:"Market"};
@@ -5176,10 +5227,15 @@ function renderUsers(){
       <td>${esc(u.name)}${isSelf ? ` <span class="helptext">(you)</span>` : ""}${off ? " " + chip("disabled","critical") : ""}</td>
       <td>${(()=>{ const li = lastLoginInfo_(u.lastLogin); if(!li) return `<span class="helptext">No login recorded yet</span>`; return esc(li.text) + (li.rel ? ` <span class="helptext">(${esc(li.rel)})</span>` : "") + (li.days!==null && li.days>=30 ? " " + chip("inactive","warn") : ""); })()}</td>
       <td><select class="rowinput" data-idx="${i}" data-field="role" data-pristine="${esc(u.role)}">${roleOptionsFor(u.role)}</select></td>
+      <td><button class="btn small" data-acc-toggle="${i}" title="Tick which pages this person can see">Pages (${userTabCount_(u)}) ${usersAccessOpen.has(u.name)?"▾":"▸"}</button></td>
       <td><input class="rowinput num" data-idx="${i}" data-field="pin" value="${esc(u.pin)}" data-pristine="${esc(u.pin)}" style="max-width:110px;"></td>
       <td>${isSelf ? `<span class="helptext">—</span>` : `<button class="btn small" data-toggle-user="${i}" title="${off?"Let this user log in again":"Stop this user logging in (can be switched back on)"}">${off?"Enable":"Disable"}</button>`}</td>
       <td><button class="delbtn" data-del-user="${i}" title="Remove user">✕</button></td>
-    </tr>`;
+    </tr>
+    <tr data-acc-row="${i}" style="${usersAccessOpen.has(u.name)?"":"display:none;"}"><td colspan="7" style="background:var(--surface-2);">
+      <div style="font-weight:600;margin-bottom:6px;">Pages ${esc(u.name)} can see</div>
+      ${accessGridHtml_(accessListFor_(u), u.role, `data-acc-user="${i}"`)}
+    </td></tr>`;
   }).join("");
 
   return `
@@ -5192,9 +5248,11 @@ function renderUsers(){
         <div class="formgrid">
           <div class="field"><label>Name</label><input type="text" id="newUserName" placeholder="e.g. John" data-pristine=""></div>
           <div class="field"><label>PIN</label><input type="text" inputmode="numeric" id="newUserPin" placeholder="e.g. 1234" data-pristine=""></div>
-          <div class="field"><label>Role</label><select id="newUserRole" data-pristine="procurement">${roleOptionsFor("procurement")}</select></div>
+          <div class="field"><label>Role (starting point)</label><select id="newUserRole" data-pristine="procurement">${roleOptionsFor("procurement")}</select></div>
           <div><button class="btn" id="addUserBtn">Add user</button></div>
         </div>
+        <div style="margin-top:12px;"><div style="font-weight:600;margin-bottom:6px;">Pages they can see <span class="helptext">— picking a role ticks its usual pages; change them as needed</span></div>
+        <div id="newUserAccess">${accessGridHtml_(roleDefaultAccess_("procurement"), "procurement", `data-acc-new="1"`)}</div></div>
       </div>
     </div>
     <div class="card">
@@ -5204,19 +5262,17 @@ function renderUsers(){
       </div>
       <div class="cardbody" style="padding:0;">
         <div class="tablewrap" style="border:none;border-radius:0;"><table>
-          <thead><tr><th>Name</th><th>Last logged in</th><th>Role</th><th class="num">PIN</th><th>Access</th><th></th></tr></thead>
-          <tbody>${rows || `<tr><td colspan="6" class="empty">No users yet.</td></tr>`}</tbody>
+          <thead><tr><th>Name</th><th>Last logged in</th><th>Role</th><th>Pages</th><th class="num">PIN</th><th>Access</th><th></th></tr></thead>
+          <tbody>${rows || `<tr><td colspan="7" class="empty">No users yet.</td></tr>`}</tbody>
         </table></div>
       </div>
     </div>
     <div class="card">
-      <div class="cardhead"><div><h3>What each role can access</h3></div></div>
+      <div class="cardhead"><div><h3>How access works</h3></div></div>
       <div class="cardbody helptext">
-        <strong>Owner</strong> — everything, including Users. Lands on the Dashboard when logging in.<br>
-        <strong>Procurement</strong> — Dashboard, Shopping List, Quick Buy, Shopping List Archive, Purchase Costs, Price Export, Input Stock Levels, and Receiving (can confirm deliveries too, not just see what's outstanding). Lands on the Dashboard when logging in.<br>
-        <strong>Stock Taker</strong> — Input Stock Levels, and the same Receiving access as the Receiving role (can confirm deliveries, log stock with no order on file, correct received figures) — but, unlike Receiving, can't mark a delivery "Not received". No Shopping List, no Dashboard.<br>
-        <strong>Receiving</strong> — only the Receiving tab, to log stock as it's counted in, confirm deliveries, and mark a delivery "Not received" (e.g. rejecting stock that arrives in bad condition). For staff whose only job is receiving deliveries (e.g. a night-shift hand) — they don't need or see anything else. No Dashboard.<br>
-        <strong>Market</strong> — only Quick Buy, to log what's bought at the market. For staff whose only job is buying — they don't need or see anything else. No Dashboard.
+        Each person sees only the pages ticked for them (click <strong>Pages</strong> on their row). The <strong>role</strong> is just a starting point: choosing one ticks its usual pages, which you can then change. Owners always see every page.<br>
+        The role also decides two things the ticks don't: a <strong>Receiving</strong> person with only the Receiving page ticked gets the full-screen tablet layout, and a few actions stay <strong>owner-only</strong> (deleting a received delivery, resetting the pallet tally).<br>
+        People who haven't been given their own ticks yet keep the usual pages for their role, so nothing changes until you edit them. Remember to press <strong>Save changes</strong>. <em>This controls what people see in the app; it is a simple gate, not encrypted security.</em>
       </div>
     </div>`;
 }
@@ -5357,7 +5413,7 @@ function wireTabEvents(){
     });
     const signoffBtn = document.getElementById("signoffBtn");
     if(signoffBtn) signoffBtn.addEventListener("click", async ()=>{
-      if(!currentUser || currentUser.role!=="procurement") return; // defensive — button only ever renders for a procurement user without today's sign-off yet
+      if(!currentUser || !userHasFn_(currentUser,"signoff")) return; // defensive — button only ever renders for a procurement user without today's sign-off yet
       const today = new Date().toISOString().slice(0,10);
       if(!DATA.procurementSignoffs) DATA.procurementSignoffs = [];
       if(DATA.procurementSignoffs.some(s=> s.date===today && s.user===currentUser.name)){ render(); return; }
@@ -6693,21 +6749,76 @@ function wireTabEvents(){
         if(changed && currentTab==="users") render();
       }).catch(()=>{});
     }
+    // ---- tick boxes: show/hide a person's list, role = template, live page count ----
+    const ticked_ = (sel)=> Array.from(document.querySelectorAll(sel)).filter(c=> c.checked).map(c=> c.dataset.acc);
+    const applyTemplate_ = (boxes, role)=>{
+      const def = roleDefaultAccess_(role);
+      boxes.forEach(c=>{
+        const isFn = ACCESS_FUNCS.some(f=>f.id===c.dataset.acc);
+        if(role==="owner" && !isFn){ c.checked = true; c.disabled = true; }
+        else { c.disabled = false; c.checked = def.includes(c.dataset.acc); }
+      });
+    };
+    const refreshCount_ = (idx)=>{
+      const btn = document.querySelector(`[data-acc-toggle="${idx}"]`); if(!btn) return;
+      const n = Array.from(document.querySelectorAll(`[data-acc-user="${idx}"]`)).filter(c=> c.checked && TABS.some(t=>t.id===c.dataset.acc)).length;
+      const open = btn.textContent.includes("▾");
+      btn.textContent = `Pages (${n}) ${open?"▾":"▸"}`;
+    };
+    document.querySelectorAll("[data-acc-toggle]").forEach(b=> b.addEventListener("click", ()=>{
+      const i = b.dataset.accToggle, u = (DATA.users||[])[Number(i)]; if(!u) return;
+      const row = document.querySelector(`[data-acc-row="${i}"]`); if(!row) return;
+      const show = row.style.display==="none";
+      row.style.display = show ? "" : "none";
+      if(show) usersAccessOpen.add(u.name); else usersAccessOpen.delete(u.name);
+      b.textContent = b.textContent.replace(/[▾▸]/, show ? "▾" : "▸");
+    }));
+    document.querySelectorAll("[data-acc-user]").forEach(c=> c.addEventListener("change", ()=> refreshCount_(c.dataset.accUser)));
+    document.querySelectorAll('select[data-field="role"]').forEach(sel=> sel.addEventListener("change", ()=>{
+      const i = sel.dataset.idx;
+      applyTemplate_(Array.from(document.querySelectorAll(`[data-acc-user="${i}"]`)), sel.value);
+      refreshCount_(i);
+      const row = document.querySelector(`[data-acc-row="${i}"]`);
+      if(row && row.style.display==="none"){ row.style.display = ""; const u=(DATA.users||[])[Number(i)]; if(u) usersAccessOpen.add(u.name); const b=document.querySelector(`[data-acc-toggle="${i}"]`); if(b) b.textContent = b.textContent.replace(/[▾▸]/,"▾"); }
+      toast("Pages set to the " + (({owner:"Owner",procurement:"Procurement",stocktaker:"Stock Taker",receiving:"Receiving",market:"Market"})[sel.value]||sel.value) + " defaults — adjust if needed, then Save changes");
+    }));
+    const newRoleSel = document.getElementById("newUserRole");
+    if(newRoleSel) newRoleSel.addEventListener("change", ()=> applyTemplate_(Array.from(document.querySelectorAll("[data-acc-new]")), newRoleSel.value));
     document.getElementById("addUserBtn").addEventListener("click", ()=>{
       const name = document.getElementById("newUserName").value.trim();
       const pin = document.getElementById("newUserPin").value.trim();
       const role = document.getElementById("newUserRole").value;
       if(!name || !pin){ toast("Name and PIN are both required"); return; }
       if((DATA.users||[]).some(u=>u.name.toLowerCase()===name.toLowerCase())){ toast("A user with that name already exists"); return; }
+      const picked = ticked_("[data-acc-new]");
+      if(role!=="owner" && !picked.some(id=> TABS.some(t=>t.id===id))){ toast("Tick at least one page for this person"); return; }
       if(!DATA.users) DATA.users = [];
-      DATA.users.push({name, pin, role});
+      const rec = {name, pin, role};
+      const enc = encodeAccess_(role, picked);
+      if(enc) rec.tabs = enc;
+      DATA.users.push(rec);
       persist("Added " + name, ["users"]);
     });
     document.getElementById("saveUsersBtn").addEventListener("click", ()=>{
+      // never let someone save themselves out of the app: a non-owner must keep at least one page ticked for their own account
+      if(currentUser){
+        const myIdx = (DATA.users||[]).findIndex(u=> u.name===currentUser.name);
+        const myRole = myIdx>=0 ? (document.querySelector(`select[data-idx="${myIdx}"][data-field="role"]`)||{}).value : "";
+        const myBoxes = myIdx>=0 ? Array.from(document.querySelectorAll(`[data-acc-user="${myIdx}"]`)) : [];
+        if(myRole && myRole!=="owner" && myBoxes.length && !myBoxes.some(c=> c.checked && TABS.some(t=>t.id===c.dataset.acc))){ toast("You can't untick every page for your own account"); return; }
+      }
       document.querySelectorAll("#main [data-idx]").forEach(inp=>{
         const idx = Number(inp.dataset.idx);
         const field = inp.dataset.field;
         if(DATA.users[idx]) DATA.users[idx][field] = inp.value;
+      });
+      // the ticked pages for every user (blank = just the role's usual pages)
+      DATA.users.forEach((u,idx)=>{
+        const boxes = Array.from(document.querySelectorAll(`[data-acc-user="${idx}"]`));
+        if(!boxes.length) return;
+        const picked = boxes.filter(c=> c.checked).map(c=> c.dataset.acc);
+        const enc = encodeAccess_(u.role, picked);
+        if(enc) u.tabs = enc; else delete u.tabs;
       });
       // keep this session's own access in sync if its role/pin was just edited
       if(currentUser){
