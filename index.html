@@ -144,6 +144,7 @@
   td.num, th.num{text-align:right; font-family:"IBM Plex Mono",monospace;}
   .rowinput{width:100%; min-width:90px; padding:5px 7px; font-size:12.5px; border-radius:5px; border:1px solid var(--line); background:var(--surface);}
   .rowinput:focus-visible{outline:2px solid var(--accent);}
+  .rowinput.bad{border-color:var(--critical); background:var(--critical-soft);}
   .rowinput:disabled{background:var(--surface-2); color:var(--muted); cursor:not-allowed;}
 
   /* Shane's ask: Receiving's price inputs should read as Rand values, not bare numbers. The "R" is a
@@ -530,7 +531,7 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 // day has had the chance to be received and priced first. Today's — or a future — purchase date is never allowed.
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
-const APP_BUILD = "2026-10-18 · Received-date grouping, changed-since-download check, queued download saves, lighter saves";
+const APP_BUILD = "2026-10-18 · Received-date grouping, changed-since-download check, queued download saves, lighter saves, stock take completeness checks";
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
 // often than it's audited in bulk, so opening the tab should land on today's entries, not the full history.
 let purchaseDateFilter = new Date().toISOString().slice(0,10);
@@ -539,7 +540,13 @@ let priceHistorySelectedProduct = null; // which base product's chart is showing
 // them), "up" (Big increases only), or "down" (Big drops only) — filters the Recent alerts table below.
 let priceHistoryAlertFilter = "";
 let stockCategoryFilter = "";
-let stockTakeDate = new Date().toISOString().slice(0,10);
+// A stock take belongs to the EVENING it was started: a count typed in the small hours (night shift) still counts for the evening
+// before, because that is the count the next morning's shopping list is built from. Before 06:00 South African time, default to yesterday.
+function stockTakeDefaultDate_(){
+  const hour = Number(new Intl.DateTimeFormat("en-GB",{timeZone:"Africa/Johannesburg",hour:"2-digit",hour12:false}).format(new Date()))%24;
+  return hour < 6 ? yesterdaySA() : todaySA();
+}
+let stockTakeDate = stockTakeDefaultDate_();
 let stockArchiveDateFilter = "";
 let shoppingCategoryFilter = "";
 let shoppingStatusFilter = "";
@@ -2218,6 +2225,27 @@ function renderKioskTopBar(){
 }
 
 // ---------- shared bits ----------
+// Has every base product been counted in last night's stock take (or later)? Procurement buys from these counts, so one item the
+// night shift skipped means a wrong buy for it. "Last night" = yesterday's date: a count belongs to the evening it was taken, and
+// feeds the next morning's list. Returns the items that have no count that recent, with their last known count for reference.
+function stockCountCoverage_(){
+  const none = {complete:true, since:"", total:0, counted:0, missing:[]};
+  if(!DATA.stockTakes.length) return none; // nothing has ever been counted (new install) — nothing to compare against
+  const since = yesterdaySA();
+  const latest = latestStockTakeMap();
+  const missing = []; let total = 0;
+  distinctBaseProducts().forEach(bp=>{
+    total++;
+    const l = latest[bp];
+    if(!(l && l.date >= since)) missing.push({baseProduct:bp, category:categoryFor(bp)||"Uncategorized", lastDate:l?l.date:"", lastAmount:l?l.amount:null});
+  });
+  return {complete:!missing.length, since, total, counted:total-missing.length, missing};
+}
+function stockCountTile_(){
+  const c = stockCountCoverage_();
+  if(!c.since) return {label:"Stock count", value:"None yet", color:"var(--muted)"};
+  return {label:"Stock count · "+shortDayLabel(c.since), value: c.complete ? "✓ complete" : (c.missing.length+" not counted"), color: c.complete ? "var(--good)" : "var(--critical)"};
+}
 function distinctBaseProducts(){
   const set = new Set();
   for(const it of DATA.itemSetup) if(it.baseProduct) set.add(it.baseProduct);
@@ -2589,6 +2617,7 @@ function renderShoppingList(){
     <div class="pagehead">
       <div><h2>Shopping List</h2><p>Compares your most recent stock take against your Calculated Holdings target for every base product, so you can see at a glance what's critically low, what's worth buying, and what's overstocked.${isPeakDay(new Date().toISOString().slice(0,10)) ? ` <strong>Peak stock-up day:</strong> Critical is flagged at or below ${round2(criticalPctFor(new Date().toISOString().slice(0,10))*100)}% of target today (usually ${round2((Number(DATA.shoppingList.criticalPct)||0.25)*100)}%).` : ""}</p></div>
     </div>
+    ${(()=>{ const sc = stockCountCoverage_(); return sc.complete ? "" : `<div class="banner critical">⚠ Last night's stock take (${esc(shortDayLabel(sc.since))}) is incomplete — ${sc.missing.length} of ${sc.total} items were not counted: ${sc.missing.slice(0,10).map(m=>esc(m.baseProduct)).join(", ")}${sc.missing.length>10?" and "+(sc.missing.length-10)+" more":""}. They show an OLDER count, so their status and suggested buy may be wrong. <button class="btn small" data-goto-tab="stocktake">Open Stock Take →</button></div>`; })()}
     ${noStockTakesYet ? `<div class="banner warn">No stock takes recorded yet — log today's counts in Stock Take, then this list will show what needs buying.</div>` : ""}
     <div class="cardrow">
       ${statBlock("Critical","Critical",counts["Critical"],"var(--critical)")}
@@ -3259,6 +3288,7 @@ function renderHomeDashboard(){
   // ---- Costing step: received lines still needing a confirmed price, and whether today's cost CSV has been downloaded ----
   const awaitingPrice = awaitingPriceLines();
   const costTile = costCsvStatTile();
+  const stockTile = stockCountTile_();
 
   // ---- Over-suggested buys: orders logged more than 20% over the suggested buy (see
   // OVER_SUGGESTED_BUY_MULTIPLIER) — the whole point of flagging these is that Owner and Procurement see
@@ -3293,7 +3323,8 @@ function renderHomeDashboard(){
   const canSignOff = !!(currentUser && currentUser.role==="procurement" && !mySignoff);
   const exportDue = costCsvDueDate();
   const exportStatus = priceExportStatus_(exportDue);
-  const signoffBlocked = needsActionRows.length > 0 || !exportStatus.complete;
+  const stockCover = stockCountCoverage_();
+  const signoffBlocked = needsActionRows.length > 0 || !exportStatus.complete || !stockCover.complete;
   const outstandingNames = needsActionRows.map(r=>r.baseProduct);
   const shownOutstanding = outstandingNames.slice(0,8).map(esc).join(", ");
   const moreOutstanding = outstandingNames.length - 8;
@@ -3374,6 +3405,7 @@ function renderHomeDashboard(){
     <div class="cardrow">
       ${navStat("Prices awaiting confirmation", awaitingPrice.length, awaitingPrice.length?'var(--warn)':'var(--good)', "confirmprices")}
       ${navStat(costTile.label, costTile.value, costTile.color, "sellingprices")}
+      ${navStat(stockTile.label, stockTile.value, stockTile.color, "stocktake")}
     </div>
     <div class="cardrow">
       ${navStat("Receiving discrepancies ("+RECEIVING_RECENT_DAYS+"d)", discrepancyRows.length, discrepancyRows.length?'var(--warn)':'var(--good)', "receiving")}
@@ -3419,8 +3451,9 @@ function renderHomeDashboard(){
         <div style="margin-top:12px;">
           ${signoffBlocked
             ? `${needsActionRows.length ? `<div class="helptext" style="margin-bottom:8px;">Still need action today before you can sign off: ${shownOutstanding}${moreOutstanding>0?` and ${moreOutstanding} more`:""}. ${goto("shoppinglist","Open Shopping List →")}</div>` : ""}
+               ${!stockCover.complete ? `<div class="helptext" style="margin-bottom:8px;">Last night's stock take (${esc(shortDayLabel(stockCover.since))}) is incomplete — ${stockCover.missing.length} item${stockCover.missing.length===1?"":"s"} not counted: ${stockCover.missing.slice(0,8).map(m=>esc(m.baseProduct)).join(", ")}${stockCover.missing.length>8?" and "+(stockCover.missing.length-8)+" more":""}. ${goto("stocktake","Open Stock Take →")}</div>` : ""}
                ${!exportStatus.complete ? `<div class="helptext" style="margin-bottom:8px;">The Sage price export for ${esc(shortDayLabel(exportDue))} hasn't been completed (${exportStatus.companies.map(c=> esc(c.name)+": "+(c.complete?"done":(c.stale?"prices changed since it was downloaded — download again":(c.got?c.got+" of "+c.parts+" parts":"not downloaded")))).join(" · ")}). ${goto("sellingprices","Open Price Export →")}</div>` : ""}
-               <button class="btn primary" id="signoffBtn" disabled title="${needsActionRows.length ? "Clear every Critical/Consider Buying item first" : "Complete the Sage price export first"}">Sign off for today</button>`
+               <button class="btn primary" id="signoffBtn" disabled title="${needsActionRows.length ? "Clear every Critical/Consider Buying item first" : (!stockCover.complete ? "Last night's stock take is incomplete" : "Complete the Sage price export first")}">Sign off for today</button>`
             : `<button class="btn primary" id="signoffBtn">Sign off for today</button>`}
         </div>` : (mySignoff ? `<div class="helptext" style="margin-top:12px;">You signed off for today at ${esc(fmtTime(mySignoff.time))}.</div>` : "")}
       </div>
@@ -4905,8 +4938,27 @@ function renderStockTake(){
   const catOptions = categories.map(c=>{
     const bps = byCat[c];
     const entered = bps.filter(bp=>hasValue(takesForDate[bp])).length;
-    return `<option value="${esc(c)}" ${c===stockCategoryFilter?"selected":""}>${esc(c)} (${entered}/${bps.length})</option>`;
+    return `<option value="${esc(c)}" ${c===stockCategoryFilter?"selected":""}>${entered===bps.length ? "✓ " : "⚠ "}${esc(c)} (${entered}/${bps.length})</option>`;
   }).join("");
+  // Whole-count progress for the chosen date: which categories are done and exactly which items are still missing, so nothing is
+  // left uncounted without somebody seeing it. Clicking a category chip opens it.
+  const allBps = categories.reduce((a,c)=> a.concat(byCat[c]), []);
+  const countedAll = allBps.filter(bp=>hasValue(takesForDate[bp])).length;
+  const missingAll = allBps.filter(bp=>!hasValue(takesForDate[bp]));
+  const lastTake = latestStockTakeMap(); // each item's most recent earlier count, shown beside the entry box for reference
+  const progressCard = `
+    <div class="card" id="stockProgressCard">
+      <div class="cardhead">
+        <div><h3>Stock take progress — ${esc(stockTakeDate)}</h3><div class="desc">${missingAll.length ? `<b>${countedAll} of ${allBps.length}</b> items counted — <b style="color:var(--critical);">${missingAll.length} still to do</b>. Every item must have a count (type 0 if none is left).` : `<b style="color:var(--good);">✓ All ${allBps.length} items counted.</b>`}</div></div>
+      </div>
+      <div class="cardbody">
+        <div style="display:flex;flex-wrap:wrap;gap:6px;">${categories.map(c=>{
+          const n = byCat[c].filter(bp=>!hasValue(takesForDate[bp])).length;
+          return `<button class="btn small" data-stock-cat="${esc(c)}" style="${n?"border-color:var(--critical);color:var(--critical);":""}">${n ? "⚠ "+esc(c)+" — "+n+" to do" : "✓ "+esc(c)}</button>`;
+        }).join("")}</div>
+        ${missingAll.length && missingAll.length<=40 ? `<div class="helptext" style="margin-top:10px;">Still to count: ${missingAll.map(esc).join(", ")}</div>` : ""}
+      </div>
+    </div>`;
 
   let entryCardHtml = "";
   if(stockCategoryFilter && byCat[stockCategoryFilter]){
@@ -4914,21 +4966,23 @@ function renderStockTake(){
     const rows = bps.map(bp=>{
       const val = takesForDate[bp];
       const inputVal = hasValue(val)?val:"";
-      return `<tr>
+      const prev = lastTake[bp] && lastTake[bp].date !== stockTakeDate ? lastTake[bp] : null;
+      return `<tr data-stock-row="${esc(bp)}">
         <td>${esc(bp)}</td>
-        <td><input class="rowinput num" data-stock-bp="${esc(bp)}" value="${inputVal}" data-pristine="${esc(inputVal)}" placeholder="0" style="max-width:140px;"></td>
+        <td><input class="rowinput num" inputmode="decimal" data-stock-bp="${esc(bp)}" value="${inputVal}" data-pristine="${esc(inputVal)}" placeholder="count" style="max-width:140px;"></td>
+        <td class="helptext">${prev ? "last: "+fmtNum(prev.amount,0)+" ("+esc(shortDayLabel(prev.date))+")" : "never counted"}</td>
       </tr>`;
     }).join("");
     entryCardHtml = `
     <div class="card">
       <div class="cardhead">
-        <div><h3>${esc(stockCategoryFilter)} — ${esc(stockTakeDate)}</h3><div class="desc">${bps.length} base product(s) in this category. Enter the stock amount counted on this date, then submit. Already-entered amounts are editable — correct and resubmit if needed.</div></div>
+        <div><h3>${esc(stockCategoryFilter)} — ${esc(stockTakeDate)}</h3><div class="desc"><span id="stockCatCounter"></span> Every item needs a count — type <b>0</b> if none is left; a blank box is not accepted. Already-entered amounts are editable — correct and resubmit if needed.</div></div>
         <button class="btn primary" id="submitStockTake">Submit</button>
       </div>
       <div class="cardbody" style="padding:0;">
         <div class="tablewrap" style="border:none;border-radius:0;">
           <table>
-            <thead><tr><th>Base product</th><th class="num">Stock amount</th></tr></thead>
+            <thead><tr><th>Base product</th><th class="num">Stock amount</th><th>Previous count</th></tr></thead>
             <tbody>${rows}</tbody>
           </table>
         </div>
@@ -4977,6 +5031,7 @@ function renderStockTake(){
         </div>
       </div>
     </div>
+    ${progressCard}
     <div class="card">
       <div class="cardhead">
         <div><h3>Category</h3><div class="desc">Choose a category to load its base products below.</div></div>
@@ -5307,6 +5362,7 @@ function wireTabEvents(){
       if(!DATA.procurementSignoffs) DATA.procurementSignoffs = [];
       if(DATA.procurementSignoffs.some(s=> s.date===today && s.user===currentUser.name)){ render(); return; }
       { const ex = priceExportStatus_(costCsvDueDate()); if(!ex.complete){ toast("Complete the Sage price export for "+shortDayLabel(ex.date)+" first"); render(); return; } }
+      { const sc = stockCountCoverage_(); if(!sc.complete){ toast("Last night's stock take is incomplete — "+sc.missing.length+" item"+(sc.missing.length===1?"":"s")+" not counted"); render(); return; } }
       const entry = {date:today, user:currentUser.name, time:new Date().toTimeString().slice(0,8)};
       DATA.procurementSignoffs.push(entry);
       const saved = await persist("Signed off for " + today, ["procurementSignoffs"]);
@@ -6539,23 +6595,45 @@ function wireTabEvents(){
         render();
       });
     }
+    document.querySelectorAll("[data-stock-cat]").forEach(b=> b.addEventListener("click", ()=>{ stockCategoryFilter = b.dataset.stockCat; render(); }));
+    // Live "n of N counted" for the open category, and Enter moves to the next box (quicker on a phone/handheld at night).
+    const stockInputs = Array.from(document.querySelectorAll("#main [data-stock-bp]"));
+    const isBlankStock_ = (v)=> String(v).trim()==="";
+    const badStock_ = (v)=>{ const t = String(v).trim().replace(",","."); return t==="" || isNaN(Number(t)) || Number(t) < 0; };
+    const refreshStockCounter = ()=>{
+      const el = document.getElementById("stockCatCounter"); if(!el) return;
+      const done = stockInputs.filter(i=> !badStock_(i.value)).length;
+      el.innerHTML = done===stockInputs.length ? `<b style="color:var(--good);">✓ ${done} of ${stockInputs.length} counted.</b>` : `<b>${done} of ${stockInputs.length} counted</b> — ${stockInputs.length-done} to go.`;
+    };
+    stockInputs.forEach((inp,ix)=>{
+      inp.addEventListener("input", ()=>{ inp.classList.remove("bad"); refreshStockCounter(); });
+      inp.addEventListener("keydown", (e)=>{ if(e.key==="Enter"){ e.preventDefault(); const nx = stockInputs[ix+1]; if(nx){ nx.focus(); nx.select && nx.select(); } else { const sb = document.getElementById("submitStockTake"); if(sb) sb.focus(); } } });
+    });
+    refreshStockCounter();
     const submitStockBtn = document.getElementById("submitStockTake");
     if(submitStockBtn){
       submitStockBtn.addEventListener("click", ()=>{
         if(!stockTakeDate){ toast("Pick a date first"); return; }
-        const inputs = document.querySelectorAll("#main [data-stock-bp]");
+        // Nothing is saved unless EVERY item in the category has a valid count. A blank is never treated as zero — it is the item that got
+        // missed — so the night shift has to type 0 for "none left". The first problem box is highlighted and focused.
+        const problems = stockInputs.filter(inp=> badStock_(inp.value));
+        stockInputs.forEach(inp=> inp.classList.toggle("bad", badStock_(inp.value)));
+        if(problems.length){
+          const blanks = problems.filter(i=> isBlankStock_(i.value)).length;
+          toast(blanks ? blanks+" item"+(blanks===1?"":"s")+" not counted yet — enter a count for every item (type 0 if none left)" : "Counts must be numbers, 0 or more");
+          if(problems[0].scrollIntoView) problems[0].scrollIntoView({block:"center"}); problems[0].focus();
+          return;
+        }
         let count = 0;
-        inputs.forEach(inp=>{
+        stockInputs.forEach(inp=>{
           const bp = inp.dataset.stockBp;
           const val = inp.value;
-          // upsert: drop any existing record for this exact (date, baseProduct) pair, then re-add if non-empty
+          // upsert: drop any existing record for this exact (date, baseProduct) pair, then add the new count
           DATA.stockTakes = DATA.stockTakes.filter(r=> !(r.date===stockTakeDate && r.baseProduct===bp));
-          if(val !== ""){
-            const entry = {date:stockTakeDate, baseProduct:bp, amount:Number(val)};
-            if(currentUser) entry.loggedBy = currentUser.name;
-            DATA.stockTakes.push(entry);
-            count++;
-          }
+          const entry = {date:stockTakeDate, baseProduct:bp, amount:Number(String(val).trim().replace(",","."))};
+          if(currentUser) entry.loggedBy = currentUser.name;
+          DATA.stockTakes.push(entry);
+          count++;
         });
         persist("Stock take saved for " + stockCategoryFilter + " on " + stockTakeDate + " (" + count + " entered)", ["stockTakes"]);
       });
