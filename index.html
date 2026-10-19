@@ -364,7 +364,7 @@ function emptyDataShape(){
     users: [{name:"Owner", pin:"1234", role:"owner"}],
     purchaseIssues: [], salesHistory: [],
     procurementSignoffs: [],
-    categoryBuffers: {}, productCycles: {}, productCeilings: {},
+    categoryBuffers: {}, productCycles: {}, productCeilings: {}, stockTakeExempt: {},
     categories: [], categoryCostBuffers: {},
     // Shane's chosen starting point (2026-09): 32% default margin, with Eggs held lower at 30% and
     // Herbs/Mixes higher at 35% — set here so a brand-new setup (or a backup predating this feature)
@@ -410,6 +410,7 @@ function applyDataDefaults(d){
   if(!d.categoryCostBuffers) d.categoryCostBuffers = {}; // backward-compatible default: per-category cost (wastage) buffer %, Cost CSV only — distinct from categoryBuffers (a demand buffer)
   if(!d.shoppingListSnapshotDates) d.shoppingListSnapshotDates = []; // set by doGet, not saved by the app itself — defaults to empty until the nightly snapshot trigger has run at least once
   if(!d.productCycles) d.productCycles = {}; // backward-compatible default: per-product replenishment cycle length overrides (falls back to the global cover multiplier when unset)
+  if(!d.stockTakeExempt) d.stockTakeExempt = {}; // backward-compatible default: base products NOT stock counted (made to order) — left out of Stock Take, the completeness checks and the Shopping List
   if(!d.productCeilings) d.productCeilings = {}; // backward-compatible default: per-product shelf-life hold ceilings (no cap when unset)
   if(!d.categories) d.categories = []; // backward-compatible default for backups predating explicit category management (name + hidden flag)
   if(!d.users || !d.users.length){
@@ -535,7 +536,7 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 // day has had the chance to be received and priced first. Today's — or a future — purchase date is never allowed.
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
-const APP_BUILD = "2026-10-18 · Received-date grouping, changed-since-download check, queued download saves, lighter saves, stock take completeness checks, tick-box page access";
+const APP_BUILD = "2026-10-19 · Made-to-order items can be removed from the stock take · Received-date grouping, changed-since-download check, queued download saves, lighter saves, stock take completeness checks, tick-box page access";
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
 // often than it's audited in bulk, so opening the tab should land on today's entries, not the full history.
 let purchaseDateFilter = new Date().toISOString().slice(0,10);
@@ -1150,7 +1151,7 @@ function shoppingListComputed(referenceDate){
   // Holdings target — referenceDate defaults to today, since every live caller (Shopping List, Quick
   // Buy, Dashboard) means "right now"; a historical recompute can pass an explicit date instead.
   const today = referenceDate || new Date().toISOString().slice(0,10);
-  const plan = procurementPlanComputed();
+  const plan = procurementPlanComputed().filter(r=> !isStockExempt_(r.baseProduct)); // made-to-order items have no stock to compare
   const stockMap = latestStockTakeMap(today);
   const critPct = criticalPctFor(today); // higher on peak days (Tue/Fri/Sat by default)
   const overPct = Number(DATA.shoppingList.overstockPct)||1.5;
@@ -1252,7 +1253,7 @@ function stockVarianceComputed(asOfDate){
   const salesByDate = {};
   DATA.salesHistory.forEach(h=>{ salesByDate[h.date] = h.demand || {}; });
 
-  const rows = distinctBaseProducts().map(baseProduct=>{
+  const rows = countedBaseProducts().map(baseProduct=>{
     let takes = DATA.stockTakes.filter(r=>r.baseProduct===baseProduct).slice().sort((a,b)=> a.date.localeCompare(b.date));
     if(asOfDate) takes = takes.filter(r=> r.date <= asOfDate);
     if(takes.length < 2){
@@ -2273,7 +2274,7 @@ function stockCountCoverage_(){
   const since = yesterdaySA();
   const latest = latestStockTakeMap();
   const missing = []; let total = 0;
-  distinctBaseProducts().forEach(bp=>{
+  countedBaseProducts().forEach(bp=>{
     total++;
     const l = latest[bp];
     if(!(l && l.date >= since)) missing.push({baseProduct:bp, category:categoryFor(bp)||"Uncategorized", lastDate:l?l.date:"", lastAmount:l?l.amount:null});
@@ -2290,6 +2291,11 @@ function distinctBaseProducts(){
   for(const it of DATA.itemSetup) if(it.baseProduct) set.add(it.baseProduct);
   return Array.from(set).sort();
 }
+// Base products flagged on Item Setup as "not stock counted" — made to order (e.g. certain salads), so there is never stock on
+// the shelf to count. They are left out of the Stock Take list, the stock-count completeness checks, the Shopping List and the
+// stock variance report; everything else (sales, recipes, purchasing history) is untouched.
+function isStockExempt_(bp){ return !!(DATA.stockTakeExempt && DATA.stockTakeExempt[bp]); }
+function countedBaseProducts(){ return distinctBaseProducts().filter(bp=> !isStockExempt_(bp)); }
 // Surfaces base products that are almost certainly the same item typed two different ways — a
 // capitalization or whitespace slip that got past the (merely suggestive) datalist on Item Setup's Base
 // Product field or the "Log stock with no order on file" form before the guard on those two forms was
@@ -2355,6 +2361,34 @@ function hiddenCategorySet(){
 // rather than on Calculated Holdings where it used to sit. Each action saves itself immediately (like
 // the delete-item button on this same tab) rather than waiting for "Save changes", since a rename or
 // delete here also touches Item Setup and Base Product categories, not just this card.
+function renderStockExemptCard(){
+  const list = Object.keys(DATA.stockTakeExempt||{}).filter(bp=>DATA.stockTakeExempt[bp]).sort();
+  const latest = latestStockTakeMap();
+  const rows = list.map(bp=>{
+    const l = latest[bp];
+    const known = distinctBaseProducts().includes(bp);
+    return `<tr>
+      <td>${esc(bp)}${known?"":" "+chip("no longer in Item Setup","warn")}</td>
+      <td>${esc(categoryFor(bp)||"Uncategorized")}</td>
+      <td class="helptext">${l ? "last counted "+esc(shortDayLabel(l.date)) : "never counted"}</td>
+      <td><button class="btn small" data-stock-exempt-remove="${esc(bp)}">Put back on stock take</button></td>
+    </tr>`;
+  }).join("");
+  return `
+    <div class="card">
+      <div class="cardhead"><div><h3>Not stock counted (made to order)</h3><div class="desc">Products made to order — e.g. certain salads — never sit on the shelf, so there is nothing to count. Remove them here and they disappear from the Stock Take list, the "last night's count complete" checks and the Shopping List. Past counts are kept. Name the <b>Base Product</b>; it covers every sold variant of it.</div></div></div>
+      <div class="cardbody">
+        <div class="formgrid" style="margin-bottom:14px;">
+          <div class="field"><label>Base product</label><input type="text" id="stockExemptInput" list="baseProductsDL" placeholder="Start typing a base product…" data-pristine=""></div>
+          <div><button class="btn" id="stockExemptAdd">Remove from stock take</button></div>
+        </div>
+        <div class="tablewrap"><table>
+          <thead><tr><th>Base product</th><th>Category</th><th>Counting history</th><th></th></tr></thead>
+          <tbody>${rows || `<tr><td colspan="4" class="empty">Nothing excluded — every base product is on the stock take.</td></tr>`}</tbody>
+        </table></div>
+      </div>
+    </div>`;
+}
 function renderManageCategories(){
   const cats = allCategoriesWithMeta();
   const rows = cats.map(c=>{
@@ -3736,6 +3770,7 @@ function renderItemSetup(){
         </div>
       </div>
     </div>
+    ${renderStockExemptCard()}
     ${renderManageCategories()}
     <div class="card">
       <div class="cardhead">
@@ -4958,7 +4993,7 @@ function renderSellingPrices(){
 // ---------- Stock Take ----------
 function renderStockTake(){
   const byCat = {};
-  distinctBaseProducts().forEach(bp=>{
+  countedBaseProducts().forEach(bp=>{
     const cat = categoryFor(bp) || "Uncategorized";
     (byCat[cat] = byCat[cat]||[]).push(bp);
   });
@@ -4995,6 +5030,7 @@ function renderStockTake(){
           const n = byCat[c].filter(bp=>!hasValue(takesForDate[bp])).length;
           return `<button class="btn small" data-stock-cat="${esc(c)}" style="${n?"border-color:var(--critical);color:var(--critical);":""}">${n ? "⚠ "+esc(c)+" — "+n+" to do" : "✓ "+esc(c)}</button>`;
         }).join("")}</div>
+        ${Object.keys(DATA.stockTakeExempt||{}).length ? `<div class="helptext" style="margin-bottom:8px;">${Object.keys(DATA.stockTakeExempt).length} made-to-order item(s) are not counted — managed on Item Setup.</div>` : ""}
         ${missingAll.length && missingAll.length<=40 ? `<div class="helptext" style="margin-top:10px;">Still to count: ${missingAll.map(esc).join(", ")}</div>` : ""}
       </div>
     </div>`;
@@ -6131,6 +6167,23 @@ function wireTabEvents(){
   if(currentTab==="itemsetup"){
     document.getElementById("itemSearchBox").addEventListener("input", (e)=>{ itemSearch = e.target.value; render(); });
     document.getElementById("itemSetupCategoryFilterSel").addEventListener("change", (e)=>{ itemSetupCategoryFilter = e.target.value; render(); });
+    document.getElementById("stockExemptAdd").addEventListener("click", ()=>{
+      const typed = document.getElementById("stockExemptInput").value.trim();
+      if(!typed){ toast("Type or pick a base product first"); return; }
+      const known = distinctBaseProducts();
+      const bp = known.includes(typed) ? typed : known.find(n=> n.toLowerCase()===typed.toLowerCase());
+      if(!bp){ toast('"' + typed + '" is not a Base Product in Item Setup — pick one from the list'); return; }
+      if(isStockExempt_(bp)){ toast(bp + " is already off the stock take"); return; }
+      DATA.stockTakeExempt[bp] = 1;
+      persist(bp + " removed from the stock take", ["stockTakeExempt"]);
+    });
+    document.querySelectorAll("[data-stock-exempt-remove]").forEach(b=>{
+      b.addEventListener("click", ()=>{
+        const bp = b.dataset.stockExemptRemove;
+        delete DATA.stockTakeExempt[bp];
+        persist(bp + " is back on the stock take", ["stockTakeExempt"]);
+      });
+    });
     document.getElementById("addItemRow").addEventListener("click", ()=>{
       const text = document.getElementById("newItemText").value.trim();
       if(!text){ toast("Enter an item name first"); return; }
