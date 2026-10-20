@@ -4254,7 +4254,10 @@ function renderPriceHistory(){
 // day it was downloaded — a manager normally downloads yesterday's purchases the next morning, and what
 // matters is "has each day's buying been exported", not "was anything downloaded today".
 function costCsvDownloadsFor(purchaseDate){
-  return (DATA.costCsvDownloads||[]).filter(d=> d.exportDate===purchaseDate)
+  // Only SELLING-price file downloads count toward "price export done" — the separate average-cost file (fileType "cost") is logged too, but
+  // it is not what the completeness checks, the sign-off or the changed-since-download check are about. Rows from before file types were
+  // recorded have no fileType and were all selling-price downloads.
+  return (DATA.costCsvDownloads||[]).filter(d=> d.exportDate===purchaseDate && d.fileType!=="cost")
     .slice().sort((a,b)=> (String(a.downloadedDate)+String(a.downloadedTime)).localeCompare(String(b.downloadedDate)+String(b.downloadedTime)));
 }
 function shortDayLabel(d){ return new Date(d+"T00:00:00Z").toUTCString().slice(5,11); } // "12 Oct"
@@ -4798,10 +4801,11 @@ function renderSellingPrices(){
     if(!hadPurchases) return chip("– " + label, "neutral");
     return chip("✗ " + label, i===0 ? "neutral" : "warn");
   }).join(" ");
-  const dlRows = dlHistory.slice(0,40).map(d=>`
+  const dlRows = dlHistory.slice(0,60).map(d=>`
     <tr>
       <td style="font-weight:600;">${esc(d.exportDate||"all dates")}</td>
       <td class="helptext">${esc(d.downloadedDate||"—")} ${esc(fmtTime(d.downloadedTime))}</td>
+      <td>${d.fileType==="cost" ? chip("Cost","neutral") : chip("Selling prices","good")}${d.part ? ` <span class="helptext">part ${esc(d.part)}</span>` : ""}</td>
       <td>${d.company && SAGE_COMPANIES[d.company] ? `<b>${esc(SAGE_COMPANIES[d.company].name)}</b>` : `<span class="helptext" title="Logged before the company was recorded">—</span>`}</td>
       <td>${esc(d.downloadedBy||"—")}</td>
       <td class="num">${esc(d.rows===undefined||d.rows===null?"":d.rows)}</td>
@@ -4930,12 +4934,12 @@ function renderSellingPrices(){
       </div>
     </div>
     <div class="card">
-      <div class="cardhead"><div><h3>Download record</h3><div class="desc">Every price export download is logged with who and when. Each day below is a <strong>received date</strong> (deliveries are exported on the day they arrive, whichever day they were ordered) — ✓ means the price export for that day's buying has been downloaded (whenever it was downloaded), ✗ means it hasn't, – means nothing was received that day. Last 14 purchase dates (today first):</div></div></div>
+      <div class="cardhead"><div><h3>Download record</h3><div class="desc">Every price export and cost file download is logged with who and when — the <b>File</b> column says which one (Selling prices or Cost). Each day below is a <strong>received date</strong> (deliveries are exported on the day they arrive, whichever day they were ordered) — ✓ means the price export for that day's buying has been downloaded (whenever it was downloaded), ✗ means it hasn't, – means nothing was received that day. Last 14 purchase dates (today first):</div></div></div>
       <div class="cardbody">
         <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;">${dlStrip}</div>
         <div class="tablewrap" style="max-height:260px;overflow-y:auto;"><table>
-          <thead><tr><th>Received date</th><th>Downloaded</th><th>Company</th><th>By</th><th class="num">Rows</th></tr></thead>
-          <tbody>${dlRows || `<tr><td colspan="5" class="empty">No downloads recorded yet.</td></tr>`}</tbody>
+          <thead><tr><th>Received date</th><th>Downloaded</th><th>File</th><th>Company</th><th>By</th><th class="num">Rows</th></tr></thead>
+          <tbody>${dlRows || `<tr><td colspan="6" class="empty">No downloads recorded yet.</td></tr>`}</tbody>
         </table></div>
       </div>
     </div>
@@ -6636,6 +6640,13 @@ function wireTabEvents(){
         const parts = Math.ceil(moved.length / SAGE_MAX_COST_LINES);
         browserDownload("sage_average_cost_"+sellingCsvDate+(parts>1 ? "_part"+(part+1)+"of"+parts : "")+".csv", csv, "text/csv");
         toast("Cost file downloaded — import it into Sage with the Average Cost import");
+        // Log it too, so the Download record shows which file (Cost vs Selling prices) was taken. Cost rows never count toward "price export done".
+        const costEntry = {id:newId(), exportDate:sellingCsvDate, downloadedBy: currentUser ? currentUser.name : "", rows: slice.length, company:"", sig:"", fileType:"cost", part: parts>1 ? (part+1)+" of "+parts : ""};
+        const nowC = new Date();
+        DATA.costCsvDownloads = DATA.costCsvDownloads || [];
+        DATA.costCsvDownloads.push(Object.assign({}, costEntry, {downloadedDate: nowC.toISOString().slice(0,10), downloadedTime: nowC.toTimeString().slice(0,8)}));
+        dlSaveChain = dlSaveChain.then(()=> persistPurchaseAction({action:"logCostCsvDownload", entry: costEntry}, "Cost file download recorded")).catch(()=>{});
+        render();
       });
     });
     document.querySelectorAll("[data-sellingcsv-part]").forEach(btn=>{
@@ -6670,7 +6681,7 @@ function wireTabEvents(){
         browserDownload("sage_price_export_"+co.short+"_"+sellingCsvDate+(parts>1 ? "_part"+(part+1)+"of"+parts : "")+".csv", csv, "text/csv");
         // Record the download (who/when/for which purchase date) so it can be audited — the server stamps the real time.
         const nowD = new Date();
-        const dlEntry = {id:newId(), exportDate:sellingCsvDate, downloadedBy: currentUser ? currentUser.name : "", rows: slice.length, company: co.key, sig: partSig_(slice)};
+        const dlEntry = {id:newId(), exportDate:sellingCsvDate, downloadedBy: currentUser ? currentUser.name : "", rows: slice.length, company: co.key, sig: partSig_(slice), fileType: "selling", part: parts>1 ? (part+1)+" of "+parts : ""};
         DATA.costCsvDownloads = DATA.costCsvDownloads || [];
         DATA.costCsvDownloads.push(Object.assign({}, dlEntry, {downloadedDate: nowD.toISOString().slice(0,10), downloadedTime: nowD.toTimeString().slice(0,8)}));
         // Record the prices just sent as the "previous price" for the next export (replaces any record for the same
