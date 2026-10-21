@@ -891,6 +891,9 @@ function normClockStr(v){
   if(isNaN(dt.getTime())) return s;
   return String(dt.getHours()).padStart(2,"0")+":"+String(dt.getMinutes()).padStart(2,"0")+":"+String(dt.getSeconds()).padStart(2,"0");
 }
+// " at 14:32" when a logged order / "unable to buy" record carries the time it was logged (older rows have none).
+function timeTag_(r){ return r && r.loggedTime ? ` <span class="helptext" title="Time logged">${esc(fmtTime(r.loggedTime))}</span>` : ""; }
+function atTime_(r){ return r && r.loggedTime ? " at " + esc(fmtTime(r.loggedTime)) : ""; }
 function fmtTime(t){
   if(!t) return "";
   const m = String(t).match(/^(\d{1,2}):(\d{2})/); // "8:04:12" used to be cut to "8:04:" by a plain slice(0,5)
@@ -1452,9 +1455,12 @@ function printReceivingSlip(id){
 // last; multiple suppliers on the same day needs a genuine weighted average instead of picking one
 // arbitrarily). Used to keep a Product Mix's cost current any time an ingredient's price changes — not
 // tied to any single day's Sage export.
-function latestPurchaseCostMap(){
+// asOf (YYYY-MM-DD, optional): only deliveries received ON OR BEFORE that day count — used so a past day's price export is worked
+// out from what was known on that day, not from deliveries that arrived afterwards.
+function latestPurchaseCostMap(asOf){
   const latestDate = {}; // baseProduct -> most recent RECEIVED date that actually has a real cost logged
   for(const p of DATA.purchaseCosts){
+    if(asOf && (p.receivedDate||"") > asOf) continue;
     if(!p.baseProduct || !isReceived(p)) continue; // an order still awaiting delivery has no final cost yet — skip it so an OLDER received price isn't shadowed by a pending one with nothing to offer
     // Fix (Shane's report): a RECEIVED line can still have its cost genuinely pending (invoice not in
     // yet). That used to still win as "the latest date" for its base product, so weightedCostMap_ had
@@ -1598,7 +1604,7 @@ function sageImportComputed(date){
   const pm = applyCostBuffers_(receivedCostMap(date));
   // Fallback for a Product Mix's ingredients only (see itemCostPerUnit above) — a plain, non-mix item
   // is unaffected and still needs a same-day purchase cost to price at all.
-  const latestPm = applyCostBuffers_(latestPurchaseCostMap());
+  const latestPm = applyCostBuffers_(latestPurchaseCostMap(date)); // as of that day — later deliveries must not move an earlier day's mix costs
   return derived.map(it=>{
     const usedFallback = {value:false};
     const newCost = itemCostPerUnit(it.item, pm, undefined, {latestPm, usedFallback});
@@ -1653,9 +1659,9 @@ function compositeMixCosts(){
 // trend baseline a "good deal" is measured against. Reuses weightedCostMap_'s per-entry weighting
 // (same math as purchaseCostMap/latestPurchaseCostMap), just scoped to a rolling window instead of one
 // exact date or "whatever's most recent".
-function trailingPurchaseCostMap(days){
-  const cutoff = new Date(Date.now() - days*86400000).toISOString().slice(0,10);
-  const entries = DATA.purchaseCosts.filter(p=> p.baseProduct && isReceived(p) && p.receivedDate >= cutoff);
+function trailingPurchaseCostMap(days, asOf){
+  const cutoff = new Date((asOf ? new Date(asOf+"T00:00:00Z").getTime() : Date.now()) - days*86400000).toISOString().slice(0,10);
+  const entries = DATA.purchaseCosts.filter(p=> p.baseProduct && isReceived(p) && p.receivedDate >= cutoff && (!asOf || p.receivedDate <= asOf));
   return weightedCostMap_(entries);
 }
 
@@ -1705,7 +1711,7 @@ function formulaPriceForCost_(cost, r){
   return (r.minPrice!==null && r.minPrice!==undefined && raw < r.minPrice) ? Number(r.minPrice) : raw;
 }
 function sellingPricesMovedOn(dateStr, suggestionRows){
-  const rows = suggestionRows || pricingSuggestionsComputed();
+  const rows = pricingSuggestionsAsOf_(dateStr); // as of that day (suggestionRows, the live table's rows, is deliberately not used)
   const rowByItem = {};
   rows.forEach(r=>{ rowByItem[r.item] = r; });
   const quotesByItem = {};
@@ -1730,15 +1736,24 @@ function sellingPricesMovedOn(dateStr, suggestionRows){
   return out.sort((a,b)=> a.item.localeCompare(b.item));
 }
 
-function pricingSuggestionsComputed(){
+// The Price Export for a day must give the SAME prices tomorrow as today, otherwise a download is flagged "changed since download" for
+// no real reason. So everything an export price depends on — the latest cost, the good-deal trend window, a Product Mix's ingredient
+// costs — is worked out as of that day (asOf), never from deliveries received afterwards or from the clock. Only a real change (a
+// correction to that day's deliveries or prices, or a margin/min price/wastage-buffer setting) can move it. Memoised per render.
+let psAsOfCache_ = {};
+function pricingSuggestionsAsOf_(asOf){
+  if(!psAsOfCache_[asOf]) psAsOfCache_[asOf] = pricingSuggestionsComputed(asOf);
+  return psAsOfCache_[asOf];
+}
+function pricingSuggestionsComputed(asOf){
   const plan = DATA.pricingPlan || {};
   const windowDays = Number(plan.trendWindowDays)>0 ? Math.round(Number(plan.trendWindowDays)) : 21;
   const goodDealThreshold = Number(plan.goodDealThresholdPct)||0;
   const goodDealBonus = Number(plan.goodDealBonusPct)||0;
-  const latestPm = latestPurchaseCostMap();
+  const latestPm = latestPurchaseCostMap(asOf);
   // Same buffered cost map the Price Export uses, so a suggested price is worked out from exactly the Cost that goes to Sage.
   const bufferedLatestPm = applyCostBuffers_(latestPm);
-  const trailingPm = trailingPurchaseCostMap(windowDays);
+  const trailingPm = trailingPurchaseCostMap(windowDays, asOf);
   const latestQuoteByItem = {};
   (DATA.priceQuotes||[]).forEach(q=>{
     if(!q.item) return;
@@ -1841,6 +1856,7 @@ async function loadShoppingArchive(date){
 // save silently loses on ANY conflict (someone else saving in between), and nothing before this undid
 // the local change that had already been applied in anticipation of the save succeeding.
 async function persist(successMsg, changedKeys){
+  psAsOfCache_ = {};
   setSyncBusy(true);
   let ok = false;
   try{
@@ -2052,6 +2068,7 @@ function wireLoginEvents(){
 }
 
 function render(){
+  psAsOfCache_ = {}; // data may have changed since the last render — see pricingSuggestionsAsOf_
   // Computed up-front (not just inside the logged-in branch below) so the sync-overlay offset toggle
   // near the end of this function can always run, whichever branch actually executes.
   const kiosk = !!currentUser && currentUser.role === "receiving" && userTabCount_(currentUser) === 1 && userCanAccessTab(currentUser, "receiving");
@@ -2468,7 +2485,7 @@ function purchaseLineChip(e, opts){
     ? ((hasQty ? fmtNum(qty) : "—") + (e.supplier ? " (" + esc(e.supplier) + ")" : ""))
     : ((hasQty ? fmtNum(qty)+" @ " : "") + (hasCost ? money(cost) : "cost pending") + (e.supplier ? " (" + esc(e.supplier) + ")" : ""));
   if(opts.showWho){
-    if(e.loggedBy) core += " — logged by " + esc(e.loggedBy);
+    if(e.loggedBy) core += " — logged by " + esc(e.loggedBy) + atTime_(e);
     if(received && e.receivedBy) core += ", received by " + esc(e.receivedBy);
   }
   const line = received ? chip("✓ " + core, "good") : chip("📦 Ordered: " + core, "warn");
@@ -2532,7 +2549,7 @@ const SUFFICIENT_STOCK_REASON = "Have enough stock till tomorrow";
 function issueChipHtml(issue, opts){
   if(!issue) return "";
   opts = opts || {};
-  const who = (opts.showWho && issue.loggedBy) ? " — logged by " + esc(issue.loggedBy) : "";
+  const who = (opts.showWho && issue.loggedBy) ? " — logged by " + esc(issue.loggedBy) + atTime_(issue) : "";
   if(issue.reason === SUFFICIENT_STOCK_REASON) return chip("✓ " + SUFFICIENT_STOCK_REASON + who, "good");
   return chip("✕ Unable: " + issue.reason + who, "critical");
 }
@@ -2549,7 +2566,7 @@ function renderBuyCell(r, today){
   const entries = purchaseEntriesForDate(bp, today);
   const issue = unableEntryForDate(bp, today);
   const issueChip = issue ? `<span style="display:inline-flex;align-items:center;gap:4px;">
-      ${issueChipHtml(issue)}
+      ${issueChipHtml(issue)}${timeTag_(issue)}
       ${canManagePurchases() ? `<button class="btn" data-issue-edit="${esc(bp)}" style="padding:1px 6px;font-size:11px;">Edit</button>
       <button class="delbtn" data-issue-delete="${esc(bp)}" title="Delete this entry">✕</button>` : ""}
     </span>` : "";
@@ -2558,8 +2575,8 @@ function renderBuyCell(r, today){
     // defensive fallback for a non-managing role — only Owner/Procurement can actually reach the
     // Shopping List tab at all now (see ROLE_TABS), so this normally never renders: show what's
     // ordered/received (or why it wasn't), no way to log/edit here.
-    const parts = entries.map(e=> purchaseLineChip(e));
-    if(issue) parts.push(issueChipHtml(issue));
+    const parts = entries.map(e=> purchaseLineChip(e) + timeTag_(e));
+    if(issue) parts.push(issueChipHtml(issue) + timeTag_(issue));
     if(!parts.length) return `<span class="helptext">—</span>`;
     return parts.join(" ");
   }
@@ -2570,7 +2587,7 @@ function renderBuyCell(r, today){
 
   const lineChips = entries.map(e=> `
     <span style="display:inline-flex;align-items:center;gap:4px;">
-      ${purchaseLineChip(e)}
+      ${purchaseLineChip(e)}${timeTag_(e)}
       <button class="btn" data-buy-edit="${esc(bp)}" data-buy-edit-id="${esc(e.id||"")}" style="padding:1px 6px;font-size:11px;">Edit</button>
       <button class="delbtn" data-buy-delete-id="${esc(e.id||"")}" data-buy-delete-bp="${esc(bp)}" title="Delete this entry">✕</button>
     </span>`).join("");
@@ -2776,7 +2793,7 @@ function renderQuickBuy(){
       <div style="margin-bottom:16px;">
         <div class="helptext" style="font-weight:600;margin-bottom:6px;">Already logged today</div>
         ${todaysLines.map(e=>`<div class="quickbuylogrow">
-            <span>${purchaseLineChip(e)} ${e.loggedBy ? `<span class="helptext">logged by ${esc(e.loggedBy)}</span>` : ""}</span>
+            <span>${purchaseLineChip(e)} ${e.loggedBy ? `<span class="helptext">logged by ${esc(e.loggedBy)}${atTime_(e)}</span>` : ""}</span>
             <span style="display:flex;align-items:center;gap:10px;">
               <button class="btn small" data-quickbuy-edit-line="${esc(e.id||"")}">Edit</button>
               <button class="delbtn" data-quickbuy-delete-id="${esc(e.id||"")}" title="Delete this entry">✕</button>
@@ -2839,13 +2856,13 @@ function renderQuickBuy(){
 
     const doneBadge = (r)=>{
       const lines = purchaseEntriesForDate(r.baseProduct, today);
-      if(lines.length===1) return purchaseLineChip(lines[0]);
+      if(lines.length===1) return purchaseLineChip(lines[0]) + timeTag_(lines[0]);
       if(lines.length>1){
         const allReceived = lines.every(isReceived);
         return chip((allReceived?"✓ ":"📦 ") + lines.length + " order(s) logged", allReceived?"good":"warn");
       }
       const issue = unableEntryForDate(r.baseProduct, today);
-      if(issue) return issueChipHtml(issue);
+      if(issue) return issueChipHtml(issue) + timeTag_(issue);
       return "";
     };
 
@@ -2892,7 +2909,7 @@ function renderQuickBuy(){
     if(type==="purchase"){
       return `
       <div class="quickbuylogrow">
-        <span>${esc(baseProduct)}${entry.supplier ? ` <span class="helptext">(${esc(entry.supplier)})</span>` : ""} ${entry.loggedBy ? `<span class="helptext">— logged by ${esc(entry.loggedBy)}</span>` : ""}</span>
+        <span>${esc(baseProduct)}${entry.supplier ? ` <span class="helptext">(${esc(entry.supplier)})</span>` : ""} ${entry.loggedBy ? `<span class="helptext">— logged by ${esc(entry.loggedBy)}${atTime_(entry)}</span>` : ""}</span>
         <span style="display:flex;align-items:center;gap:10px;">
           ${purchaseLineChip(entry)}
           <button class="btn small" data-quickbuy-edit-purchase="${esc(baseProduct)}" data-quickbuy-edit-id="${esc(entry.id||"")}">Edit</button>
@@ -2902,7 +2919,7 @@ function renderQuickBuy(){
     }
     return `
     <div class="quickbuylogrow">
-      <span>${esc(baseProduct)} ${entry.loggedBy ? `<span class="helptext">— logged by ${esc(entry.loggedBy)}</span>` : ""}</span>
+      <span>${esc(baseProduct)} ${entry.loggedBy ? `<span class="helptext">— logged by ${esc(entry.loggedBy)}${atTime_(entry)}</span>` : ""}</span>
       <span style="display:flex;align-items:center;gap:10px;">
         ${issueChipHtml(entry)}
         <button class="btn small" data-quickbuy-edit-issue="${esc(baseProduct)}">Edit</button>
@@ -3080,7 +3097,7 @@ function renderReceivingSlipHtml(p){
         <tr><td>Category</td><td>${esc(categoryFor(p.baseProduct)||"—")}</td></tr>
         <tr><td>Supplier</td><td>${esc(p.supplier||"—")}</td></tr>
         <tr><td>Ordered by</td><td>${esc(p.loggedBy||"—")}</td></tr>
-        <tr><td>Order date</td><td>${esc(p.date||"—")}</td></tr>
+        <tr><td>Order date</td><td>${esc(p.date||"—")}${p.loggedTime ? " " + esc(fmtTime(p.loggedTime)) : ""}</td></tr>
         <tr><td>Ordered qty</td><td>${hasOrderedQty ? fmtNum(p.qty) : "—"}</td></tr>
         <tr><td>Received qty</td><td>${fmtNum(p.receivedQty)}</td></tr>
         <tr><td>Received by</td><td>${esc(p.receivedBy||"—")}</td></tr>
@@ -3196,7 +3213,7 @@ function renderReceiving(){
       <td>${esc(categoryFor(p.baseProduct)||"—")}</td>
       <td class="helptext">${esc(p.date||"—")}${overdue ? ` ${chip("overdue","warn")}` : ""}</td>
       <td>${esc(p.supplier||"—")}</td>
-      <td>${esc(p.loggedBy||"—")}</td>
+      <td>${esc(p.loggedBy||"—")}${p.loggedTime ? ` <span class="helptext">${esc(fmtTime(p.loggedTime))}</span>` : ""}</td>
       <td><input type="number" step="0.01" class="receive-qty" placeholder="Count qty" value="" style="width:80px;"></td>
       <td>${actionsCell}</td>
     </tr>` : `
@@ -3205,7 +3222,7 @@ function renderReceiving(){
       <td>${esc(categoryFor(p.baseProduct)||"—")}</td>
       <td class="helptext">${esc(p.date||"—")}${overdue ? ` ${chip("overdue","warn")}` : ""}</td>
       <td>${esc(p.supplier||"—")}</td>
-      <td>${esc(p.loggedBy||"—")}</td>
+      <td>${esc(p.loggedBy||"—")}${p.loggedTime ? ` <span class="helptext">${esc(fmtTime(p.loggedTime))}</span>` : ""}</td>
       <td>${actionsCell}</td>
     </tr>`;
   }).join("");
@@ -3424,7 +3441,7 @@ function renderHomeDashboard(){
       <td>${esc(p.baseProduct)}</td>
       <td class="helptext">${esc(p.date||"—")}${overdue?` ${chip("overdue","warn")}`:""}</td>
       <td>${esc(p.supplier||"—")}</td>
-      <td>${esc(p.loggedBy||"—")}</td>
+      <td>${esc(p.loggedBy||"—")}${p.loggedTime ? ` <span class="helptext">${esc(fmtTime(p.loggedTime))}</span>` : ""}</td>
     </tr>`;
   }).join("");
 
@@ -3441,7 +3458,7 @@ function renderHomeDashboard(){
       <td class="helptext">${esc(p.date||"—")}</td>
       <td class="num">${fmtNum(p.qty,0)} vs. ${fmtNum(p.overBuySuggested,0)} suggested</td>
       <td>${esc(p.overBuyReason)}</td>
-      <td class="helptext">${esc(p.loggedBy||"—")}</td>
+      <td class="helptext">${esc(p.loggedBy||"—")}${p.loggedTime ? " " + esc(fmtTime(p.loggedTime)) : ""}</td>
     </tr>`).join("");
 
   const flaggedHtml = flaggedRows.slice(0,10).map(r=>`
@@ -4060,7 +4077,7 @@ function renderPurchase(){
         <td>${esc(p.supplier||"—")}</td>
         <td>${found?statusChip("OK"):statusChip("NOT FOUND")}</td>
         <td class="num">${count}</td>
-        <td class="helptext">${esc(p.loggedBy||"—")}</td>
+        <td class="helptext">${esc(p.loggedBy||"—")}${p.loggedTime ? " " + esc(fmtTime(p.loggedTime)) : ""}</td>
         <td class="helptext">${esc(notReceived ? (p.notReceivedBy||"—") : (p.receivedBy||"—"))}${(!notReceived && p.receivedTime) ? " " + esc(fmtTime(p.receivedTime)) : ""}</td>
         <td><button class="delbtn" data-del-purchase="${i}" title="Remove row">✕</button></td>
       </tr>`;
@@ -4303,7 +4320,10 @@ function priceExportStatus_(date, suggestionRows){
   // that have since changed (a correction after the download, a late-priced delivery), so Sage is out of date for those items.
   const expectedSigs = []; for(let i=0;i<parts;i++) expectedSigs.push(partSig_(moved.slice(i*SAGE_MAX_IMPORT_LINES, (i+1)*SAGE_MAX_IMPORT_LINES)));
   const sentQuote = {}; (DATA.priceQuotes||[]).forEach(q=>{ if(q.date===date) sentQuote[q.item] = q; });
-  const changedItems = all.length ? moved.filter(r=>{ const q = sentQuote[r.item]; return !q || Math.abs(Number(q.price)-r.price)>=0.005 || Math.abs((Number(q.cost)||0)-(r.cost||0))>=0.005; }).map(r=>r.item) : [];
+  const changedRows = all.length ? moved.filter(r=>{ const q = sentQuote[r.item]; return !q || Math.abs(Number(q.price)-r.price)>=0.005 || Math.abs((Number(q.cost)||0)-(r.cost||0))>=0.005; }) : [];
+  const changedItems = changedRows.map(r=>r.item);
+  // What Sage was sent vs what the app would send now, so "changed since download" can be traced to the exact item and figure.
+  const changedDetail = changedRows.map(r=>{ const q = sentQuote[r.item]; return {item:r.item, oldPrice:q?Number(q.price):null, newPrice:r.price, oldCost:q?(Number(q.cost)||0):null, newCost:r.cost}; });
   // Every Sage company needs its own price file. Downloads logged before the company was recorded (no company) count for both.
   const companies = Object.values(SAGE_COMPANIES).map(c=>{
     const logged = all.filter(d=> !d.company || d.company===c.key).map(d=> Number(d.rows)||0);
@@ -4317,7 +4337,7 @@ function priceExportStatus_(date, suggestionRows){
     const got = fullGot + tailGot;
     return {key:c.key, name:c.name, got, parts, complete: got>=parts && !stale, stale};
   });
-  return {date, total:n, parts, got:companies.reduce((a,c)=>a+c.got,0), complete:companies.every(c=>c.complete), companies, changedItems: companies.some(c=>c.stale) ? changedItems : []};
+  return {date, total:n, parts, got:companies.reduce((a,c)=>a+c.got,0), complete:companies.every(c=>c.complete), companies, changedItems: companies.some(c=>c.stale) ? changedItems : [], changedDetail: companies.some(c=>c.stale) ? changedDetail : []};
 }
 function renderConfirmPrices(){
   const todayStr = new Date().toISOString().slice(0,10);
@@ -4887,7 +4907,7 @@ function renderSellingPrices(){
     </div>
     ${tooEarly ? `<div class="banner critical">🔒 The price export for ${esc(exportDate||"this date")} can only be downloaded from the next calendar day, so every delivery has the chance to be received and priced first. Pick an earlier purchase date.</div>` : ""}
     ${(!tooEarly && unpricedLines.length) ? `<div class="banner critical"><span>🔒 ${unpricedLines.length} received line${unpricedLines.length===1?"":"s"} for ${esc(exportDate)} still need${unpricedLines.length===1?"s":""} a confirmed price (${unpricedLines.slice(0,6).map(p=>esc(p.baseProduct)).filter((v,ix,a)=>a.indexOf(v)===ix).join(", ")}${unpricedLines.length>6?"…":""}). The download unlocks once every received delivery for this date is priced.</span><button class="btn small" data-goto-tab="confirmprices">Go to Confirm Prices →</button></div>` : ""}
-    ${(()=>{ if(tooEarly) return ""; const st = priceExportStatus_(exportDate, rows); const stale = st.companies.filter(c=>c.stale); if(!stale.length) return ""; return `<div class="banner warn">⚠ Prices or costs for ${esc(exportDate)} changed after they were downloaded (${esc(stale.map(c=>c.name).join(" and "))}). Sage still has the old figures${st.changedItems.length ? " for: "+st.changedItems.slice(0,6).map(esc).join(", ")+(st.changedItems.length>6?" and "+(st.changedItems.length-6)+" more":"") : ""}. Download the price and cost files again for ${stale.length>1?"each company":esc(stale[0].name)} and import them — importing the same day twice is safe.</div>`; })()}
+    ${(()=>{ if(tooEarly) return ""; const st = priceExportStatus_(exportDate, rows); const stale = st.companies.filter(c=>c.stale); if(!stale.length) return ""; return `<div class="banner warn">⚠ Prices or costs for ${esc(exportDate)} changed after they were downloaded (${esc(stale.map(c=>c.name).join(" and "))}). Sage still has the old figures${st.changedDetail.length ? " for: "+st.changedDetail.slice(0,8).map(d=> esc(d.item)+" ("+(d.oldPrice===null?"not sent":"price "+money(d.oldPrice)+" → "+money(d.newPrice))+(d.oldCost!==null && Math.abs(d.oldCost-(d.newCost||0))>=0.005 ? ", cost "+money(d.oldCost)+" → "+money(d.newCost||0) : "")+")").join("; ")+(st.changedDetail.length>8?" and "+(st.changedDetail.length-8)+" more":"") : ""}. Download the price and cost files again for ${stale.length>1?"each company":esc(stale[0].name)} and import them — importing the same day twice is safe.</div>`; })()}
     ${zeroCostRows.length ? `<div class="banner critical">⚠ ${zeroCostRows.length} item${zeroCostRows.length===1?"":"s"} would export at R0 cost — a buy was logged (and received) with no price: ${zeroCostRows.slice(0,6).map(r=>esc(r.item)).join(", ")}${zeroCostRows.length>6?` and ${zeroCostRows.length-6} more`:""}. Download is blocked until a real price is entered in Purchase Costs or Confirm Prices.</div>` : ""}
     ${jumpRows.length ? `<div class="banner warn">⚠ ${jumpRows.length} price${jumpRows.length===1?"":"s"} moved more than ${Math.round(PRICE_JUMP_WARN_PCT*100)}% since the last export — highlighted below (${jumpRows.slice(0,3).map(r=>esc(r.item)+" "+(r.jumpPct>0?"▲":"▼")+fmtNum(Math.abs(r.jumpPct)*100,0)+"%").join(", ")}${jumpRows.length>3?" …":""}). A check, not a block.</div>` : ""}
     ${(!tooEarly && !movedRows.length) ? `<div class="banner info">ℹ No items had a cost move on ${esc(exportDate||"this date")} (nothing was purchased that day), so there is nothing to export.</div>` : ""}
@@ -5643,6 +5663,7 @@ function wireTabEvents(){
         DATA.purchaseCosts = DATA.purchaseCosts.filter(p=> !(p.baseProduct===bp && p.date===today));
         const entry = {date:today, baseProduct:bp, reason};
         if(currentUser) entry.loggedBy = currentUser.name;
+        entry.loggedTime = new Date().toTimeString().slice(0,8);
         DATA.purchaseIssues.push(entry);
         shoppingIssueEditing.delete(bp);
         shoppingBuyEditing.delete(bp);
@@ -5669,6 +5690,7 @@ function wireTabEvents(){
         DATA.purchaseCosts = DATA.purchaseCosts.filter(p=> !(p.baseProduct===bp && p.date===today));
         const entry = {date:today, baseProduct:bp, reason:SUFFICIENT_STOCK_REASON};
         if(currentUser) entry.loggedBy = currentUser.name;
+        entry.loggedTime = new Date().toTimeString().slice(0,8);
         DATA.purchaseIssues.push(entry);
         shoppingIssueEditing.delete(bp);
         shoppingBuyEditing.delete(bp);
@@ -5808,6 +5830,7 @@ function wireTabEvents(){
           DATA.purchaseCosts = DATA.purchaseCosts.filter(p=> !(p.baseProduct===bp && p.date===today));
           const entry = {date:today, baseProduct:bp, reason};
           if(currentUser) entry.loggedBy = currentUser.name;
+          entry.loggedTime = new Date().toTimeString().slice(0,8);
           DATA.purchaseIssues.push(entry);
           quickBuySelected = null;
           quickBuyEditingId = null;
@@ -5825,6 +5848,7 @@ function wireTabEvents(){
           DATA.purchaseCosts = DATA.purchaseCosts.filter(p=> !(p.baseProduct===bp && p.date===today));
           const entry = {date:today, baseProduct:bp, reason:SUFFICIENT_STOCK_REASON};
           if(currentUser) entry.loggedBy = currentUser.name;
+          entry.loggedTime = new Date().toTimeString().slice(0,8);
           DATA.purchaseIssues.push(entry);
           quickBuySelected = null;
           quickBuyEditingId = null;
