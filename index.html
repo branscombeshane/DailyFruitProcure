@@ -3542,7 +3542,7 @@ function renderHomeDashboard(){
           ${signoffBlocked
             ? `${needsActionRows.length ? `<div class="helptext" style="margin-bottom:8px;">Still need action today before you can sign off: ${shownOutstanding}${moreOutstanding>0?` and ${moreOutstanding} more`:""}. ${goto("shoppinglist","Open Shopping List →")}</div>` : ""}
                ${!stockCover.complete ? `<div class="helptext" style="margin-bottom:8px;">Last night's stock take (${esc(shortDayLabel(stockCover.since))}) is incomplete — ${stockCover.missing.length} item${stockCover.missing.length===1?"":"s"} not counted: ${stockCover.missing.slice(0,8).map(m=>esc(m.baseProduct)).join(", ")}${stockCover.missing.length>8?" and "+(stockCover.missing.length-8)+" more":""}. ${goto("stocktake","Open Stock Take →")}</div>` : ""}
-               ${!exportStatus.complete ? `<div class="helptext" style="margin-bottom:8px;">The Sage price export for ${esc(shortDayLabel(exportDue))} hasn't been completed (${exportStatus.companies.map(c=> esc(c.name)+": "+(c.complete?"done":(c.stale?"prices changed since it was downloaded — download again":(c.got?c.got+" of "+c.parts+" parts":"not downloaded")))).join(" · ")}). ${goto("sellingprices","Open Price Export →")}</div>` : ""}
+               ${!exportStatus.complete ? `<div class="helptext" style="margin-bottom:8px;">The Sage price export for ${esc(shortDayLabel(exportDue))} hasn't been completed (${exportStatus.companies.map(c=> esc(c.name)+": "+(c.complete?"done":(c.stale?"prices changed since it was downloaded — "+(c.parts>1 && c.partStates ? c.partStates.map((ps,ix)=> ps.state==="current" ? "" : "part "+(ix+1)).filter(Boolean).join(" and ")+" " : "")+"download again":(c.got?c.got+" of "+c.parts+" parts":"not downloaded")))).join(" · ")}). ${goto("sellingprices","Open Price Export →")}</div>` : ""}
                <button class="btn primary" id="signoffBtn" disabled title="${needsActionRows.length ? "Clear every Critical/Consider Buying item first" : (!stockCover.complete ? "Last night's stock take is incomplete" : "Complete the Sage price export first")}">Sign off for today</button>`
             : `<button class="btn primary" id="signoffBtn">Sign off for today</button>`}
         </div>` : (mySignoff ? `<div class="helptext" style="margin-top:12px;">You signed off for today at ${esc(fmtTime(mySignoff.time))}.</div>` : "")}
@@ -4331,11 +4331,29 @@ function priceExportStatus_(date, suggestionRows){
     // Only judged when EVERY download for this company+day carries a fingerprint (older downloads don't, and are judged on their shape).
     const sigKnown = mine.length>0 && mine.every(d=> d.sig);
     const stale = sigKnown && !expectedSigs.every(sg=> mine.some(d=> d.sig===sg));
-    if(!stale && logged.some(r=> r>=n)) return {key:c.key, name:c.name, got:parts, parts, complete:true, stale:false}; // one file covering the whole day (older downloads)
+    if(!stale && logged.some(r=> r>=n)) return {key:c.key, name:c.name, got:parts, parts, complete:true, stale:false, partStates:Array.from({length:parts},()=>({state:"current",by:"",at:""}))}; // one file covering the whole day (older downloads)
     const fullGot = Math.min(fullParts, logged.filter(r=> r>=SAGE_MAX_IMPORT_LINES).length);
     const tailGot = hasTail && logged.some(r=> r>0 && r<SAGE_MAX_IMPORT_LINES) ? 1 : 0;
     const got = fullGot + tailGot;
-    return {key:c.key, name:c.name, got, parts, complete: got>=parts && !stale, stale};
+    // Per-part state, so it is always visible WHICH part is current, which is outdated (downloaded, but the prices/costs in it have
+    // since changed) and which was never downloaded. A part is "current" when a download carries the fingerprint of what it would
+    // hold now; downloads from before fingerprints existed are judged on shape, as above.
+    const byTime = (a,b)=> (String(a.downloadedDate)+String(a.downloadedTime)).localeCompare(String(b.downloadedDate)+String(b.downloadedTime));
+    const partStates = [];
+    for(let i=0;i<parts;i++){
+      const tag = (i+1)+" of "+parts;
+      const hit = mine.filter(d=> d.sig && d.sig===expectedSigs[i]).sort(byTime).pop();
+      if(hit){ partStates.push({state:"current", by:hit.downloadedBy||"", at:hit.downloadedTime||""}); continue; }
+      if(!sigKnown){ // older downloads without fingerprints: judged on shape
+        const ok = i<fullParts ? logged.filter(r=> r>=SAGE_MAX_IMPORT_LINES).length>i : logged.some(r=> r>0 && r<SAGE_MAX_IMPORT_LINES);
+        if(ok){ partStates.push({state:"current", by:"", at:""}); continue; }
+      }
+      const tagged = mine.filter(d=> d.part===tag).sort(byTime).pop();
+      const untaggedSig = mine.some(d=> d.sig && !d.part);
+      if(tagged || untaggedSig){ const l = tagged || mine.filter(d=> d.sig && !d.part).sort(byTime).pop(); partStates.push({state:"outdated", by:l.downloadedBy||"", at:l.downloadedTime||""}); }
+      else partStates.push({state:"missing", by:"", at:""});
+    }
+    return {key:c.key, name:c.name, got, parts, complete: got>=parts && !stale, stale, partStates};
   });
   return {date, total:n, parts, got:companies.reduce((a,c)=>a+c.got,0), complete:companies.every(c=>c.complete), companies, changedItems: companies.some(c=>c.stale) ? changedItems : [], changedDetail: companies.some(c=>c.stale) ? changedDetail : []};
 }
@@ -4787,10 +4805,14 @@ function renderSellingPrices(){
   const canCostDownload = !tooEarly && !unpricedLines.length && !zeroCostRows.length && movedRows.length > 0;
   const costTitle = tooEarly ? "A day's export can only be downloaded from the next morning" : unpricedLines.length ? "Confirm every received price first (Confirm Prices tab)" : zeroCostRows.length ? "Fix the R0 cost item(s) first" : "No items had a cost move on this date";
   const downloadTitle = tooEarly ? "A day's export can only be downloaded from the next morning" : unpricedLines.length ? "Confirm every received price first (Confirm Prices tab)" : zeroCostRows.length ? "Fix the R0 cost item(s) first" : !plCo ? "Choose the Sage company first (Step 1)" : !sagePriceListFile ? "Upload a fresh Items export from "+plCo.name+" first (below) — otherwise Sage would zero every other price list" : plDupCodes.length ? "Two Item Setup rows share one Item code — see the red banner" : plMissing.length ? "Some items aren't in the uploaded Sage Items export — see the red banner" : "No items had a cost or price move on this date";
+  const pxsNow = movedRows.length ? priceExportStatus_(sellingCsvDate, rows) : null;
+  const myParts = (pxsNow && plCo) ? ((pxsNow.companies.find(c=> c.key===plCo.key)||{}).partStates || []) : [];
   const partButtons = Array.from({length:csvParts}, (_,i)=>{
     const from = i*SAGE_MAX_IMPORT_LINES + 1, to = Math.min(movedRows.length, (i+1)*SAGE_MAX_IMPORT_LINES);
     const label = (plCo ? plCo.name+" · " : "") + (csvParts===1 ? "Download price file" : `price file part ${i+1} of ${csvParts} (rows ${from}–${to})`);
-    return `<button class="btn primary" data-sellingcsv-part="${i}" ${canDownload?"":`disabled title="${esc(downloadTitle)}"`}>${label}</button>`;
+    const ps = myParts[i];
+    const tag = !ps ? "" : ps.state==="current" ? ` <span style="font-weight:400;">✓ ${esc(ps.at ? fmtTime(ps.at) : "downloaded")}${ps.by ? " · "+esc(ps.by) : ""}</span>` : ps.state==="outdated" ? ` <span style="font-weight:700;">⚠ outdated — download again</span>` : "";
+    return `<button class="btn primary" data-sellingcsv-part="${i}" ${canDownload?"":`disabled title="${esc(downloadTitle)}"`}${ps && ps.state==="outdated" ? ` style="background:var(--warn);border-color:var(--warn);"` : (ps && ps.state==="current" ? ` style="opacity:.7;"` : "")}>${label}${tag}</button>`;
   }).join("");
   const costParts = Math.max(1, Math.ceil(movedRows.length / SAGE_MAX_COST_LINES));
   const costButtons = Array.from({length:costParts}, (_,i)=>{
@@ -4907,7 +4929,7 @@ function renderSellingPrices(){
     </div>
     ${tooEarly ? `<div class="banner critical">🔒 The price export for ${esc(exportDate||"this date")} can only be downloaded from the next calendar day, so every delivery has the chance to be received and priced first. Pick an earlier purchase date.</div>` : ""}
     ${(!tooEarly && unpricedLines.length) ? `<div class="banner critical"><span>🔒 ${unpricedLines.length} received line${unpricedLines.length===1?"":"s"} for ${esc(exportDate)} still need${unpricedLines.length===1?"s":""} a confirmed price (${unpricedLines.slice(0,6).map(p=>esc(p.baseProduct)).filter((v,ix,a)=>a.indexOf(v)===ix).join(", ")}${unpricedLines.length>6?"…":""}). The download unlocks once every received delivery for this date is priced.</span><button class="btn small" data-goto-tab="confirmprices">Go to Confirm Prices →</button></div>` : ""}
-    ${(()=>{ if(tooEarly) return ""; const st = priceExportStatus_(exportDate, rows); const stale = st.companies.filter(c=>c.stale); if(!stale.length) return ""; return `<div class="banner warn">⚠ Prices or costs for ${esc(exportDate)} changed after they were downloaded (${esc(stale.map(c=>c.name).join(" and "))}). Sage still has the old figures${st.changedDetail.length ? " for: "+st.changedDetail.slice(0,8).map(d=> esc(d.item)+" ("+(d.oldPrice===null?"not sent":"price "+money(d.oldPrice)+" → "+money(d.newPrice))+(d.oldCost!==null && Math.abs(d.oldCost-(d.newCost||0))>=0.005 ? ", cost "+money(d.oldCost)+" → "+money(d.newCost||0) : "")+")").join("; ")+(st.changedDetail.length>8?" and "+(st.changedDetail.length-8)+" more":"") : ""}. Download the price and cost files again for ${stale.length>1?"each company":esc(stale[0].name)} and import them — importing the same day twice is safe.</div>`; })()}
+    ${(()=>{ if(tooEarly) return ""; const st = priceExportStatus_(exportDate, rows); const stale = st.companies.filter(c=>c.stale); if(!stale.length) return ""; return `<div class="banner warn">⚠ Prices or costs for ${esc(exportDate)} changed after they were downloaded (${esc(stale.map(c=> c.name + (c.parts>1 && c.partStates ? " — " + c.partStates.map((ps,ix)=> ps.state==="current" ? "" : "part "+(ix+1)).filter(Boolean).join(" and ") : "")).join("; "))}). Sage still has the old figures${st.changedDetail.length ? " for: "+st.changedDetail.slice(0,8).map(d=> esc(d.item)+" ("+[(d.oldPrice===null ? "not sent" : (Math.abs(d.oldPrice-d.newPrice)>=0.005 ? "price "+money(d.oldPrice)+" → "+money(d.newPrice) : "")), (d.oldCost!==null && Math.abs(d.oldCost-(d.newCost||0))>=0.005 ? "cost "+money(d.oldCost)+" → "+money(d.newCost||0) : "")].filter(Boolean).join(", ")+")").join("; ")+(st.changedDetail.length>8?" and "+(st.changedDetail.length-8)+" more":"") : ""}. Download the price and cost files again for ${stale.length>1?"each company":esc(stale[0].name)} and import them — importing the same day twice is safe.</div>`; })()}
     ${zeroCostRows.length ? `<div class="banner critical">⚠ ${zeroCostRows.length} item${zeroCostRows.length===1?"":"s"} would export at R0 cost — a buy was logged (and received) with no price: ${zeroCostRows.slice(0,6).map(r=>esc(r.item)).join(", ")}${zeroCostRows.length>6?` and ${zeroCostRows.length-6} more`:""}. Download is blocked until a real price is entered in Purchase Costs or Confirm Prices.</div>` : ""}
     ${jumpRows.length ? `<div class="banner warn">⚠ ${jumpRows.length} price${jumpRows.length===1?"":"s"} moved more than ${Math.round(PRICE_JUMP_WARN_PCT*100)}% since the last export — highlighted below (${jumpRows.slice(0,3).map(r=>esc(r.item)+" "+(r.jumpPct>0?"▲":"▼")+fmtNum(Math.abs(r.jumpPct)*100,0)+"%").join(", ")}${jumpRows.length>3?" …":""}). A check, not a block.</div>` : ""}
     ${(!tooEarly && !movedRows.length) ? `<div class="banner info">ℹ No items had a cost move on ${esc(exportDate||"this date")} (nothing was purchased that day), so there is nothing to export.</div>` : ""}
