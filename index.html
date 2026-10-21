@@ -282,12 +282,24 @@
     .toast{transition:none;}
     .loadring::before, .loadmark, .loaddots span, .loadscene, .sync-spinner{animation:none;}
   }
+  /* Phone / narrow layout: the sidebar becomes a slim sticky top bar (menu button + current page + sync state).
+     The page list and the user/Logout/version footer live in a panel that opens under the bar. */
+  .mobilebar{display:none;}
   @media (max-width: 860px){
     .app{flex-direction:column;}
-    .sidebar{width:100%; height:auto; position:relative; flex-direction:row; overflow-x:auto;}
+    .sidebar{width:100%; height:auto; position:sticky; top:0; z-index:60; flex-direction:column; border-right:none; border-bottom:1px solid var(--line);}
+    .sidebar.open{max-height:100vh; max-height:100dvh; overflow-y:auto;}
     .brand{display:none;}
-    nav{display:flex; padding:8px;}
-    .navbtn{white-space:nowrap;}
+    .mobilebar{display:flex; align-items:center; gap:12px; padding:10px 14px; min-height:54px;}
+    .menubtn{display:inline-flex; align-items:center; gap:8px; padding:9px 14px; border-radius:8px; border:1px solid var(--line); background:var(--surface-2); color:var(--ink); font-size:15px; font-weight:600;}
+    .menubtn .bars{font-size:18px; line-height:1;}
+    .mobiletitle{flex:1; min-width:0; font-weight:600; font-size:15px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+    nav{display:none; padding:6px 10px 10px; overflow:visible; flex:none;}
+    .navfoot{display:none;}
+    .sidebar.open nav{display:block;}
+    .sidebar.open .navfoot{display:block;}
+    .navbtn{padding:13px 12px; font-size:15px;}
+    .navgrouplabel{font-size:11.5px;}
     .main{padding:18px;}
   }
 
@@ -329,7 +341,11 @@
 <body>
 
 <div class="app">
-  <aside class="sidebar">
+  <aside class="sidebar" id="sidebar">
+    <div class="mobilebar" id="mobileBar">
+      <button class="menubtn" id="menuToggle" aria-label="Open the page menu" aria-expanded="false"><span class="bars">☰</span><span id="menuToggleLabel">Menu</span></button>
+      <span class="mobiletitle" id="mobileTitle"></span>
+    </div>
     <div class="brand">
       <div class="mark">DF</div>
       <h1>Daily Fruit</h1>
@@ -538,7 +554,7 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 // day has had the chance to be received and priced first. Today's — or a future — purchase date is never allowed.
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
-const APP_BUILD = "2026-10-21 · Product GP Watch (from the Item Sales reports) · Made-to-order items can be removed from the stock take · Received-date grouping, changed-since-download check, queued download saves, lighter saves, stock take completeness checks, tick-box page access";
+const APP_BUILD = "2026-10-21 · Phone menu button · Product GP Watch (from the Item Sales reports) · Made-to-order items can be removed from the stock take · Received-date grouping, changed-since-download check, queued download saves, lighter saves, stock take completeness checks, tick-box page access";
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
 // often than it's audited in bulk, so opening the tab should land on today's entries, not the full history.
 let purchaseDateFilter = new Date().toISOString().slice(0,10);
@@ -2164,6 +2180,17 @@ function toast(msg){
 }
 
 // ---------- render shell ----------
+// Phone layout menu: open/closed state lives here so it survives the whole-page re-renders. On desktop the toggle is hidden
+// and the sidebar is always open, so this only ever matters at narrow widths.
+let mobileMenuOpen = false;
+function applyMobileMenu_(){
+  const sb = document.getElementById("sidebar"), tg = document.getElementById("menuToggle"), title = document.getElementById("mobileTitle");
+  if(sb) sb.classList.toggle("open", !!mobileMenuOpen);
+  if(tg){ tg.setAttribute("aria-expanded", mobileMenuOpen ? "true" : "false"); }
+  const lbl = document.getElementById("menuToggleLabel"); if(lbl) lbl.textContent = mobileMenuOpen ? "Close" : "Menu";
+  if(title){ const t = (typeof TABS!=="undefined") ? TABS.find(x=> x.id===currentTab) : null; title.textContent = (currentUser && t) ? t.label : ""; }
+}
+(function(){ document.addEventListener("click", (e)=>{ const b = e.target.closest && e.target.closest("#menuToggle"); if(!b) return; mobileMenuOpen = !mobileMenuOpen; applyMobileMenu_(); }); })();
 function renderNav(){
   const nav = document.getElementById("nav");
   if(!currentUser){ nav.innerHTML = ""; }
@@ -2177,8 +2204,9 @@ function renderNav(){
       const labelHtml = section.group ? `<div class="navgrouplabel">${esc(section.group)}</div>` : "";
       return `<div class="navgroup">${labelHtml}${itemsHtml}</div>`;
     }).join("");
-    nav.querySelectorAll(".navbtn").forEach(b=> b.addEventListener("click", ()=>{ setCurrentTab(b.dataset.tab); render(); }));
+    nav.querySelectorAll(".navbtn").forEach(b=> b.addEventListener("click", ()=>{ mobileMenuOpen = false; setCurrentTab(b.dataset.tab); render(); window.scrollTo(0,0); }));
   }
+  applyMobileMenu_();
 
   const footArea = document.getElementById("navFootArea");
   if(footArea){
@@ -2193,6 +2221,7 @@ function renderNav(){
         </div>`;
       const btn = document.getElementById("logoutBtn");
       if(btn) btn.addEventListener("click", ()=>{
+        mobileMenuOpen = false;
         currentUser = null;
         try{ sessionStorage.removeItem("dailyFruitUser"); }catch(e){}
         render();
