@@ -364,7 +364,7 @@ function emptyDataShape(){
     users: [{name:"Owner", pin:"1234", role:"owner"}],
     purchaseIssues: [], salesHistory: [],
     procurementSignoffs: [],
-    categoryBuffers: {}, productCycles: {}, productCeilings: {}, stockTakeExempt: {},
+    categoryBuffers: {}, productCycles: {}, productCeilings: {}, stockTakeExempt: {}, contractWatch: {},
     categories: [], categoryCostBuffers: {},
     // Shane's chosen starting point (2026-09): 32% default margin, with Eggs held lower at 30% and
     // Herbs/Mixes higher at 35% — set here so a brand-new setup (or a backup predating this feature)
@@ -410,6 +410,7 @@ function applyDataDefaults(d){
   if(!d.categoryCostBuffers) d.categoryCostBuffers = {}; // backward-compatible default: per-category cost (wastage) buffer %, Cost CSV only — distinct from categoryBuffers (a demand buffer)
   if(!d.shoppingListSnapshotDates) d.shoppingListSnapshotDates = []; // set by doGet, not saved by the app itself — defaults to empty until the nightly snapshot trigger has run at least once
   if(!d.productCycles) d.productCycles = {}; // backward-compatible default: per-product replenishment cycle length overrides (falls back to the global cover multiplier when unset)
+  if(!d.contractWatch) d.contractWatch = {}; // backward-compatible default: Contract GP Watch settings (minGp, and "off|company|list" flags for lists not watched)
   if(!d.stockTakeExempt) d.stockTakeExempt = {}; // backward-compatible default: base products NOT stock counted (made to order) — left out of Stock Take, the completeness checks and the Shopping List
   if(!d.productCeilings) d.productCeilings = {}; // backward-compatible default: per-product shelf-life hold ceilings (no cap when unset)
   if(!d.categories) d.categories = []; // backward-compatible default for backups predating explicit category management (name + hidden flag)
@@ -536,7 +537,7 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 // day has had the chance to be received and priced first. Today's — or a future — purchase date is never allowed.
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
-const APP_BUILD = "2026-10-19 · Made-to-order items can be removed from the stock take · Received-date grouping, changed-since-download check, queued download saves, lighter saves, stock take completeness checks, tick-box page access";
+const APP_BUILD = "2026-10-21 · Contract GP Watch (price lists + sales vs today's cost) · Made-to-order items can be removed from the stock take · Received-date grouping, changed-since-download check, queued download saves, lighter saves, stock take completeness checks, tick-box page access";
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
 // often than it's audited in bulk, so opening the tab should land on today's entries, not the full history.
 let purchaseDateFilter = new Date().toISOString().slice(0,10);
@@ -655,6 +656,7 @@ function parseSageItemsExport(text){
   const vatPIdx = head.findIndex(h=> h.trim().toLowerCase()==="vat type purchases");
   const defExIdx = head.findIndex(h=> /^default price list\s-\sexclusive$/i.test(h.trim()));
   const costIdx = head.findIndex(h=> h.trim().toLowerCase()==="cost");
+  const activeIdx = head.findIndex(h=> h.trim().toLowerCase()==="active");
   if(vatSIdx<0 || vatPIdx<0) return {error:"No \"VAT Type Sales\" / \"VAT Type Purchases\" columns found — export the full Items list from Sage."};
   const byCode = {}; let rowCount = 0;
   for(let n=1;n<lines.length;n++){
@@ -667,6 +669,7 @@ function parseSageItemsExport(text){
     vals.__desc = descIdx>=0 ? (p[descIdx]||"") : "";
     vals.__vatS = (p[vatSIdx]||"").trim(); vals.__vatP = (p[vatPIdx]||"").trim();
     vals.__defEx = defExIdx>=0 ? (p[defExIdx]||"") : ""; vals.__cost = costIdx>=0 ? (p[costIdx]||"") : "";
+    vals.__active = activeIdx>=0 ? !/^(false|no|0)$/i.test((p[activeIdx]||"").trim()) : true;
     byCode[code] = vals; rowCount++;
   }
   if(!rowCount) return {error:"No item rows found in the file."};
@@ -731,6 +734,7 @@ const NAV = [
   ]},
   {group:"Pricing", items:[
     {id:"sellingprices", label:"Price Export"},
+    {id:"contractwatch", label:"Contract GP Watch"},
   ]},
   {group:"Stock Take", items:[
     {id:"stocktake", label:"Input Stock Levels"},
@@ -760,7 +764,7 @@ if(!TABS.some(t=>t.id===currentTab)){
 // "home" (the landing Dashboard) is Owner + Procurement only, by Shane's explicit request — Stock Taker,
 // Receiving and Market stay scoped to their single-purpose tab(s), same as before.
 const ROLE_TABS = {
-  owner: ["home","shoppinglist","quickbuy","shoppingarchive","receiving","dashboard","salesdata","itemsetup","recipes","purchase","confirmprices","pricehistory","marketstatements","sellingprices","stocktake","users","stockvariance","marketmapping"],
+  owner: ["home","shoppinglist","quickbuy","shoppingarchive","receiving","dashboard","salesdata","itemsetup","recipes","purchase","confirmprices","pricehistory","marketstatements","sellingprices","contractwatch","stocktake","users","stockvariance","marketmapping"],
   procurement: ["home","shoppinglist","quickbuy","shoppingarchive","receiving","purchase","confirmprices","pricehistory","marketstatements","sellingprices","stocktake"],
   stocktaker: ["stocktake","receiving"],
   receiving: ["receiving"],
@@ -1208,6 +1212,278 @@ function shoppingListComputed(referenceDate){
     return a.baseProduct.localeCompare(b.baseProduct);
   });
   return rows;
+}
+
+// ---------- Contract GP Watch ----------
+// Customers on fixed price lists hold their price for a month, but produce costs jump mid-month, so a list priced at a good margin on
+// the 1st can be thin or under water by the 15th. Two checks, both against TODAY's replacement cost (latest received cost + the category
+// wastage buffer — the same cost the Price Export sends to Sage), so a cost jump shows up the day it happens:
+//  1. Price list watch — every price on every watched Sage price list (from an Items export) against today's cost.
+//  2. Sales watch — what customers were ACTUALLY invoiced this month (a Sales By Customer report), at today's cost, ranked by rand impact.
+// Both uploads stay in this browser tab for the day (like the Price Export's Items export); nothing price-list-sized is written to the sheet.
+let cwCompany = "dfv";
+let cwItems = {};   // company -> {name, loadedAt, names:[list names], byCode:{code:{d:desc, c:SageCost, a:active, p:{listName:exPrice}}}, rowCount}
+let cwSales = {};   // company -> {name, loadedAt, start, end, rows:[{cust, code, desc, qty, total, first, last}]}
+let cwStatus = "flag";  // flag (negative + low) | neg | low | all
+let cwListFilter = "", cwCustFilter = "", cwSearch = "", cwRestored = false, cwUseSage = false;
+const CW_MAX_ROWS = 300;
+function cwRestore_(){
+  if(cwRestored) return; cwRestored = true;
+  try{
+    const st = JSON.parse(sessionStorage.getItem("dfContractWatch")||"null");
+    if(st && st.day===todaySA()){ cwItems = st.items||{}; cwSales = st.sales||{}; }
+  }catch(e){}
+}
+function cwRemember_(){ try{ sessionStorage.setItem("dfContractWatch", JSON.stringify({day:todaySA(), items:cwItems, sales:cwSales})); }catch(e){ /* too big or blocked — only means no restore after a reload */ } }
+function cwMinGp_(){ const v = DATA.contractWatch && DATA.contractWatch.minGp; return (v===undefined||v===null||v==="") ? 0.20 : Number(v); }
+function cwParseItems_(text){
+  const res = parseSageItemsExport(text);
+  if(res.error) return res;
+  const companies = sageCompaniesInExport_(res.listCols);
+  if(companies.length!==1) return {error: companies.length ? "This Items export looks like it holds price lists from more than one company." : "Couldn't tell which company this Items export is from — its price list names don't match Daily Fruit – Veg or Pyroca 79."};
+  const names = Array.from(new Set(res.listCols.filter(h=> /\s-\sExclusive$/i.test(h)).map(h=> h.replace(/\s-\sExclusive$/i,"").trim())));
+  const byCode = {};
+  Object.keys(res.byCode).forEach(code=>{
+    const v = res.byCode[code]; const p = {};
+    names.forEach(n=>{ const x = Number(String(v[n+" - Exclusive"]||"").replace(",",".")); if(x>0) p[n] = x; });
+    byCode[code] = {d:v.__desc||"", c:Number(v.__cost)||0, a:v.__active!==false, p};
+  });
+  return {company:companies[0], names, byCode, rowCount:res.rowCount};
+}
+// Sage's "Sales By Customer Report": a customer-name line, then per invoice a "dd/mm/yyyy,REF," line, item lines ",,CODE - Description,qty,total",
+// and a "Total:" line. Rolled up here to one row per customer + item (credit notes net off).
+function cwParseSales_(text){
+  const lines = String(text||"").replace(/^﻿/,"").split(/\r?\n/);
+  let cust = "", date = "", start = "", end = "", company = "";
+  const agg = {};
+  const iso = d=> d.slice(6,10)+"-"+d.slice(3,5)+"-"+d.slice(0,2);
+  lines.forEach((line, i)=>{
+    if(!line.trim()) return;
+    const p = csvParseLine(line);
+    const nonEmpty = p.filter(x=>x!=="");
+    if(i<4){
+      if(/pyroca/i.test(p[0]||"")) company = "pyroca"; else if(/daily fruit/i.test(p[0]||"")) company = "dfv";
+      if(/start date/i.test(p[3]||"")) start = iso(p[4]||"");
+      if(/end date/i.test(p[3]||"")) end = iso(p[4]||"");
+      return;
+    }
+    if(/^\d{2}\/\d{2}\/\d{4}$/.test(p[0]||"")){ date = iso(p[0]); return; }
+    if((p[0]||"")==="" && /^\S+ - /.test(p[2]||"")){
+      const code = p[2].split(" - ")[0].trim();
+      const qty = Number(p[3]), total = Number(p[4]);
+      if(!cust || !code || isNaN(qty) || isNaN(total)) return;
+      const k = cust+"|"+code;
+      const a = agg[k] || (agg[k] = {cust, code, desc:p[2].slice(code.length+3), qty:0, total:0, first:date, last:date});
+      a.qty += qty; a.total += total; if(date && (!a.first || date<a.first)) a.first = date; if(date && date>a.last) a.last = date;
+      return;
+    }
+    if(nonEmpty.length===1 && !/^(name|total|sales by customer report|date)/i.test(nonEmpty[0])) cust = nonEmpty[0];
+  });
+  const rows = Object.values(agg);
+  if(!rows.length) return {error:"No invoice lines found — this should be Sage's \"Sales By Customer Report\" exported as CSV."};
+  return {company, start, end, rows};
+}
+function cwCosts_(){
+  const pm = applyCostBuffers_(latestPurchaseCostMap());
+  const prev = new Date(todaySA().slice(0,8)+"01T00:00:00Z"); prev.setUTCDate(0);
+  const asOf = prev.toISOString().slice(0,10); // last day of last month — what the cost was when this month's contracts were set
+  const pm0 = applyCostBuffers_(latestPurchaseCostMap(asOf));
+  const now = {}, start = {};
+  DATA.itemSetup.forEach(it=>{
+    if(!it.itemCode) return;
+    const c = itemCostPerUnit(it.item, pm); if(c!==null && c>0) now[it.itemCode] = c;
+    const c0 = itemCostPerUnit(it.item, pm0); if(c0!==null && c0>0) start[it.itemCode] = c0;
+  });
+  return {now, start, asOf};
+}
+let cwSkipped_ = 0; // lines left out because the app has no cost for the item (counted each render)
+function cwStatusOf_(gp, minGp){ return gp<0 ? "neg" : (gp<minGp ? "low" : "ok"); }
+function cwListRows_(co, costs, minGp){
+  const f = cwItems[co]; if(!f) return [];
+  const off = n=> DATA.contractWatch && DATA.contractWatch["off|"+co+"|"+n];
+  const out = [];
+  f.names.forEach(n=>{
+    if(/^not in use/i.test(n) || /^default price list$/i.test(n) || off(n)) return;
+    Object.keys(f.byCode).forEach(code=>{
+      const e = f.byCode[code]; const price = e.p[n];
+      if(!price || e.a===false) return;
+      let cost = costs.now[code], src = "app";
+      if(cost===undefined){ if(cwUseSage && e.c>0){ cost = e.c; src = "Sage"; } else { cwSkipped_++; return; } }
+      const gp = (price-cost)/price, c0 = costs.start[code];
+      out.push({list:n, code, desc:e.d, price, cost, src, gp, move:(c0 && costs.now[code]) ? costs.now[code]/c0-1 : null, status:cwStatusOf_(gp, minGp)});
+    });
+  });
+  return out;
+}
+function cwSalesRows_(co, costs, minGp){
+  const s = cwSales[co]; if(!s) return [];
+  const f = cwItems[co];
+  const endEff = (s.end && s.end < todaySA()) ? s.end : todaySA();
+  const days = s.start ? Math.max(1, Math.round((new Date(endEff+"T00:00:00Z") - new Date(s.start+"T00:00:00Z"))/86400000)+1) : 30;
+  const weeks = days/7;
+  const out = [];
+  s.rows.forEach(r=>{
+    if(!(r.qty>0) || !(r.total>0)) return;
+    let cost = costs.now[r.code], src = "app";
+    if(cost===undefined){ const c = f && f.byCode[r.code] ? f.byCode[r.code].c : 0; if(cwUseSage && c>0){ cost = c; src = "Sage"; } else { cwSkipped_++; return; } }
+    const price = r.total/r.qty, gp = (price-cost)/price, profit = r.total - r.qty*cost;
+    out.push({cust:r.cust, code:r.code, desc:r.desc, qty:r.qty, price, cost, src, gp, profit, perWeek:profit/weeks, shortfall: gp<minGp ? r.qty*(cost/(1-minGp)-price) : 0, status:cwStatusOf_(gp, minGp)});
+  });
+  return out;
+}
+function cwFilterStatus_(rows){
+  if(cwStatus==="all") return rows;
+  if(cwStatus==="neg") return rows.filter(r=> r.status==="neg");
+  if(cwStatus==="low") return rows.filter(r=> r.status==="low");
+  return rows.filter(r=> r.status!=="ok");
+}
+function cwGpChip_(r){ return r.status==="neg" ? chip(fmtNum(r.gp*100,1)+"%","critical") : r.status==="low" ? chip(fmtNum(r.gp*100,1)+"%","warn") : chip(fmtNum(r.gp*100,1)+"%","good"); }
+function renderContractWatch(){
+  cwRestore_();
+  const co = cwCompany, minGp = cwMinGp_();
+  const costs = cwCosts_();
+  const f = cwItems[co], s = cwSales[co];
+  cwSkipped_ = 0;
+  const listRowsAll = cwListRows_(co, costs, minGp);
+  const skippedList = cwSkipped_; cwSkipped_ = 0;
+  const salesRowsAll = cwSalesRows_(co, costs, minGp);
+  const skippedSales = cwSkipped_;
+  const cnt = (rows, st)=> rows.filter(r=> r.status===st).length;
+  const lossTotal = salesRowsAll.filter(r=> r.status==="neg").reduce((a,r)=> a + r.profit, 0);
+  const lossWeek = salesRowsAll.filter(r=> r.status==="neg").reduce((a,r)=> a + r.perWeek, 0);
+  const coTabs = Object.values(SAGE_COMPANIES).map(c=> `<button class="btn ${c.key===co?"primary":""}" data-cw-company="${c.key}">${esc(c.name)}</button>`).join(" ");
+  const tile = (label, value, status, color, sub)=> `<div class="stat" data-cw-status="${status}" style="cursor:pointer;" title="Click to show these lines"><div class="label">${label}</div><div class="value" style="color:${color};">${value}</div>${sub?`<div class="helptext">${sub}</div>`:""}</div>`;
+  const tiles = `<div class="cardrow">
+    ${tile("Price lists under water", f ? cnt(listRowsAll,"neg") : "—", "neg", cnt(listRowsAll,"neg") ? "var(--critical)" : "inherit", "lines priced below today's cost")}
+    ${tile("Price lists below "+fmtNum(minGp*100,0)+"%", f ? cnt(listRowsAll,"low") : "—", "low", cnt(listRowsAll,"low") ? "var(--warn)" : "inherit", "thin but still profitable")}
+    ${tile("Invoiced under water", s ? cnt(salesRowsAll,"neg") : "—", "neg", cnt(salesRowsAll,"neg") ? "var(--critical)" : "inherit", s ? "customer lines this month" : "upload a sales report")}
+    ${tile("Loss at today's cost", s ? money(Math.round(lossTotal)) : "—", "neg", lossTotal<0 ? "var(--critical)" : "inherit", s ? (lossWeek<0 ? money(Math.round(lossWeek))+" per week" : "") : "")}
+  </div>`;
+  const loadCard = (title, kind, obj, desc)=> `
+    <div class="card"><div class="cardhead"><div><h3>${title}</h3><div class="desc">${desc}</div></div></div>
+      <div class="cardbody" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
+        <input type="file" accept=".csv,text/csv" id="cwFile_${kind}">
+        ${obj ? `<span class="helptext">Loaded: <b>${esc(obj.name)}</b> · ${esc(obj.loadedAt)}${obj.start ? " · period "+esc(obj.start)+" to "+esc(obj.end) : ""}${obj.rowCount ? " · "+obj.rowCount+" items" : ""}</span> <button class="btn small" data-cw-clear="${kind}">Clear</button>` : `<span class="helptext">Nothing loaded for ${esc(SAGE_COMPANIES[co].name)} yet.</span>`}
+      </div></div>`;
+  const listNames = f ? f.names.filter(n=> !/^not in use/i.test(n) && !/^default price list$/i.test(n)) : [];
+  const listToggles = f ? `<div class="card"><div class="cardhead"><div><h3>Price lists to watch</h3><div class="desc">Tick the lists that are fixed contract prices. Untick any that aren't (e.g. a percentage-off-default list you don't want flagged). "Not In Use" lists and the Default Price List are always hidden (the Price Export already keeps the default list at your target margin).</div></div></div>
+      <div class="cardbody" style="display:flex;flex-wrap:wrap;gap:14px;">${listNames.map(n=>{ const on = !(DATA.contractWatch && DATA.contractWatch["off|"+co+"|"+n]); return `<label style="display:flex;gap:6px;align-items:center;"><input type="checkbox" data-cw-list="${esc(n)}" ${on?"checked":""}> ${esc(n)}</label>`; }).join("")}</div></div>` : "";
+  const q = cwSearch.trim().toLowerCase();
+  const statusSel = `<select id="cwStatusSel">${[["flag","Under water + low GP"],["neg","Under water only"],["low","Low GP only"],["all","Everything"]].map(([v,l])=>`<option value="${v}" ${v===cwStatus?"selected":""}>${l}</option>`).join("")}</select>`;
+  const searchBox = `<div class="searchbar">🔍 <input type="text" id="cwSearch" placeholder="Search item or code…" value="${esc(cwSearch)}"></div>`;
+  // --- price list table
+  let listSection = "";
+  if(f){
+    let rows = cwFilterStatus_(listRowsAll);
+    if(cwListFilter) rows = rows.filter(r=> r.list===cwListFilter);
+    if(q) rows = rows.filter(r=> (r.desc+" "+r.code).toLowerCase().includes(q));
+    rows = rows.slice().sort((a,b)=> a.gp-b.gp);
+    const shown = rows.slice(0, CW_MAX_ROWS);
+    const listOpts = `<option value="">All lists</option>` + listNames.map(n=>`<option value="${esc(n)}" ${n===cwListFilter?"selected":""}>${esc(n)}</option>`).join("");
+    listSection = `<div class="card"><div class="cardhead"><div><h3>Price list watch</h3><div class="desc">Every contract price against today's cost (${esc(costs.asOf ? "cost 1st = last known on "+shortDayLabel(costs.asOf) : "")}). Cost is the latest received cost plus the wastage buffer; where the app has no cost for an item, Sage's own cost is used (marked).</div></div>
+        <div class="field" style="min-width:170px;"><label>List</label><select id="cwListSel">${listOpts}</select></div>
+        <div class="field" style="min-width:170px;"><label>Show</label>${statusSel}</div>${searchBox}
+        <button class="btn" id="cwExportLists" ${rows.length?"":"disabled"}>Export CSV</button></div>
+      <div class="cardbody" style="padding:0;"><div class="tablewrap" style="border:none;border-radius:0;max-height:560px;overflow-y:auto;"><table>
+        <thead><tr><th>List</th><th>Item</th><th class="num">Contract price</th><th class="num">Cost today</th><th class="num">GP %</th><th class="num">Cost since 1st</th></tr></thead>
+        <tbody>${shown.map(r=>`<tr><td>${esc(r.list)}</td><td>${esc(r.desc)} <span class="helptext">${esc(r.code)}</span></td><td class="num">${money(r.price)}</td><td class="num">${money(r.cost)}${r.src==="Sage"?` <span class="helptext" title="No cost in the app for this item — Sage's own cost is used">(Sage)</span>`:""}</td><td class="num">${cwGpChip_(r)}</td><td class="num">${r.move===null?"—":(r.move>0.005?`<span style="color:var(--critical);">▲ ${fmtNum(r.move*100,0)}%</span>`:(r.move<-0.005?`<span style="color:var(--good);">▼ ${fmtNum(Math.abs(r.move)*100,0)}%</span>`:"flat"))}</td></tr>`).join("") || `<tr><td colspan="6" class="empty">Nothing matches — no lines in this view.</td></tr>`}</tbody></table></div>
+        ${rows.length>CW_MAX_ROWS ? `<div class="helptext" style="padding:8px 14px;">Showing the worst ${CW_MAX_ROWS} of ${rows.length} lines — use the filters or Export CSV for the rest.</div>` : ""}</div></div>`;
+  }
+  // --- sales table
+  let salesSection = "";
+  if(s){
+    const custs = Array.from(new Set(salesRowsAll.map(r=>r.cust))).sort();
+    let rows = cwFilterStatus_(salesRowsAll);
+    if(cwCustFilter) rows = rows.filter(r=> r.cust===cwCustFilter);
+    if(q) rows = rows.filter(r=> (r.desc+" "+r.code).toLowerCase().includes(q));
+    rows = rows.slice().sort((a,b)=> (a.status==="neg" && b.status==="neg") ? a.profit-b.profit : (a.status==="neg" ? -1 : (b.status==="neg" ? 1 : b.shortfall-a.shortfall)));
+    const shown = rows.slice(0, CW_MAX_ROWS);
+    const custOpts = `<option value="">All customers</option>` + custs.map(c=>`<option value="${esc(c)}" ${c===cwCustFilter?"selected":""}>${esc(c)}</option>`).join("");
+    salesSection = `<div class="card"><div class="cardhead"><div><h3>Sales watch</h3><div class="desc">What each customer was actually invoiced (${esc(s.start)} to ${esc(s.end)}), at today's cost. "Profit at today's cost" = what this month's quantities would make if you bought them again now. Worst losses first.</div></div>
+        <div class="field" style="min-width:200px;"><label>Customer</label><select id="cwCustSel">${custOpts}</select></div>
+        <div class="field" style="min-width:170px;"><label>Show</label>${statusSel.replace('id="cwStatusSel"','id="cwStatusSel2"')}</div>${searchBox.replace('id="cwSearch"','id="cwSearch2"')}
+        <button class="btn" id="cwExportSales" ${rows.length?"":"disabled"}>Export CSV</button></div>
+      <div class="cardbody" style="padding:0;"><div class="tablewrap" style="border:none;border-radius:0;max-height:560px;overflow-y:auto;"><table>
+        <thead><tr><th>Customer</th><th>Item</th><th class="num">Qty</th><th class="num">Avg price paid</th><th class="num">Cost today</th><th class="num">GP %</th><th class="num">Profit at today's cost</th><th class="num">Per week</th></tr></thead>
+        <tbody>${shown.map(r=>`<tr><td>${esc(r.cust)}</td><td>${esc(r.desc)} <span class="helptext">${esc(r.code)}</span></td><td class="num">${fmtNum(r.qty,r.qty%1?2:0)}</td><td class="num">${money(r.price)}</td><td class="num">${money(r.cost)}${r.src==="Sage"?` <span class="helptext">(Sage)</span>`:""}</td><td class="num">${cwGpChip_(r)}</td><td class="num" style="${r.profit<0?"color:var(--critical);font-weight:600;":""}">${money(Math.round(r.profit*100)/100)}</td><td class="num">${money(Math.round(r.perWeek))}</td></tr>`).join("") || `<tr><td colspan="8" class="empty">Nothing matches — no lines in this view.</td></tr>`}</tbody></table></div>
+        ${rows.length>CW_MAX_ROWS ? `<div class="helptext" style="padding:8px 14px;">Showing the worst ${CW_MAX_ROWS} of ${rows.length} lines — use the filters or Export CSV for the rest.</div>` : ""}</div></div>`;
+  }
+  return `
+    <div class="pagehead"><div><h2>Contract GP Watch</h2><p>Catch fixed-price customers going thin or under water mid-month. Checked against today's replacement cost, so a cost jump shows up the day it happens.</p></div>
+      <div class="actions"><div style="display:flex;gap:6px;">${coTabs}</div></div></div>
+    <div class="card"><div class="cardbody" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
+      <div class="field" style="min-width:180px;"><label>Flag lines below this GP %</label><input type="number" min="0" max="90" step="1" class="rowinput num" id="cwMinGp" value="${fmtNum(minGp*100,0).replace(/,/g,"")}" data-pristine="${fmtNum(minGp*100,0).replace(/,/g,"")}" style="max-width:100px;"></div>
+      <label style="display:flex;gap:6px;align-items:center;"><input type="checkbox" id="cwUseSage" ${cwUseSage?"checked":""}> Also use Sage's own cost where the app has none${(skippedList||skippedSales) && !cwUseSage ? ` <span class="helptext">(${skippedList+skippedSales} lines left out — Sage's cost field is often stale)</span>` : ""}</label>
+      <span class="helptext">Red = under water (price below today's cost). Amber = below this GP %. Saved for everyone.</span></div></div>
+    ${tiles}
+    ${loadCard("1 · Items export (price lists)", "items", f, "Sage → Products &amp; Services → export the full Items list for "+esc(SAGE_COMPANIES[co].name)+". Gives every customer's contract price. Re-upload after a price list changes in Sage.")}
+    ${loadCard("2 · Sales By Customer report", "sales", s, "Sage → Reports → Sales By Customer → month to date, export CSV. Adds the real invoiced prices and quantities so losses are ranked in rands.")}
+    ${listToggles}
+    ${listSection}
+    ${salesSection}`;
+}
+function wireContractWatch(){
+  const busy = (fn)=>{ setSyncBusy(true); setTimeout(()=>{ try{ fn(); } finally { setSyncBusy(false); } }, 30); };
+  document.querySelectorAll("[data-cw-company]").forEach(b=> b.addEventListener("click", ()=>{ cwCompany = b.dataset.cwCompany; cwListFilter = ""; cwCustFilter = ""; render(); }));
+  document.querySelectorAll("[data-cw-status]").forEach(b=> b.addEventListener("click", ()=>{ cwStatus = b.dataset.cwStatus; render(); }));
+  const readFile = (kind, file)=>{
+    if(!file) return;
+    busy(()=>{
+      const reader = new FileReader();
+      reader.onload = ()=>{
+        const stamp = ()=> { const n = new Date(); return n.toISOString().slice(0,10)+" "+n.toTimeString().slice(0,5); };
+        if(kind==="items"){
+          const res = cwParseItems_(String(reader.result));
+          if(res.error){ toast(res.error); return; }
+          cwItems[res.company] = {name:file.name, loadedAt:stamp(), names:res.names, byCode:res.byCode, rowCount:res.rowCount};
+          cwCompany = res.company; // the file knows which company it is from
+          toast("Loaded "+res.rowCount+" items for "+SAGE_COMPANIES[res.company].name);
+        } else {
+          const res = cwParseSales_(String(reader.result));
+          if(res.error){ toast(res.error); return; }
+          const c = res.company || cwCompany;
+          cwSales[c] = {name:file.name, loadedAt:stamp(), start:res.start, end:res.end, rows:res.rows};
+          cwCompany = c;
+          toast("Loaded "+res.rows.length+" customer lines for "+SAGE_COMPANIES[c].name);
+        }
+        cwRemember_(); render();
+      };
+      reader.onerror = ()=> toast("Could not read that file");
+      reader.readAsText(file);
+    });
+  };
+  ["items","sales"].forEach(kind=>{ const el = document.getElementById("cwFile_"+kind); if(el) el.addEventListener("change", ()=>{ readFile(kind, el.files && el.files[0]); el.value = ""; }); });
+  document.querySelectorAll("[data-cw-clear]").forEach(b=> b.addEventListener("click", ()=>{ if(b.dataset.cwClear==="items") delete cwItems[cwCompany]; else delete cwSales[cwCompany]; cwRemember_(); render(); }));
+  const mg = document.getElementById("cwMinGp");
+  if(mg) mg.addEventListener("change", ()=>{
+    const v = Number(mg.value);
+    if(!(v>=0 && v<=90)){ toast("Enter a GP % between 0 and 90"); mg.value = mg.dataset.pristine; return; }
+    DATA.contractWatch = DATA.contractWatch || {}; DATA.contractWatch.minGp = v/100;
+    persist("GP threshold saved", ["contractWatch"]);
+  });
+  document.querySelectorAll("[data-cw-list]").forEach(cb=> cb.addEventListener("change", ()=>{
+    DATA.contractWatch = DATA.contractWatch || {};
+    const key = "off|"+cwCompany+"|"+cb.dataset.cwList;
+    if(cb.checked) delete DATA.contractWatch[key]; else DATA.contractWatch[key] = 1;
+    persist("Watched price lists saved", ["contractWatch"]);
+  }));
+  const bind = (id, fn, ev)=>{ const el = document.getElementById(id); if(el) el.addEventListener(ev||"change", fn); };
+  bind("cwUseSage", e=>{ cwUseSage = e.target.checked; render(); });
+  bind("cwStatusSel", e=>{ cwStatus = e.target.value; render(); }); bind("cwStatusSel2", e=>{ cwStatus = e.target.value; render(); });
+  bind("cwListSel", e=>{ cwListFilter = e.target.value; render(); }); bind("cwCustSel", e=>{ cwCustFilter = e.target.value; render(); });
+  const searchHandler = e=>{ cwSearch = e.target.value; const pos = e.target.selectionStart; render(); const el = document.getElementById(e.target.id); if(el){ el.focus(); try{ el.setSelectionRange(pos,pos); }catch(_){} } };
+  bind("cwSearch", searchHandler, "input"); bind("cwSearch2", searchHandler, "input");
+  const exportCsv = (name, header, rows)=> browserDownload(name, [header].concat(rows).map(r=> r.map(toCsvField).join(",")).join("\n"), "text/csv");
+  bind("cwExportLists", ()=>{
+    const costs = cwCosts_(), minGp = cwMinGp_(); let rows = cwFilterStatus_(cwListRows_(cwCompany, costs, minGp));
+    if(cwListFilter) rows = rows.filter(r=> r.list===cwListFilter);
+    exportCsv("contract_price_lists_"+cwCompany+"_"+todaySA()+".csv", ["List","Code","Item","Contract price","Cost today","GP %","Status"], rows.sort((a,b)=>a.gp-b.gp).map(r=>[r.list,r.code,r.desc,r.price.toFixed(2),r.cost.toFixed(2),(r.gp*100).toFixed(1),r.status==="neg"?"UNDER WATER":(r.status==="low"?"LOW":"OK")]));
+  }, "click");
+  bind("cwExportSales", ()=>{
+    const costs = cwCosts_(), minGp = cwMinGp_(); let rows = cwFilterStatus_(cwSalesRows_(cwCompany, costs, minGp));
+    if(cwCustFilter) rows = rows.filter(r=> r.cust===cwCustFilter);
+    exportCsv("contract_sales_watch_"+cwCompany+"_"+todaySA()+".csv", ["Customer","Code","Item","Qty","Avg price paid","Cost today","GP %","Profit at today's cost","Per week","Status"], rows.sort((a,b)=>a.profit-b.profit).map(r=>[r.cust,r.code,r.desc,r.qty,r.price.toFixed(2),r.cost.toFixed(2),(r.gp*100).toFixed(1),r.profit.toFixed(2),r.perWeek.toFixed(2),r.status==="neg"?"UNDER WATER":(r.status==="low"?"LOW":"OK")]));
+  }, "click");
 }
 
 // ---------- Stock Variance (shrinkage) ----------
@@ -1809,6 +2085,8 @@ async function loadData(){
   const res = await fetch(API_URL, {cache: "no-store"});
   if(!res.ok) throw new Error("Server returned " + res.status);
   const fresh = await res.json();
+  // The backend answers HTTP 200 with {ok:false,error} when it trips over something — never treat that as "empty data"
+  if(!fresh || fresh.ok===false || !Array.isArray(fresh.users)) throw new Error((fresh && fresh.error) ? String(fresh.error) : "The server answered, but sent no user list");
   return applyDataDefaults(fresh);
 }
 
@@ -2045,7 +2323,7 @@ function wireLoginEvents(){
     }catch(e){ /* offline / a blip — fall back to whatever's already loaded rather than blocking login */ }
     loginBusy = false;
     const u = (DATA.users||[]).find(x=> String(x.name).toLowerCase() === trimmedName.toLowerCase());
-    if(!u){ loginError = "Name not recognized"; render(); return; }
+    if(!u){ loginError = (DATA.users||[]).length ? "Name not recognized" : "No users came back from the server — reload the page. If it persists, check the Users tab in the Google Sheet."; render(); return; }
     if(String(u.pin) !== String(pin)){ loginError = "Incorrect PIN"; render(); return; }
     if(isUserDisabled_(u)){ loginError = "This account has been switched off — ask the owner."; render(); return; }
     currentUser = {name:u.name, role:u.role};
@@ -2142,6 +2420,7 @@ function render(){
     else if(currentTab==="pricehistory") pageHtml = renderPriceHistory();
     else if(currentTab==="marketstatements") pageHtml = renderMarketStatements();
     else if(currentTab==="sellingprices") pageHtml = renderSellingPrices();
+    else if(currentTab==="contractwatch") pageHtml = renderContractWatch();
     else if(currentTab==="stocktake") pageHtml = renderStockTake();
     else if(currentTab==="users") pageHtml = renderUsers();
     else if(currentTab==="stockvariance") pageHtml = renderStockVariance();
@@ -6825,6 +7104,8 @@ function wireTabEvents(){
       });
     }
   }
+
+  if(currentTab==="contractwatch") wireContractWatch();
 
   if(currentTab==="stockvariance"){
     const flagInput = document.getElementById("stockVarianceFlagPctInput");
