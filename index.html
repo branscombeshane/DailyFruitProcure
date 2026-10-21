@@ -364,7 +364,7 @@ function emptyDataShape(){
     users: [{name:"Owner", pin:"1234", role:"owner"}],
     purchaseIssues: [], salesHistory: [],
     procurementSignoffs: [],
-    categoryBuffers: {}, productCycles: {}, productCeilings: {}, stockTakeExempt: {}, contractWatch: {},
+    categoryBuffers: {}, productCycles: {}, productCeilings: {}, stockTakeExempt: {}, contractWatch: {}, itemGp: [],
     categories: [], categoryCostBuffers: {},
     // Shane's chosen starting point (2026-09): 32% default margin, with Eggs held lower at 30% and
     // Herbs/Mixes higher at 35% — set here so a brand-new setup (or a backup predating this feature)
@@ -410,6 +410,7 @@ function applyDataDefaults(d){
   if(!d.categoryCostBuffers) d.categoryCostBuffers = {}; // backward-compatible default: per-category cost (wastage) buffer %, Cost CSV only — distinct from categoryBuffers (a demand buffer)
   if(!d.shoppingListSnapshotDates) d.shoppingListSnapshotDates = []; // set by doGet, not saved by the app itself — defaults to empty until the nightly snapshot trigger has run at least once
   if(!d.productCycles) d.productCycles = {}; // backward-compatible default: per-product replenishment cycle length overrides (falls back to the global cover multiplier when unset)
+  if(!d.itemGp) d.itemGp = []; // backward-compatible default: per-day item GP kept from each submitted Item Sales report (Product GP Watch)
   if(!d.contractWatch) d.contractWatch = {}; // backward-compatible default: Contract GP Watch settings (minGp, and "off|company|list" flags for lists not watched)
   if(!d.stockTakeExempt) d.stockTakeExempt = {}; // backward-compatible default: base products NOT stock counted (made to order) — left out of Stock Take, the completeness checks and the Shopping List
   if(!d.productCeilings) d.productCeilings = {}; // backward-compatible default: per-product shelf-life hold ceilings (no cap when unset)
@@ -537,7 +538,7 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 // day has had the chance to be received and priced first. Today's — or a future — purchase date is never allowed.
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
-const APP_BUILD = "2026-10-21 · Contract GP Watch (price lists + sales vs today's cost) · Made-to-order items can be removed from the stock take · Received-date grouping, changed-since-download check, queued download saves, lighter saves, stock take completeness checks, tick-box page access";
+const APP_BUILD = "2026-10-21 · Product GP Watch (from the Item Sales reports) · Made-to-order items can be removed from the stock take · Received-date grouping, changed-since-download check, queued download saves, lighter saves, stock take completeness checks, tick-box page access";
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
 // often than it's audited in bulk, so opening the tab should land on today's entries, not the full history.
 let purchaseDateFilter = new Date().toISOString().slice(0,10);
@@ -734,7 +735,7 @@ const NAV = [
   ]},
   {group:"Pricing", items:[
     {id:"sellingprices", label:"Price Export"},
-    {id:"contractwatch", label:"Contract GP Watch"},
+    {id:"gpwatch", label:"Product GP Watch"},
   ]},
   {group:"Stock Take", items:[
     {id:"stocktake", label:"Input Stock Levels"},
@@ -764,7 +765,7 @@ if(!TABS.some(t=>t.id===currentTab)){
 // "home" (the landing Dashboard) is Owner + Procurement only, by Shane's explicit request — Stock Taker,
 // Receiving and Market stay scoped to their single-purpose tab(s), same as before.
 const ROLE_TABS = {
-  owner: ["home","shoppinglist","quickbuy","shoppingarchive","receiving","dashboard","salesdata","itemsetup","recipes","purchase","confirmprices","pricehistory","marketstatements","sellingprices","contractwatch","stocktake","users","stockvariance","marketmapping"],
+  owner: ["home","shoppinglist","quickbuy","shoppingarchive","receiving","dashboard","salesdata","itemsetup","recipes","purchase","confirmprices","pricehistory","marketstatements","sellingprices","gpwatch","stocktake","users","stockvariance","marketmapping"],
   procurement: ["home","shoppinglist","quickbuy","shoppingarchive","receiving","purchase","confirmprices","pricehistory","marketstatements","sellingprices","stocktake"],
   stocktaker: ["stocktake","receiving"],
   receiving: ["receiving"],
@@ -1214,275 +1215,181 @@ function shoppingListComputed(referenceDate){
   return rows;
 }
 
-// ---------- Contract GP Watch ----------
-// Customers on fixed price lists hold their price for a month, but produce costs jump mid-month, so a list priced at a good margin on
-// the 1st can be thin or under water by the 15th. Two checks, both against TODAY's replacement cost (latest received cost + the category
-// wastage buffer — the same cost the Price Export sends to Sage), so a cost jump shows up the day it happens:
-//  1. Price list watch — every price on every watched Sage price list (from an Items export) against today's cost.
-//  2. Sales watch — what customers were ACTUALLY invoiced this month (a Sales By Customer report), at today's cost, ranked by rand impact.
-// Both uploads stay in this browser tab for the day (like the Price Export's Items export); nothing price-list-sized is written to the sheet.
-let cwCompany = "dfv";
-let cwItems = {};   // company -> {name, loadedAt, names:[list names], byCode:{code:{d:desc, c:SageCost, a:active, p:{listName:exPrice}}}, rowCount}
-let cwSales = {};   // company -> {name, loadedAt, start, end, rows:[{cust, code, desc, qty, total, first, last}]}
-let cwStatus = "flag";  // flag (negative + low) | neg | low | all
-let cwListFilter = "", cwCustFilter = "", cwSearch = "", cwRestored = false, cwUseSage = false;
-const CW_MAX_ROWS = 300;
-function cwRestore_(){
-  if(cwRestored) return; cwRestored = true;
-  try{
-    const st = JSON.parse(sessionStorage.getItem("dfContractWatch")||"null");
-    if(st && st.day===todaySA()){ cwItems = st.items||{}; cwSales = st.sales||{}; }
-  }catch(e){}
-}
-function cwRemember_(){ try{ sessionStorage.setItem("dfContractWatch", JSON.stringify({day:todaySA(), items:cwItems, sales:cwSales})); }catch(e){ /* too big or blocked — only means no restore after a reload */ } }
-function cwMinGp_(){ const v = DATA.contractWatch && DATA.contractWatch.minGp; return (v===undefined||v===null||v==="") ? 0.20 : Number(v); }
-function cwParseItems_(text){
-  const res = parseSageItemsExport(text);
-  if(res.error) return res;
-  const companies = sageCompaniesInExport_(res.listCols);
-  if(companies.length!==1) return {error: companies.length ? "This Items export looks like it holds price lists from more than one company." : "Couldn't tell which company this Items export is from — its price list names don't match Daily Fruit – Veg or Pyroca 79."};
-  const names = Array.from(new Set(res.listCols.filter(h=> /\s-\sExclusive$/i.test(h)).map(h=> h.replace(/\s-\sExclusive$/i,"").trim())));
-  const byCode = {};
-  Object.keys(res.byCode).forEach(code=>{
-    const v = res.byCode[code]; const p = {};
-    names.forEach(n=>{ const x = Number(String(v[n+" - Exclusive"]||"").replace(",",".")); if(x>0) p[n] = x; });
-    byCode[code] = {d:v.__desc||"", c:Number(v.__cost)||0, a:v.__active!==false, p};
+// ---------- Product GP Watch ----------
+// Fresh produce costs jump mid-month while contract prices hold, so a product can slip to a thin or negative margin without anyone
+// noticing. This reads the Item Sales ("Sales By Item Report") files that already go into the system every day — Qty, Total Cost,
+// Total Selling per item — keeps each day's figures (DATA.itemGp, a rolling window), and flags products whose GP is low or negative.
+// It's per PRODUCT, not per customer: once a product is flagged, the digging into which customers/invoices is done in Sage.
+// "Total Cost" on that report is Sage's own cost (so it's only as current as the Average Cost file last imported), so each
+// row also shows what the product would make at today's replacement cost from the app's own purchase prices.
+const GP_KEEP_DAYS = 45;     // how many days of item GP the app keeps (older days are dropped when a new report is submitted)
+const GP_MAX_ROWS = 300;
+let gpPeriod = "month", gpCompany = "all", gpBasis = "sage", gpStatus = "flag", gpSort = "gp", gpSearch = "", gpOpen = "";
+function gpMinGp_(){ const v = DATA.contractWatch && DATA.contractWatch.minGp; return (v===undefined||v===null||v==="") ? 0.20 : Number(v); }
+function gpIgnoreKey_(company, item){ return "ignore|"+company+"|"+item; }
+// the rows submitSalesUpload hands to DATA.itemGp for one report date (both companies)
+function gpRowsFromReports_(date, salesA, salesB){
+  const out = [];
+  [["pyroca", salesA], ["dfv", salesB]].forEach(([co, rows])=>{
+    const agg = {};
+    (rows||[]).forEach(r=>{ const a = agg[r.item] || (agg[r.item] = {qty:0, cost:0, selling:0}); a.qty += Number(r.qty)||0; a.cost += Number(r.cost)||0; a.selling += Number(r.selling)||0; });
+    Object.keys(agg).forEach(item=>{
+      const a = agg[item];
+      if(!a.qty && !a.selling && !a.cost) return;
+      out.push({date, company:co, item, qty:Math.round(a.qty*1000)/1000, cost:Math.round(a.cost*100)/100, selling:Math.round(a.selling*100)/100});
+    });
   });
-  return {company:companies[0], names, byCode, rowCount:res.rowCount};
+  return out;
 }
-// Sage's "Sales By Customer Report": a customer-name line, then per invoice a "dd/mm/yyyy,REF," line, item lines ",,CODE - Description,qty,total",
-// and a "Total:" line. Rolled up here to one row per customer + item (credit notes net off).
-function cwParseSales_(text){
-  const lines = String(text||"").replace(/^﻿/,"").split(/\r?\n/);
-  let cust = "", date = "", start = "", end = "", company = "";
-  const agg = {};
-  const iso = d=> d.slice(6,10)+"-"+d.slice(3,5)+"-"+d.slice(0,2);
-  lines.forEach((line, i)=>{
-    if(!line.trim()) return;
-    const p = csvParseLine(line);
-    const nonEmpty = p.filter(x=>x!=="");
-    if(i<4){
-      if(/pyroca/i.test(p[0]||"")) company = "pyroca"; else if(/daily fruit/i.test(p[0]||"")) company = "dfv";
-      if(/start date/i.test(p[3]||"")) start = iso(p[4]||"");
-      if(/end date/i.test(p[3]||"")) end = iso(p[4]||"");
-      return;
-    }
-    if(/^\d{2}\/\d{2}\/\d{4}$/.test(p[0]||"")){ date = iso(p[0]); return; }
-    if((p[0]||"")==="" && /^\S+ - /.test(p[2]||"")){
-      const code = p[2].split(" - ")[0].trim();
-      const qty = Number(p[3]), total = Number(p[4]);
-      if(!cust || !code || isNaN(qty) || isNaN(total)) return;
-      const k = cust+"|"+code;
-      const a = agg[k] || (agg[k] = {cust, code, desc:p[2].slice(code.length+3), qty:0, total:0, first:date, last:date});
-      a.qty += qty; a.total += total; if(date && (!a.first || date<a.first)) a.first = date; if(date && date>a.last) a.last = date;
-      return;
-    }
-    if(nonEmpty.length===1 && !/^(name|total|sales by customer report|date)/i.test(nonEmpty[0])) cust = nonEmpty[0];
-  });
-  const rows = Object.values(agg);
-  if(!rows.length) return {error:"No invoice lines found — this should be Sage's \"Sales By Customer Report\" exported as CSV."};
-  return {company, start, end, rows};
+function gpStoreReport_(date, salesA, salesB){
+  const keepFrom = new Date(todaySA()+"T00:00:00Z"); keepFrom.setUTCDate(keepFrom.getUTCDate()-GP_KEEP_DAYS);
+  const cut = keepFrom.toISOString().slice(0,10);
+  DATA.itemGp = (DATA.itemGp||[]).filter(r=> r.date!==date && r.date>=cut).concat(gpRowsFromReports_(date, salesA, salesB));
 }
-function cwCosts_(){
+function gpAllRows_(){
+  if((DATA.itemGp||[]).length) return {rows:DATA.itemGp, fromHistory:true};
+  // nothing archived yet — fall back to whichever report is currently loaded (its date wasn't kept, so it's shown as "latest")
+  return {rows:gpRowsFromReports_("latest", DATA.salesA, DATA.salesB), fromHistory:false};
+}
+function gpPeriodDates_(allDates){
+  const dates = allDates.slice().sort();
+  if(!dates.length) return [];
+  const last = dates[dates.length-1];
+  if(gpPeriod==="latest") return [last];
+  if(gpPeriod==="month"){ const m = (last==="latest" ? todaySA() : last).slice(0,7); return dates.filter(d=> d==="latest" || d.slice(0,7)===m); }
+  const n = Number(gpPeriod)||7;
+  const from = new Date((last==="latest" ? todaySA() : last)+"T00:00:00Z"); from.setUTCDate(from.getUTCDate()-(n-1));
+  const f = from.toISOString().slice(0,10);
+  return dates.filter(d=> d==="latest" || d>=f);
+}
+function gpTodayCosts_(){
   const pm = applyCostBuffers_(latestPurchaseCostMap());
-  const prev = new Date(todaySA().slice(0,8)+"01T00:00:00Z"); prev.setUTCDate(0);
-  const asOf = prev.toISOString().slice(0,10); // last day of last month — what the cost was when this month's contracts were set
-  const pm0 = applyCostBuffers_(latestPurchaseCostMap(asOf));
-  const now = {}, start = {};
-  DATA.itemSetup.forEach(it=>{
-    if(!it.itemCode) return;
-    const c = itemCostPerUnit(it.item, pm); if(c!==null && c>0) now[it.itemCode] = c;
-    const c0 = itemCostPerUnit(it.item, pm0); if(c0!==null && c0>0) start[it.itemCode] = c0;
+  const m = {};
+  DATA.itemSetup.forEach(it=>{ const c = itemCostPerUnit(it.item, pm); if(c!==null && c>0) m[it.item] = c; });
+  return m;
+}
+function gpCompute_(){
+  const minGp = gpMinGp_();
+  const {rows:all, fromHistory} = gpAllRows_();
+  const allDates = Array.from(new Set(all.map(r=>r.date)));
+  const dates = new Set(gpPeriodDates_(allDates));
+  const lastDate = allDates.slice().sort().pop() || "";
+  const today = gpTodayCosts_();
+  const ignored = DATA.contractWatch || {};
+  const agg = {};
+  all.forEach(r=>{
+    if(!dates.has(r.date)) return;
+    const k = r.company+"|"+r.item;
+    const a = agg[k] || (agg[k] = {key:k, company:r.company, item:r.item, qty:0, cost:0, selling:0, days:[]});
+    a.qty += r.qty; a.cost += r.cost; a.selling += r.selling;
+    a.days.push({date:r.date, qty:r.qty, cost:r.cost, selling:r.selling});
   });
-  return {now, start, asOf};
-}
-let cwSkipped_ = 0; // lines left out because the app has no cost for the item (counted each render)
-function cwStatusOf_(gp, minGp){ return gp<0 ? "neg" : (gp<minGp ? "low" : "ok"); }
-function cwListRows_(co, costs, minGp){
-  const f = cwItems[co]; if(!f) return [];
-  const off = n=> DATA.contractWatch && DATA.contractWatch["off|"+co+"|"+n];
-  const out = [];
-  f.names.forEach(n=>{
-    if(/^not in use/i.test(n) || /^default price list$/i.test(n) || off(n)) return;
-    Object.keys(f.byCode).forEach(code=>{
-      const e = f.byCode[code]; const price = e.p[n];
-      if(!price || e.a===false) return;
-      let cost = costs.now[code], src = "app";
-      if(cost===undefined){ if(cwUseSage && e.c>0){ cost = e.c; src = "Sage"; } else { cwSkipped_++; return; } }
-      const gp = (price-cost)/price, c0 = costs.start[code];
-      out.push({list:n, code, desc:e.d, price, cost, src, gp, move:(c0 && costs.now[code]) ? costs.now[code]/c0-1 : null, status:cwStatusOf_(gp, minGp)});
-    });
+  const out = [], ignoredRows = [];
+  Object.values(agg).forEach(a=>{
+    if(!(a.qty>0) || !(a.selling>0)) return; // credits, returns, or nothing sold at a price — not a margin question
+    const price = a.selling/a.qty, unitCost = a.cost/a.qty;
+    a.price = price; a.unitCost = unitCost; a.gpSage = (a.selling-a.cost)/a.selling; a.profit = a.selling-a.cost;
+    a.todayCost = today[a.item] || null;
+    a.gpToday = a.todayCost ? (price-a.todayCost)/price : null;
+    a.gp = (gpBasis==="today" && a.gpToday!==null) ? a.gpToday : a.gpSage;
+    a.basisCost = (gpBasis==="today" && a.todayCost) ? a.todayCost : unitCost;
+    a.status = a.gp<0 ? "neg" : (a.gp<minGp ? "low" : "ok");
+    a.shortfall = a.gp<minGp ? a.qty*(a.basisCost/(1-minGp)-price) : 0; // extra revenue needed over this period to have hit the target GP
+    a.days.sort((x,y)=> x.date.localeCompare(y.date));
+    const ld = a.days[a.days.length-1];
+    a.lastDate = ld.date; a.lastGp = (ld.qty>0 && ld.selling>0) ? (ld.selling-ld.cost)/ld.selling : null;
+    (ignored[gpIgnoreKey_(a.company,a.item)] ? ignoredRows : out).push(a);
   });
-  return out;
+  return {rows:out, ignoredRows, minGp, fromHistory, allDates:allDates.sort(), dates:Array.from(dates).sort(), lastDate};
 }
-function cwSalesRows_(co, costs, minGp){
-  const s = cwSales[co]; if(!s) return [];
-  const f = cwItems[co];
-  const endEff = (s.end && s.end < todaySA()) ? s.end : todaySA();
-  const days = s.start ? Math.max(1, Math.round((new Date(endEff+"T00:00:00Z") - new Date(s.start+"T00:00:00Z"))/86400000)+1) : 30;
-  const weeks = days/7;
-  const out = [];
-  s.rows.forEach(r=>{
-    if(!(r.qty>0) || !(r.total>0)) return;
-    let cost = costs.now[r.code], src = "app";
-    if(cost===undefined){ const c = f && f.byCode[r.code] ? f.byCode[r.code].c : 0; if(cwUseSage && c>0){ cost = c; src = "Sage"; } else { cwSkipped_++; return; } }
-    const price = r.total/r.qty, gp = (price-cost)/price, profit = r.total - r.qty*cost;
-    out.push({cust:r.cust, code:r.code, desc:r.desc, qty:r.qty, price, cost, src, gp, profit, perWeek:profit/weeks, shortfall: gp<minGp ? r.qty*(cost/(1-minGp)-price) : 0, status:cwStatusOf_(gp, minGp)});
-  });
-  return out;
+function gpFilter_(rows){
+  let r = rows;
+  if(gpCompany!=="all") r = r.filter(x=> x.company===gpCompany);
+  if(gpStatus==="neg") r = r.filter(x=> x.status==="neg");
+  else if(gpStatus==="low") r = r.filter(x=> x.status==="low");
+  else if(gpStatus==="flag") r = r.filter(x=> x.status!=="ok");
+  const q = gpSearch.trim().toLowerCase();
+  if(q) r = r.filter(x=> x.item.toLowerCase().includes(q));
+  return r.slice().sort((a,b)=> gpSort==="rand" ? (b.shortfall-a.shortfall) : (a.gp-b.gp));
 }
-function cwFilterStatus_(rows){
-  if(cwStatus==="all") return rows;
-  if(cwStatus==="neg") return rows.filter(r=> r.status==="neg");
-  if(cwStatus==="low") return rows.filter(r=> r.status==="low");
-  return rows.filter(r=> r.status!=="ok");
-}
-function cwGpChip_(r){ return r.status==="neg" ? chip(fmtNum(r.gp*100,1)+"%","critical") : r.status==="low" ? chip(fmtNum(r.gp*100,1)+"%","warn") : chip(fmtNum(r.gp*100,1)+"%","good"); }
-function renderContractWatch(){
-  cwRestore_();
-  const co = cwCompany, minGp = cwMinGp_();
-  const costs = cwCosts_();
-  const f = cwItems[co], s = cwSales[co];
-  cwSkipped_ = 0;
-  const listRowsAll = cwListRows_(co, costs, minGp);
-  const skippedList = cwSkipped_; cwSkipped_ = 0;
-  const salesRowsAll = cwSalesRows_(co, costs, minGp);
-  const skippedSales = cwSkipped_;
-  const cnt = (rows, st)=> rows.filter(r=> r.status===st).length;
-  const lossTotal = salesRowsAll.filter(r=> r.status==="neg").reduce((a,r)=> a + r.profit, 0);
-  const lossWeek = salesRowsAll.filter(r=> r.status==="neg").reduce((a,r)=> a + r.perWeek, 0);
-  const coTabs = Object.values(SAGE_COMPANIES).map(c=> `<button class="btn ${c.key===co?"primary":""}" data-cw-company="${c.key}">${esc(c.name)}</button>`).join(" ");
-  const tile = (label, value, status, color, sub)=> `<div class="stat" data-cw-status="${status}" style="cursor:pointer;" title="Click to show these lines"><div class="label">${label}</div><div class="value" style="color:${color};">${value}</div>${sub?`<div class="helptext">${sub}</div>`:""}</div>`;
+function gpChip_(gp, status){ if(gp===null||gp===undefined) return "—"; const t = fmtNum(gp*100,1)+"%"; return status==="neg" ? chip(t,"critical") : (status==="low" ? chip(t,"warn") : chip(t,"good")); }
+function gpStatusOfVal_(gp, minGp){ return gp===null ? "ok" : (gp<0 ? "neg" : (gp<minGp ? "low" : "ok")); }
+function renderGpWatch(){
+  const c = gpCompute_();
+  const minGp = c.minGp;
+  const scoped = gpCompany==="all" ? c.rows : c.rows.filter(r=>r.company===gpCompany);
+  const nNeg = scoped.filter(r=>r.status==="neg").length, nLow = scoped.filter(r=>r.status==="low").length;
+  const shortTotal = scoped.reduce((a,r)=> a + r.shortfall, 0);
+  const lossTotal = scoped.filter(r=>r.status==="neg").reduce((a,r)=> a + r.profit, 0);
+  const coName = k=> (SAGE_COMPANIES[k] ? SAGE_COMPANIES[k].name : k);
+  const periodLabel = c.fromHistory ? (c.dates.length+" report day"+(c.dates.length===1?"":"s")+" · "+(c.dates[0]||"")+(c.dates.length>1?" to "+c.dates[c.dates.length-1]:"")) : "the report currently loaded (no dated history yet)";
+  const tile = (label, value, status, color, sub)=> `<div class="stat" data-gp-status="${status}" style="cursor:pointer;" title="Click to show these products"><div class="label">${label}</div><div class="value" style="color:${color};">${value}</div>${sub?`<div class="helptext">${sub}</div>`:""}</div>`;
   const tiles = `<div class="cardrow">
-    ${tile("Price lists under water", f ? cnt(listRowsAll,"neg") : "—", "neg", cnt(listRowsAll,"neg") ? "var(--critical)" : "inherit", "lines priced below today's cost")}
-    ${tile("Price lists below "+fmtNum(minGp*100,0)+"%", f ? cnt(listRowsAll,"low") : "—", "low", cnt(listRowsAll,"low") ? "var(--warn)" : "inherit", "thin but still profitable")}
-    ${tile("Invoiced under water", s ? cnt(salesRowsAll,"neg") : "—", "neg", cnt(salesRowsAll,"neg") ? "var(--critical)" : "inherit", s ? "customer lines this month" : "upload a sales report")}
-    ${tile("Loss at today's cost", s ? money(Math.round(lossTotal)) : "—", "neg", lossTotal<0 ? "var(--critical)" : "inherit", s ? (lossWeek<0 ? money(Math.round(lossWeek))+" per week" : "") : "")}
+    ${tile("Selling below cost", nNeg, "neg", nNeg ? "var(--critical)" : "inherit", "products with negative GP")}
+    ${tile("Below "+fmtNum(minGp*100,0)+"% GP", nLow, "low", nLow ? "var(--warn)" : "inherit", "thin but still profitable")}
+    ${tile("Lost on negative lines", money(Math.round(lossTotal)), "neg", lossTotal<0 ? "var(--critical)" : "inherit", "over the period shown")}
+    ${tile("Short of "+fmtNum(minGp*100,0)+"% target", money(Math.round(shortTotal)), "flag", shortTotal>0 ? "var(--warn)" : "inherit", "extra revenue needed")}
   </div>`;
-  const loadCard = (title, kind, obj, desc)=> `
-    <div class="card"><div class="cardhead"><div><h3>${title}</h3><div class="desc">${desc}</div></div></div>
-      <div class="cardbody" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
-        <input type="file" accept=".csv,text/csv" id="cwFile_${kind}">
-        ${obj ? `<span class="helptext">Loaded: <b>${esc(obj.name)}</b> · ${esc(obj.loadedAt)}${obj.start ? " · period "+esc(obj.start)+" to "+esc(obj.end) : ""}${obj.rowCount ? " · "+obj.rowCount+" items" : ""}</span> <button class="btn small" data-cw-clear="${kind}">Clear</button>` : `<span class="helptext">Nothing loaded for ${esc(SAGE_COMPANIES[co].name)} yet.</span>`}
-      </div></div>`;
-  const listNames = f ? f.names.filter(n=> !/^not in use/i.test(n) && !/^default price list$/i.test(n)) : [];
-  const listToggles = f ? `<div class="card"><div class="cardhead"><div><h3>Price lists to watch</h3><div class="desc">Tick the lists that are fixed contract prices. Untick any that aren't (e.g. a percentage-off-default list you don't want flagged). "Not In Use" lists and the Default Price List are always hidden (the Price Export already keeps the default list at your target margin).</div></div></div>
-      <div class="cardbody" style="display:flex;flex-wrap:wrap;gap:14px;">${listNames.map(n=>{ const on = !(DATA.contractWatch && DATA.contractWatch["off|"+co+"|"+n]); return `<label style="display:flex;gap:6px;align-items:center;"><input type="checkbox" data-cw-list="${esc(n)}" ${on?"checked":""}> ${esc(n)}</label>`; }).join("")}</div></div>` : "";
-  const q = cwSearch.trim().toLowerCase();
-  const statusSel = `<select id="cwStatusSel">${[["flag","Under water + low GP"],["neg","Under water only"],["low","Low GP only"],["all","Everything"]].map(([v,l])=>`<option value="${v}" ${v===cwStatus?"selected":""}>${l}</option>`).join("")}</select>`;
-  const searchBox = `<div class="searchbar">🔍 <input type="text" id="cwSearch" placeholder="Search item or code…" value="${esc(cwSearch)}"></div>`;
-  // --- price list table
-  let listSection = "";
-  if(f){
-    let rows = cwFilterStatus_(listRowsAll);
-    if(cwListFilter) rows = rows.filter(r=> r.list===cwListFilter);
-    if(q) rows = rows.filter(r=> (r.desc+" "+r.code).toLowerCase().includes(q));
-    rows = rows.slice().sort((a,b)=> a.gp-b.gp);
-    const shown = rows.slice(0, CW_MAX_ROWS);
-    const listOpts = `<option value="">All lists</option>` + listNames.map(n=>`<option value="${esc(n)}" ${n===cwListFilter?"selected":""}>${esc(n)}</option>`).join("");
-    listSection = `<div class="card"><div class="cardhead"><div><h3>Price list watch</h3><div class="desc">Every contract price against today's cost (${esc(costs.asOf ? "cost 1st = last known on "+shortDayLabel(costs.asOf) : "")}). Cost is the latest received cost plus the wastage buffer; where the app has no cost for an item, Sage's own cost is used (marked).</div></div>
-        <div class="field" style="min-width:170px;"><label>List</label><select id="cwListSel">${listOpts}</select></div>
-        <div class="field" style="min-width:170px;"><label>Show</label>${statusSel}</div>${searchBox}
-        <button class="btn" id="cwExportLists" ${rows.length?"":"disabled"}>Export CSV</button></div>
-      <div class="cardbody" style="padding:0;"><div class="tablewrap" style="border:none;border-radius:0;max-height:560px;overflow-y:auto;"><table>
-        <thead><tr><th>List</th><th>Item</th><th class="num">Contract price</th><th class="num">Cost today</th><th class="num">GP %</th><th class="num">Cost since 1st</th></tr></thead>
-        <tbody>${shown.map(r=>`<tr><td>${esc(r.list)}</td><td>${esc(r.desc)} <span class="helptext">${esc(r.code)}</span></td><td class="num">${money(r.price)}</td><td class="num">${money(r.cost)}${r.src==="Sage"?` <span class="helptext" title="No cost in the app for this item — Sage's own cost is used">(Sage)</span>`:""}</td><td class="num">${cwGpChip_(r)}</td><td class="num">${r.move===null?"—":(r.move>0.005?`<span style="color:var(--critical);">▲ ${fmtNum(r.move*100,0)}%</span>`:(r.move<-0.005?`<span style="color:var(--good);">▼ ${fmtNum(Math.abs(r.move)*100,0)}%</span>`:"flat"))}</td></tr>`).join("") || `<tr><td colspan="6" class="empty">Nothing matches — no lines in this view.</td></tr>`}</tbody></table></div>
-        ${rows.length>CW_MAX_ROWS ? `<div class="helptext" style="padding:8px 14px;">Showing the worst ${CW_MAX_ROWS} of ${rows.length} lines — use the filters or Export CSV for the rest.</div>` : ""}</div></div>`;
-  }
-  // --- sales table
-  let salesSection = "";
-  if(s){
-    const custs = Array.from(new Set(salesRowsAll.map(r=>r.cust))).sort();
-    let rows = cwFilterStatus_(salesRowsAll);
-    if(cwCustFilter) rows = rows.filter(r=> r.cust===cwCustFilter);
-    if(q) rows = rows.filter(r=> (r.desc+" "+r.code).toLowerCase().includes(q));
-    rows = rows.slice().sort((a,b)=> (a.status==="neg" && b.status==="neg") ? a.profit-b.profit : (a.status==="neg" ? -1 : (b.status==="neg" ? 1 : b.shortfall-a.shortfall)));
-    const shown = rows.slice(0, CW_MAX_ROWS);
-    const custOpts = `<option value="">All customers</option>` + custs.map(c=>`<option value="${esc(c)}" ${c===cwCustFilter?"selected":""}>${esc(c)}</option>`).join("");
-    salesSection = `<div class="card"><div class="cardhead"><div><h3>Sales watch</h3><div class="desc">What each customer was actually invoiced (${esc(s.start)} to ${esc(s.end)}), at today's cost. "Profit at today's cost" = what this month's quantities would make if you bought them again now. Worst losses first.</div></div>
-        <div class="field" style="min-width:200px;"><label>Customer</label><select id="cwCustSel">${custOpts}</select></div>
-        <div class="field" style="min-width:170px;"><label>Show</label>${statusSel.replace('id="cwStatusSel"','id="cwStatusSel2"')}</div>${searchBox.replace('id="cwSearch"','id="cwSearch2"')}
-        <button class="btn" id="cwExportSales" ${rows.length?"":"disabled"}>Export CSV</button></div>
-      <div class="cardbody" style="padding:0;"><div class="tablewrap" style="border:none;border-radius:0;max-height:560px;overflow-y:auto;"><table>
-        <thead><tr><th>Customer</th><th>Item</th><th class="num">Qty</th><th class="num">Avg price paid</th><th class="num">Cost today</th><th class="num">GP %</th><th class="num">Profit at today's cost</th><th class="num">Per week</th></tr></thead>
-        <tbody>${shown.map(r=>`<tr><td>${esc(r.cust)}</td><td>${esc(r.desc)} <span class="helptext">${esc(r.code)}</span></td><td class="num">${fmtNum(r.qty,r.qty%1?2:0)}</td><td class="num">${money(r.price)}</td><td class="num">${money(r.cost)}${r.src==="Sage"?` <span class="helptext">(Sage)</span>`:""}</td><td class="num">${cwGpChip_(r)}</td><td class="num" style="${r.profit<0?"color:var(--critical);font-weight:600;":""}">${money(Math.round(r.profit*100)/100)}</td><td class="num">${money(Math.round(r.perWeek))}</td></tr>`).join("") || `<tr><td colspan="8" class="empty">Nothing matches — no lines in this view.</td></tr>`}</tbody></table></div>
-        ${rows.length>CW_MAX_ROWS ? `<div class="helptext" style="padding:8px 14px;">Showing the worst ${CW_MAX_ROWS} of ${rows.length} lines — use the filters or Export CSV for the rest.</div>` : ""}</div></div>`;
-  }
+  const sel = (id, opts, cur)=> `<select id="${id}">${opts.map(([v,l])=>`<option value="${v}" ${v===cur?"selected":""}>${l}</option>`).join("")}</select>`;
+  const rows = gpFilter_(c.rows);
+  const shown = rows.slice(0, GP_MAX_ROWS);
+  const detail = r=> `<tr><td colspan="9" style="background:var(--surface-2, rgba(0,0,0,.03));"><div style="display:flex;gap:24px;flex-wrap:wrap;align-items:flex-start;">
+      <table style="max-width:560px;"><thead><tr><th>Report day</th><th class="num">Qty</th><th class="num">Avg price</th><th class="num">Avg cost (Sage)</th><th class="num">GP %</th></tr></thead><tbody>${r.days.map(d=>{ const g = (d.qty>0 && d.selling>0) ? (d.selling-d.cost)/d.selling : null; return `<tr><td>${esc(d.date)}</td><td class="num">${d.qty>0?fmtNum(d.qty,d.qty%1?2:0):"—"}</td><td class="num">${d.qty>0?money(d.selling/d.qty):"—"}</td><td class="num">${d.qty>0?money(d.cost/d.qty):"—"}</td><td class="num">${gpChip_(g, gpStatusOfVal_(g,minGp))}</td></tr>`; }).join("")}</tbody></table>
+      <div class="helptext" style="max-width:340px;">${r.todayCost ? `At today's replacement cost (${money(r.todayCost)}) the average price of ${money(r.price)} makes <b>${fmtNum(r.gpToday*100,1)}%</b>.` : "The app has no purchase cost for this item, so there is no replacement-cost view."}
+        <div style="margin-top:8px;"><button class="btn small" data-gp-ignore="${esc(r.key)}">Ignore this product</button> <span>(samples, giveaways, made-to-order items you don't want flagged)</span></div></div></div></td></tr>`;
+  const body = shown.map(r=> `<tr data-gp-open="${esc(r.key)}" style="cursor:pointer;" title="Click for the day-by-day breakdown"><td>${gpOpen===r.key?"▾":"▸"} ${esc(r.item)}</td><td>${esc(coName(r.company))}</td><td class="num">${fmtNum(r.qty, r.qty%1?2:0)}</td><td class="num">${money(r.price)}</td><td class="num">${money(r.basisCost)}</td><td class="num">${gpChip_(r.gp, r.status)}</td><td class="num" style="${r.profit<0?"color:var(--critical);font-weight:600;":""}">${money(Math.round(r.profit))}</td><td class="num">${gpChip_(r.lastGp, gpStatusOfVal_(r.lastGp,minGp))}</td><td class="num">${r.gpToday===null ? "—" : gpChip_(r.gpToday, gpStatusOfVal_(r.gpToday,minGp))}</td></tr>` + (gpOpen===r.key ? detail(r) : "")).join("");
+  const ignoredCard = c.ignoredRows.length || Object.keys(DATA.contractWatch||{}).some(k=>k.startsWith("ignore|")) ? `<div class="card"><div class="cardhead"><div><h3>Ignored products</h3><div class="desc">Left out of every count above. Click to watch one again.</div></div></div><div class="cardbody" style="display:flex;gap:8px;flex-wrap:wrap;">${Object.keys(DATA.contractWatch||{}).filter(k=>k.startsWith("ignore|")).map(k=>{ const p = k.split("|"); return `<button class="btn small" data-gp-restore="${esc(k)}">↩ ${esc(p.slice(2).join("|"))} <span class="helptext">${esc(coName(p[1]))}</span></button>`; }).join("")}</div></div>` : "";
   return `
-    <div class="pagehead"><div><h2>Contract GP Watch</h2><p>Catch fixed-price customers going thin or under water mid-month. Checked against today's replacement cost, so a cost jump shows up the day it happens.</p></div>
-      <div class="actions"><div style="display:flex;gap:6px;">${coTabs}</div></div></div>
-    <div class="card"><div class="cardbody" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
-      <div class="field" style="min-width:180px;"><label>Flag lines below this GP %</label><input type="number" min="0" max="90" step="1" class="rowinput num" id="cwMinGp" value="${fmtNum(minGp*100,0).replace(/,/g,"")}" data-pristine="${fmtNum(minGp*100,0).replace(/,/g,"")}" style="max-width:100px;"></div>
-      <label style="display:flex;gap:6px;align-items:center;"><input type="checkbox" id="cwUseSage" ${cwUseSage?"checked":""}> Also use Sage's own cost where the app has none${(skippedList||skippedSales) && !cwUseSage ? ` <span class="helptext">(${skippedList+skippedSales} lines left out — Sage's cost field is often stale)</span>` : ""}</label>
-      <span class="helptext">Red = under water (price below today's cost). Amber = below this GP %. Saved for everyone.</span></div></div>
+    <div class="pagehead"><div><h2>Product GP Watch</h2><p>Spots products whose margin has gone thin or negative, using the Item Sales reports you already upload (Qty, Total Cost, Total Selling). Per product — dig into the customers and invoices in Sage once something is flagged.</p></div></div>
+    <div class="card"><div class="cardbody" style="display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap;">
+      <div class="field" style="min-width:170px;"><label>Period</label>${sel("gpPeriodSel",[["latest","Latest report day"],["7","Last 7 days"],["30","Last 30 days"],["month","This month"]],gpPeriod)}</div>
+      <div class="field" style="min-width:150px;"><label>Company</label>${sel("gpCompanySel",[["all","Both"],["dfv","Daily Fruit – Veg"],["pyroca","Pyroca 79"]],gpCompany)}</div>
+      <div class="field" style="min-width:230px;"><label>Judge GP by</label>${sel("gpBasisSel",[["sage","Sage cost on the report"],["today","Today's replacement cost"]],gpBasis)}</div>
+      <div class="field" style="min-width:140px;"><label>Flag below GP %</label><input type="number" min="0" max="90" step="1" class="rowinput num" id="gpMinGp" value="${fmtNum(minGp*100,0).replace(/,/g,"")}" data-pristine="${fmtNum(minGp*100,0).replace(/,/g,"")}" style="max-width:100px;"></div>
+      <span class="helptext">Showing ${esc(periodLabel)}. Red = selling below cost, amber = below the GP % set here (saved for everyone).</span></div></div>
+    ${c.fromHistory ? "" : `<div class="card"><div class="cardbody helptext">No dated history yet — this is the latest uploaded report only. Each Item Sales report you submit from now on is kept (${GP_KEEP_DAYS} days), so the week and month views build up as you go. Backdate older reports from the Item Sales page if you want them counted.</div></div>`}
     ${tiles}
-    ${loadCard("1 · Items export (price lists)", "items", f, "Sage → Products &amp; Services → export the full Items list for "+esc(SAGE_COMPANIES[co].name)+". Gives every customer's contract price. Re-upload after a price list changes in Sage.")}
-    ${loadCard("2 · Sales By Customer report", "sales", s, "Sage → Reports → Sales By Customer → month to date, export CSV. Adds the real invoiced prices and quantities so losses are ranked in rands.")}
-    ${listToggles}
-    ${listSection}
-    ${salesSection}`;
+    <div class="card"><div class="cardhead"><div><h3>Products by GP</h3><div class="desc">GP % = (Total Selling − Total Cost) ÷ Total Selling, added up over the period. "Last report" is the most recent day on its own, so a product that has only just turned shows up there first. "At today's cost" re-prices the same average selling price at today's replacement cost.</div></div>
+        <div class="field" style="min-width:170px;"><label>Show</label>${sel("gpStatusSel",[["flag","Below cost + low GP"],["neg","Below cost only"],["low","Low GP only"],["all","Everything"]],gpStatus)}</div>
+        <div class="field" style="min-width:170px;"><label>Worst first by</label>${sel("gpSortSel",[["gp","GP %"],["rand","Rand impact"]],gpSort)}</div>
+        <div class="searchbar">🔍 <input type="text" id="gpSearch" placeholder="Search product…" value="${esc(gpSearch)}"></div>
+        <button class="btn" id="gpExport" ${rows.length?"":"disabled"}>Export CSV</button></div>
+      <div class="cardbody" style="padding:0;"><div class="tablewrap" style="border:none;border-radius:0;max-height:620px;overflow-y:auto;"><table>
+        <thead><tr><th>Product</th><th>Company</th><th class="num">Qty</th><th class="num">Avg price</th><th class="num">Avg cost</th><th class="num">GP %</th><th class="num">GP R</th><th class="num">Last report</th><th class="num">At today's cost</th></tr></thead>
+        <tbody>${body || `<tr><td colspan="9" class="empty">${c.rows.length ? "No products match this view." : "No sales data yet — submit an Item Sales report first."}</td></tr>`}</tbody></table></div>
+        ${rows.length>GP_MAX_ROWS ? `<div class="helptext" style="padding:8px 14px;">Showing the worst ${GP_MAX_ROWS} of ${rows.length} products — narrow with the filters or Export CSV.</div>` : ""}</div></div>
+    ${ignoredCard}`;
 }
-function wireContractWatch(){
-  const busy = (fn)=>{ setSyncBusy(true); setTimeout(()=>{ try{ fn(); } finally { setSyncBusy(false); } }, 30); };
-  document.querySelectorAll("[data-cw-company]").forEach(b=> b.addEventListener("click", ()=>{ cwCompany = b.dataset.cwCompany; cwListFilter = ""; cwCustFilter = ""; render(); }));
-  document.querySelectorAll("[data-cw-status]").forEach(b=> b.addEventListener("click", ()=>{ cwStatus = b.dataset.cwStatus; render(); }));
-  const readFile = (kind, file)=>{
-    if(!file) return;
-    busy(()=>{
-      const reader = new FileReader();
-      reader.onload = ()=>{
-        const stamp = ()=> { const n = new Date(); return n.toISOString().slice(0,10)+" "+n.toTimeString().slice(0,5); };
-        if(kind==="items"){
-          const res = cwParseItems_(String(reader.result));
-          if(res.error){ toast(res.error); return; }
-          cwItems[res.company] = {name:file.name, loadedAt:stamp(), names:res.names, byCode:res.byCode, rowCount:res.rowCount};
-          cwCompany = res.company; // the file knows which company it is from
-          toast("Loaded "+res.rowCount+" items for "+SAGE_COMPANIES[res.company].name);
-        } else {
-          const res = cwParseSales_(String(reader.result));
-          if(res.error){ toast(res.error); return; }
-          const c = res.company || cwCompany;
-          cwSales[c] = {name:file.name, loadedAt:stamp(), start:res.start, end:res.end, rows:res.rows};
-          cwCompany = c;
-          toast("Loaded "+res.rows.length+" customer lines for "+SAGE_COMPANIES[c].name);
-        }
-        cwRemember_(); render();
-      };
-      reader.onerror = ()=> toast("Could not read that file");
-      reader.readAsText(file);
-    });
-  };
-  ["items","sales"].forEach(kind=>{ const el = document.getElementById("cwFile_"+kind); if(el) el.addEventListener("change", ()=>{ readFile(kind, el.files && el.files[0]); el.value = ""; }); });
-  document.querySelectorAll("[data-cw-clear]").forEach(b=> b.addEventListener("click", ()=>{ if(b.dataset.cwClear==="items") delete cwItems[cwCompany]; else delete cwSales[cwCompany]; cwRemember_(); render(); }));
-  const mg = document.getElementById("cwMinGp");
+function wireGpWatch(){
+  const bind = (id, fn, ev)=>{ const el = document.getElementById(id); if(el) el.addEventListener(ev||"change", fn); };
+  bind("gpPeriodSel", e=>{ gpPeriod = e.target.value; gpOpen = ""; render(); });
+  bind("gpCompanySel", e=>{ gpCompany = e.target.value; gpOpen = ""; render(); });
+  bind("gpBasisSel", e=>{ gpBasis = e.target.value; render(); });
+  bind("gpStatusSel", e=>{ gpStatus = e.target.value; render(); });
+  bind("gpSortSel", e=>{ gpSort = e.target.value; render(); });
+  bind("gpSearch", e=>{ gpSearch = e.target.value; const pos = e.target.selectionStart; render(); const el = document.getElementById("gpSearch"); if(el){ el.focus(); try{ el.setSelectionRange(pos,pos); }catch(_){} } }, "input");
+  const mg = document.getElementById("gpMinGp");
   if(mg) mg.addEventListener("change", ()=>{
     const v = Number(mg.value);
     if(!(v>=0 && v<=90)){ toast("Enter a GP % between 0 and 90"); mg.value = mg.dataset.pristine; return; }
     DATA.contractWatch = DATA.contractWatch || {}; DATA.contractWatch.minGp = v/100;
     persist("GP threshold saved", ["contractWatch"]);
   });
-  document.querySelectorAll("[data-cw-list]").forEach(cb=> cb.addEventListener("change", ()=>{
-    DATA.contractWatch = DATA.contractWatch || {};
-    const key = "off|"+cwCompany+"|"+cb.dataset.cwList;
-    if(cb.checked) delete DATA.contractWatch[key]; else DATA.contractWatch[key] = 1;
-    persist("Watched price lists saved", ["contractWatch"]);
+  document.querySelectorAll("[data-gp-status]").forEach(b=> b.addEventListener("click", ()=>{ gpStatus = b.dataset.gpStatus; render(); }));
+  document.querySelectorAll("[data-gp-open]").forEach(tr=> tr.addEventListener("click", ()=>{ gpOpen = (gpOpen===tr.dataset.gpOpen) ? "" : tr.dataset.gpOpen; render(); }));
+  document.querySelectorAll("[data-gp-ignore]").forEach(b=> b.addEventListener("click", (e)=>{
+    e.stopPropagation(); const [co, ...rest] = b.dataset.gpIgnore.split("|");
+    DATA.contractWatch = DATA.contractWatch || {}; DATA.contractWatch[gpIgnoreKey_(co, rest.join("|"))] = 1; gpOpen = "";
+    persist("Product ignored", ["contractWatch"]);
   }));
-  const bind = (id, fn, ev)=>{ const el = document.getElementById(id); if(el) el.addEventListener(ev||"change", fn); };
-  bind("cwUseSage", e=>{ cwUseSage = e.target.checked; render(); });
-  bind("cwStatusSel", e=>{ cwStatus = e.target.value; render(); }); bind("cwStatusSel2", e=>{ cwStatus = e.target.value; render(); });
-  bind("cwListSel", e=>{ cwListFilter = e.target.value; render(); }); bind("cwCustSel", e=>{ cwCustFilter = e.target.value; render(); });
-  const searchHandler = e=>{ cwSearch = e.target.value; const pos = e.target.selectionStart; render(); const el = document.getElementById(e.target.id); if(el){ el.focus(); try{ el.setSelectionRange(pos,pos); }catch(_){} } };
-  bind("cwSearch", searchHandler, "input"); bind("cwSearch2", searchHandler, "input");
-  const exportCsv = (name, header, rows)=> browserDownload(name, [header].concat(rows).map(r=> r.map(toCsvField).join(",")).join("\n"), "text/csv");
-  bind("cwExportLists", ()=>{
-    const costs = cwCosts_(), minGp = cwMinGp_(); let rows = cwFilterStatus_(cwListRows_(cwCompany, costs, minGp));
-    if(cwListFilter) rows = rows.filter(r=> r.list===cwListFilter);
-    exportCsv("contract_price_lists_"+cwCompany+"_"+todaySA()+".csv", ["List","Code","Item","Contract price","Cost today","GP %","Status"], rows.sort((a,b)=>a.gp-b.gp).map(r=>[r.list,r.code,r.desc,r.price.toFixed(2),r.cost.toFixed(2),(r.gp*100).toFixed(1),r.status==="neg"?"UNDER WATER":(r.status==="low"?"LOW":"OK")]));
-  }, "click");
-  bind("cwExportSales", ()=>{
-    const costs = cwCosts_(), minGp = cwMinGp_(); let rows = cwFilterStatus_(cwSalesRows_(cwCompany, costs, minGp));
-    if(cwCustFilter) rows = rows.filter(r=> r.cust===cwCustFilter);
-    exportCsv("contract_sales_watch_"+cwCompany+"_"+todaySA()+".csv", ["Customer","Code","Item","Qty","Avg price paid","Cost today","GP %","Profit at today's cost","Per week","Status"], rows.sort((a,b)=>a.profit-b.profit).map(r=>[r.cust,r.code,r.desc,r.qty,r.price.toFixed(2),r.cost.toFixed(2),(r.gp*100).toFixed(1),r.profit.toFixed(2),r.perWeek.toFixed(2),r.status==="neg"?"UNDER WATER":(r.status==="low"?"LOW":"OK")]));
+  document.querySelectorAll("[data-gp-restore]").forEach(b=> b.addEventListener("click", ()=>{
+    delete DATA.contractWatch[b.dataset.gpRestore]; persist("Product watched again", ["contractWatch"]);
+  }));
+  bind("gpExport", ()=>{
+    const c = gpCompute_(); const rows = gpFilter_(c.rows);
+    const head = ["Product","Company","Qty","Avg price","Avg cost","GP %","GP R","Last report GP %","GP % at today's cost","Status"];
+    const lines = [head].concat(rows.map(r=>[r.item, r.company, r.qty, r.price.toFixed(2), r.basisCost.toFixed(2), (r.gp*100).toFixed(1), r.profit.toFixed(2), r.lastGp===null?"":(r.lastGp*100).toFixed(1), r.gpToday===null?"":(r.gpToday*100).toFixed(1), r.status==="neg"?"BELOW COST":(r.status==="low"?"LOW":"OK")]));
+    browserDownload("product_gp_"+todaySA()+".csv", lines.map(r=>r.map(toCsvField).join(",")).join("\n"), "text/csv");
   }, "click");
 }
 
@@ -2420,7 +2327,7 @@ function render(){
     else if(currentTab==="pricehistory") pageHtml = renderPriceHistory();
     else if(currentTab==="marketstatements") pageHtml = renderMarketStatements();
     else if(currentTab==="sellingprices") pageHtml = renderSellingPrices();
-    else if(currentTab==="contractwatch") pageHtml = renderContractWatch();
+    else if(currentTab==="gpwatch") pageHtml = renderGpWatch();
     else if(currentTab==="stocktake") pageHtml = renderStockTake();
     else if(currentTab==="users") pageHtml = renderUsers();
     else if(currentTab==="stockvariance") pageHtml = renderStockVariance();
@@ -6488,7 +6395,8 @@ function wireTabEvents(){
       b.addEventListener("click", ()=>{
         const date = b.dataset.delHistory;
         DATA.salesHistory = DATA.salesHistory.filter(h=>h.date!==date);
-        persist("Removed sales history for " + date, ["salesHistory"]);
+        DATA.itemGp = (DATA.itemGp||[]).filter(r=> r.date!==date);
+        persist("Removed sales history for " + date, ["salesHistory","itemGp"]);
       });
     });
   }
@@ -6754,7 +6662,8 @@ function wireTabEvents(){
         const date = b.dataset.delSaleshistory;
         if(!confirm(`Delete the submitted Item Sales report for ${date}?\n\nThis removes it from the sales history archive entirely — Calculated Holdings' averages will stop counting it, and the date goes back to "missing" above. Only do this if the wrong CSV was uploaded for that date.`)) return;
         DATA.salesHistory = DATA.salesHistory.filter(h=> h.date!==date);
-        persist("Removed Item Sales report for " + date, ["salesHistory"]);
+        DATA.itemGp = (DATA.itemGp||[]).filter(r=> r.date!==date);
+        persist("Removed Item Sales report for " + date, ["salesHistory","itemGp"]);
       });
     });
   }
@@ -7105,7 +7014,7 @@ function wireTabEvents(){
     }
   }
 
-  if(currentTab==="contractwatch") wireContractWatch();
+  if(currentTab==="gpwatch") wireGpWatch();
 
   if(currentTab==="stockvariance"){
     const flagInput = document.getElementById("stockVarianceFlagPctInput");
@@ -7404,11 +7313,12 @@ function submitSalesUpload(){
     }
   });
   if(added) DATA.itemSetup.sort((a,b)=> a.item.localeCompare(b.item));
+  gpStoreReport_(salesUploadDate, DATA.salesA, DATA.salesB); // keep each item's qty/cost/selling for the Product GP Watch
   archiveSalesSnapshot(salesUploadDate); // build up the multi-day demand history Calculated Holdings relies on
   const msg = "Item Sales for " + salesUploadDate + " submitted — Pyroca: " + salesPendingA.filename + " (" + salesPendingA.rows.length + "), DF Veg: " + salesPendingB.filename + " (" + salesPendingB.rows.length + ")" + (added ? (", " + added + " new item(s) added to Item Setup") : "");
   salesPendingA = null;
   salesPendingB = null;
-  persist(msg, ["salesA","salesB","itemSetup","salesHistory"]);
+  persist(msg, ["salesA","salesB","itemSetup","salesHistory","itemGp"]);
 }
 
 function wireSalesDropzone(entityKey){
