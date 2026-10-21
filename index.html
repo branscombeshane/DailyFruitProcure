@@ -284,6 +284,9 @@
   }
   /* Phone / narrow layout: the sidebar becomes a slim sticky top bar (menu button + current page + sync state).
      The page list and the user/Logout/version footer live in a panel that opens under the bar. */
+  /* Product GP Watch: keep the product name pinned while the wide table scrolls sideways on a phone */
+  .gpcol1{position:sticky; left:0; background:var(--surface); z-index:1; min-width:150px; box-shadow:1px 0 0 var(--line);}
+  thead .gpcol1{z-index:3;}
   .mobilebar{display:none;}
   @media (max-width: 860px){
     .app{flex-direction:column;}
@@ -554,7 +557,7 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 // day has had the chance to be received and priced first. Today's — or a future — purchase date is never allowed.
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
-const APP_BUILD = "2026-10-21 · Phone menu button · Product GP Watch (from the Item Sales reports) · Made-to-order items can be removed from the stock take · Received-date grouping, changed-since-download check, queued download saves, lighter saves, stock take completeness checks, tick-box page access";
+const APP_BUILD = "2026-10-21 · GP Watch table: Short of target column + sticky product name · Phone menu button · Product GP Watch (from the Item Sales reports) · Made-to-order items can be removed from the stock take · Received-date grouping, changed-since-download check, queued download saves, lighter saves, stock take completeness checks, tick-box page access";
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
 // often than it's audited in bulk, so opening the tab should land on today's entries, not the full history.
 let purchaseDateFilter = new Date().toISOString().slice(0,10);
@@ -1328,6 +1331,7 @@ function gpFilter_(rows){
   if(q) r = r.filter(x=> x.item.toLowerCase().includes(q));
   return r.slice().sort((a,b)=> gpSort==="rand" ? (b.shortfall-a.shortfall) : (a.gp-b.gp));
 }
+function gpMoney_(v){ const n = Math.round(v); return (n<0 ? "-" : "") + money(Math.abs(n)).replace(/\.00$/,""); }
 function gpChip_(gp, status){ if(gp===null||gp===undefined) return "—"; const t = fmtNum(gp*100,1)+"%"; return status==="neg" ? chip(t,"critical") : (status==="low" ? chip(t,"warn") : chip(t,"good")); }
 function gpStatusOfVal_(gp, minGp){ return gp===null ? "ok" : (gp<0 ? "neg" : (gp<minGp ? "low" : "ok")); }
 function renderGpWatch(){
@@ -1349,11 +1353,11 @@ function renderGpWatch(){
   const sel = (id, opts, cur)=> `<select id="${id}">${opts.map(([v,l])=>`<option value="${v}" ${v===cur?"selected":""}>${l}</option>`).join("")}</select>`;
   const rows = gpFilter_(c.rows);
   const shown = rows.slice(0, GP_MAX_ROWS);
-  const detail = r=> `<tr><td colspan="9" style="background:var(--surface-2, rgba(0,0,0,.03));"><div style="display:flex;gap:24px;flex-wrap:wrap;align-items:flex-start;">
+  const detail = r=> `<tr><td colspan="10" style="position:static;background:var(--surface-2, rgba(0,0,0,.03));"><div style="display:flex;gap:24px;flex-wrap:wrap;align-items:flex-start;">
       <table style="max-width:560px;"><thead><tr><th>Report day</th><th class="num">Qty</th><th class="num">Avg price</th><th class="num">Avg cost (Sage)</th><th class="num">GP %</th></tr></thead><tbody>${r.days.map(d=>{ const g = (d.qty>0 && d.selling>0) ? (d.selling-d.cost)/d.selling : null; return `<tr><td>${esc(d.date)}</td><td class="num">${d.qty>0?fmtNum(d.qty,d.qty%1?2:0):"—"}</td><td class="num">${d.qty>0?money(d.selling/d.qty):"—"}</td><td class="num">${d.qty>0?money(d.cost/d.qty):"—"}</td><td class="num">${gpChip_(g, gpStatusOfVal_(g,minGp))}</td></tr>`; }).join("")}</tbody></table>
       <div class="helptext" style="max-width:340px;">${r.todayCost ? `At today's replacement cost (${money(r.todayCost)}) the average price of ${money(r.price)} makes <b>${fmtNum(r.gpToday*100,1)}%</b>.` : "The app has no purchase cost for this item, so there is no replacement-cost view."}
         <div style="margin-top:8px;"><button class="btn small" data-gp-ignore="${esc(r.key)}">Ignore this product</button> <span>(samples, giveaways, made-to-order items you don't want flagged)</span></div></div></div></td></tr>`;
-  const body = shown.map(r=> `<tr data-gp-open="${esc(r.key)}" style="cursor:pointer;" title="Click for the day-by-day breakdown"><td>${gpOpen===r.key?"▾":"▸"} ${esc(r.item)}</td><td>${esc(coName(r.company))}</td><td class="num">${fmtNum(r.qty, r.qty%1?2:0)}</td><td class="num">${money(r.price)}</td><td class="num">${money(r.basisCost)}</td><td class="num">${gpChip_(r.gp, r.status)}</td><td class="num" style="${r.profit<0?"color:var(--critical);font-weight:600;":""}">${money(Math.round(r.profit))}</td><td class="num">${gpChip_(r.lastGp, gpStatusOfVal_(r.lastGp,minGp))}</td><td class="num">${r.gpToday===null ? "—" : gpChip_(r.gpToday, gpStatusOfVal_(r.gpToday,minGp))}</td></tr>` + (gpOpen===r.key ? detail(r) : "")).join("");
+  const body = shown.map(r=> `<tr data-gp-open="${esc(r.key)}" style="cursor:pointer;" title="Click for the day-by-day breakdown"><td class="gpcol1">${gpOpen===r.key?"▾":"▸"} ${esc(r.item)}</td><td class="num">${gpChip_(r.gp, r.status)}</td><td class="num" style="${r.shortfall>0?"color:var(--warn);font-weight:600;":""}">${r.shortfall>0 ? gpMoney_(r.shortfall) : "—"}</td><td class="num" style="${r.profit<0?"color:var(--critical);font-weight:600;":""}">${gpMoney_(r.profit)}</td><td class="num">${gpChip_(r.lastGp, gpStatusOfVal_(r.lastGp,minGp))}</td><td class="num">${r.gpToday===null ? "—" : gpChip_(r.gpToday, gpStatusOfVal_(r.gpToday,minGp))}</td><td>${esc(coName(r.company))}</td><td class="num">${fmtNum(r.qty, r.qty%1?2:0)}</td><td class="num">${money(r.price)}</td><td class="num">${money(r.basisCost)}</td></tr>` + (gpOpen===r.key ? detail(r) : "")).join("");
   const ignoredCard = c.ignoredRows.length || Object.keys(DATA.contractWatch||{}).some(k=>k.startsWith("ignore|")) ? `<div class="card"><div class="cardhead"><div><h3>Ignored products</h3><div class="desc">Left out of every count above. Click to watch one again.</div></div></div><div class="cardbody" style="display:flex;gap:8px;flex-wrap:wrap;">${Object.keys(DATA.contractWatch||{}).filter(k=>k.startsWith("ignore|")).map(k=>{ const p = k.split("|"); return `<button class="btn small" data-gp-restore="${esc(k)}">↩ ${esc(p.slice(2).join("|"))} <span class="helptext">${esc(coName(p[1]))}</span></button>`; }).join("")}</div></div>` : "";
   return `
     <div class="pagehead"><div><h2>Product GP Watch</h2><p>Spots products whose margin has gone thin or negative, using the Item Sales reports you already upload (Qty, Total Cost, Total Selling). Per product — dig into the customers and invoices in Sage once something is flagged.</p></div></div>
@@ -1365,14 +1369,14 @@ function renderGpWatch(){
       <span class="helptext">Showing ${esc(periodLabel)}. Red = selling below cost, amber = below the GP % set here (saved for everyone).</span></div></div>
     ${c.fromHistory ? "" : `<div class="card"><div class="cardbody helptext">No dated history yet — this is the latest uploaded report only. Each Item Sales report you submit from now on is kept (${GP_KEEP_DAYS} days), so the week and month views build up as you go. Backdate older reports from the Item Sales page if you want them counted.</div></div>`}
     ${tiles}
-    <div class="card"><div class="cardhead"><div><h3>Products by GP</h3><div class="desc">GP % = (Total Selling − Total Cost) ÷ Total Selling, added up over the period. "Last report" is the most recent day on its own, so a product that has only just turned shows up there first. "At today's cost" re-prices the same average selling price at today's replacement cost.</div></div>
+    <div class="card"><div class="cardhead"><div><h3>Products by GP</h3><div class="desc">GP % = (Total Selling − Total Cost) ÷ Total Selling, added up over the period. "Last report" is the most recent day on its own, so a product that has only just turned shows up there first. "Short of target" is the extra revenue this period needed to have made the target GP — sort by it to see where the rands are. "At today's cost" re-prices the same average selling price at today's replacement cost.</div></div>
         <div class="field" style="min-width:170px;"><label>Show</label>${sel("gpStatusSel",[["flag","Below cost + low GP"],["neg","Below cost only"],["low","Low GP only"],["all","Everything"]],gpStatus)}</div>
-        <div class="field" style="min-width:170px;"><label>Worst first by</label>${sel("gpSortSel",[["gp","GP %"],["rand","Rand impact"]],gpSort)}</div>
+        <div class="field" style="min-width:170px;"><label>Sort</label>${sel("gpSortSel",[["gp","GP % (lowest first)"],["rand","Short of target R (biggest first)"]],gpSort)}</div>
         <div class="searchbar">🔍 <input type="text" id="gpSearch" placeholder="Search product…" value="${esc(gpSearch)}"></div>
         <button class="btn" id="gpExport" ${rows.length?"":"disabled"}>Export CSV</button></div>
       <div class="cardbody" style="padding:0;"><div class="tablewrap" style="border:none;border-radius:0;max-height:620px;overflow-y:auto;"><table>
-        <thead><tr><th>Product</th><th>Company</th><th class="num">Qty</th><th class="num">Avg price</th><th class="num">Avg cost</th><th class="num">GP %</th><th class="num">GP R</th><th class="num">Last report</th><th class="num">At today's cost</th></tr></thead>
-        <tbody>${body || `<tr><td colspan="9" class="empty">${c.rows.length ? "No products match this view." : "No sales data yet — submit an Item Sales report first."}</td></tr>`}</tbody></table></div>
+        <thead><tr><th class="gpcol1">Product</th><th class="num">GP %</th><th class="num" title="Extra revenue this period needed to have hit the target GP">Short of target</th><th class="num" title="Selling minus cost over the period">Profit</th><th class="num">Last report</th><th class="num">At today's cost</th><th>Company</th><th class="num">Qty</th><th class="num">Avg price</th><th class="num">Avg cost</th></tr></thead>
+        <tbody>${body || `<tr><td colspan="10" class="empty">${c.rows.length ? "No products match this view." : "No sales data yet — submit an Item Sales report first."}</td></tr>`}</tbody></table></div>
         ${rows.length>GP_MAX_ROWS ? `<div class="helptext" style="padding:8px 14px;">Showing the worst ${GP_MAX_ROWS} of ${rows.length} products — narrow with the filters or Export CSV.</div>` : ""}</div></div>
     ${ignoredCard}`;
 }
@@ -1403,8 +1407,8 @@ function wireGpWatch(){
   }));
   bind("gpExport", ()=>{
     const c = gpCompute_(); const rows = gpFilter_(c.rows);
-    const head = ["Product","Company","Qty","Avg price","Avg cost","GP %","GP R","Last report GP %","GP % at today's cost","Status"];
-    const lines = [head].concat(rows.map(r=>[r.item, r.company, r.qty, r.price.toFixed(2), r.basisCost.toFixed(2), (r.gp*100).toFixed(1), r.profit.toFixed(2), r.lastGp===null?"":(r.lastGp*100).toFixed(1), r.gpToday===null?"":(r.gpToday*100).toFixed(1), r.status==="neg"?"BELOW COST":(r.status==="low"?"LOW":"OK")]));
+    const head = ["Product","Company","Qty","Avg price","Avg cost","GP %","Profit","Short of target R","Last report GP %","GP % at today's cost","Status"];
+    const lines = [head].concat(rows.map(r=>[r.item, r.company, r.qty, r.price.toFixed(2), r.basisCost.toFixed(2), (r.gp*100).toFixed(1), r.profit.toFixed(2), r.shortfall.toFixed(2), r.lastGp===null?"":(r.lastGp*100).toFixed(1), r.gpToday===null?"":(r.gpToday*100).toFixed(1), r.status==="neg"?"BELOW COST":(r.status==="low"?"LOW":"OK")]));
     browserDownload("product_gp_"+todaySA()+".csv", lines.map(r=>r.map(toCsvField).join(",")).join("\n"), "text/csv");
   }, "click");
 }
