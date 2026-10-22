@@ -557,7 +557,7 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 // day has had the chance to be received and priced first. Today's — or a future — purchase date is never allowed.
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
-const APP_BUILD = "2026-10-21 · GP Watch table: Short of target column + sticky product name · Phone menu button · Product GP Watch (from the Item Sales reports) · Made-to-order items can be removed from the stock take · Received-date grouping, changed-since-download check, queued download saves, lighter saves, stock take completeness checks, tick-box page access";
+const APP_BUILD = "2026-10-22 · Price Export: only changed costs flag a day as outdated, not margin/min-price changes · GP Watch table: Short of target column + sticky product name · Phone menu button · Product GP Watch (from the Item Sales reports) · Made-to-order items can be removed from the stock take · Received-date grouping, changed-since-download check, queued download saves, lighter saves, stock take completeness checks, tick-box page access";
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
 // often than it's audited in bulk, so opening the tab should land on today's entries, not the full history.
 let purchaseDateFilter = new Date().toISOString().slice(0,10);
@@ -1362,12 +1362,12 @@ function renderGpWatch(){
   return `
     <div class="pagehead"><div><h2>Product GP Watch</h2><p>Spots products whose margin has gone thin or negative, using the Item Sales reports you already upload (Qty, Total Cost, Total Selling). Per product — dig into the customers and invoices in Sage once something is flagged.</p></div></div>
     <div class="card"><div class="cardbody" style="display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap;">
-      <div class="field" style="min-width:170px;"><label>Period</label>${sel("gpPeriodSel",[["latest","Latest report day"],["7","Last 7 days"],["30","Last 30 days"],["month","This month"]],gpPeriod)}</div>
+      <div class="field" style="min-width:170px;"><label>Period</label>${c.fromHistory ? sel("gpPeriodSel",[["latest","Latest report day"],["7","Last 7 days"],["30","Last 30 days"],["month","This month"]],gpPeriod) : `<select id="gpPeriodSel" disabled title="Needs dated reports — see the note below"><option>Latest report only</option></select>`}</div>
       <div class="field" style="min-width:150px;"><label>Company</label>${sel("gpCompanySel",[["all","Both"],["dfv","Daily Fruit – Veg"],["pyroca","Pyroca 79"]],gpCompany)}</div>
       <div class="field" style="min-width:230px;"><label>Judge GP by</label>${sel("gpBasisSel",[["sage","Sage cost on the report"],["today","Today's replacement cost"]],gpBasis)}</div>
       <div class="field" style="min-width:140px;"><label>Flag below GP %</label><input type="number" min="0" max="90" step="1" class="rowinput num" id="gpMinGp" value="${fmtNum(minGp*100,0).replace(/,/g,"")}" data-pristine="${fmtNum(minGp*100,0).replace(/,/g,"")}" style="max-width:100px;"></div>
       <span class="helptext">Showing ${esc(periodLabel)}. Red = selling below cost, amber = below the GP % set here (saved for everyone).</span></div></div>
-    ${c.fromHistory ? "" : `<div class="card"><div class="cardbody helptext">No dated history yet — this is the latest uploaded report only. Each Item Sales report you submit from now on is kept (${GP_KEEP_DAYS} days), so the week and month views build up as you go. Backdate older reports from the Item Sales page if you want them counted.</div></div>`}
+    ${c.fromHistory ? "" : `<div class="card"><div class="cardbody helptext"><b>Period can't change yet.</b> The app only has the one Item Sales report that was already loaded before this page existed, and it has no date on it, so every period shows that same report. From the next Item Sales report you submit, each day is kept (${GP_KEEP_DAYS} days) and the 7-day, 30-day and this-month views start to differ and build up. To fill in earlier days now, re-submit those days' reports from the Item Sales page, choosing each report's date.</div></div>`}
     ${tiles}
     <div class="card"><div class="cardhead"><div><h3>Products by GP</h3><div class="desc">GP % = (Total Selling − Total Cost) ÷ Total Selling, added up over the period. "Last report" is the most recent day on its own, so a product that has only just turned shows up there first. "Short of target" is the extra revenue this period needed to have made the target GP — sort by it to see where the rands are. "At today's cost" re-prices the same average selling price at today's replacement cost.</div></div>
         <div class="field" style="min-width:170px;"><label>Show</label>${sel("gpStatusSel",[["flag","Below cost + low GP"],["neg","Below cost only"],["low","Low GP only"],["all","Everything"]],gpStatus)}</div>
@@ -4539,17 +4539,33 @@ function priceExportStatus_(date, suggestionRows){
   // that have since changed (a correction after the download, a late-priced delivery), so Sage is out of date for those items.
   const expectedSigs = []; for(let i=0;i<parts;i++) expectedSigs.push(partSig_(moved.slice(i*SAGE_MAX_IMPORT_LINES, (i+1)*SAGE_MAX_IMPORT_LINES)));
   const sentQuote = {}; (DATA.priceQuotes||[]).forEach(q=>{ if(q.date===date) sentQuote[q.item] = q; });
-  const changedRows = all.length ? moved.filter(r=>{ const q = sentQuote[r.item]; return !q || Math.abs(Number(q.price)-r.price)>=0.005 || Math.abs((Number(q.cost)||0)-(r.cost||0))>=0.005; }) : [];
+  // the newest day each item has been priced for (a later day's file supersedes an earlier one for that item)
+  const lastQuoteDate = {}; (DATA.priceQuotes||[]).forEach(q=>{ if(q.item && (!lastQuoteDate[q.item] || q.date>lastQuoteDate[q.item])) lastQuoteDate[q.item] = q.date; });
+  const changedRows = all.length ? moved.filter(r=>{ const q = sentQuote[r.item]; return !q || (Math.abs((Number(q.cost)||0)-(r.cost||0))>=0.005 && !(lastQuoteDate[r.item] > date)); }) : [];
   const changedItems = changedRows.map(r=>r.item);
   // What Sage was sent vs what the app would send now, so "changed since download" can be traced to the exact item and figure.
   const changedDetail = changedRows.map(r=>{ const q = sentQuote[r.item]; return {item:r.item, oldPrice:q?Number(q.price):null, newPrice:r.price, oldCost:q?(Number(q.cost)||0):null, newCost:r.cost}; });
+  // Lines that WERE sent that day but would no longer be in the file at all (cost removed/unconfirmed since, item no longer priceable).
+  if(all.length){ const nowSet = new Set(moved.map(r=>r.item)); Object.keys(sentQuote).forEach(it=>{ if(!nowSet.has(it)){ const q = sentQuote[it]; changedDetail.push({item:it, removed:true, oldPrice:Number(q.price), newPrice:null, oldCost:(Number(q.cost)||0), newCost:null}); } }); }
   // Every Sage company needs its own price file. Downloads logged before the company was recorded (no company) count for both.
+  // A part whose every line was SENT with the same cost it would carry now is up to date, even if its prices would come out
+  // differently today. Prices move with settings (a margin, a minimum price, a wastage buffer, the good-deal rule) as well as with
+  // costs, and a settings change is not a reason to call yesterday's download outdated — only a change to what the day's deliveries
+  // actually cost is. (Found 22 Oct 2026: new minimum prices flagged every recent day as "changed since download".)
+  // ...and a line whose cost DID change is no longer a worry once a LATER day's file has priced that item again — Sage then already
+  // holds a newer price, and importing this older day's file after it would only overwrite the newer price with an older one.
+  const partCostOk = [], priceDrift = new Set();
+  for(let i=0;i<parts;i++){
+    const slice = moved.slice(i*SAGE_MAX_IMPORT_LINES, (i+1)*SAGE_MAX_IMPORT_LINES);
+    partCostOk.push(slice.length>0 && slice.every(r=>{ const q = sentQuote[r.item]; return q && (Math.abs((Number(q.cost)||0)-(r.cost||0))<0.005 || lastQuoteDate[r.item] > date); }));
+    slice.forEach(r=>{ const q = sentQuote[r.item]; if(q && Math.abs((Number(q.cost)||0)-(r.cost||0))<0.005 && Math.abs(Number(q.price)-r.price)>=0.005) priceDrift.add(r.item); });
+  }
   const companies = Object.values(SAGE_COMPANIES).map(c=>{
     const logged = all.filter(d=> !d.company || d.company===c.key).map(d=> Number(d.rows)||0);
     const mine = all.filter(d=> !d.company || d.company===c.key);
     // Only judged when EVERY download for this company+day carries a fingerprint (older downloads don't, and are judged on their shape).
     const sigKnown = mine.length>0 && mine.every(d=> d.sig);
-    const stale = sigKnown && !expectedSigs.every(sg=> mine.some(d=> d.sig===sg));
+    const stale = sigKnown && !expectedSigs.every((sg,i)=> mine.some(d=> d.sig===sg) || partCostOk[i]);
     if(!stale && logged.some(r=> r>=n)) return {key:c.key, name:c.name, got:parts, parts, complete:true, stale:false, partStates:Array.from({length:parts},()=>({state:"current",by:"",at:""}))}; // one file covering the whole day (older downloads)
     const fullGot = Math.min(fullParts, logged.filter(r=> r>=SAGE_MAX_IMPORT_LINES).length);
     const tailGot = hasTail && logged.some(r=> r>0 && r<SAGE_MAX_IMPORT_LINES) ? 1 : 0;
@@ -4563,6 +4579,7 @@ function priceExportStatus_(date, suggestionRows){
       const tag = (i+1)+" of "+parts;
       const hit = mine.filter(d=> d.sig && d.sig===expectedSigs[i]).sort(byTime).pop();
       if(hit){ partStates.push({state:"current", by:hit.downloadedBy||"", at:hit.downloadedTime||""}); continue; }
+      if(sigKnown && partCostOk[i]){ const l = mine.slice().sort(byTime).pop(); partStates.push({state:"current", by:l?l.downloadedBy||"":"", at:l?l.downloadedTime||"":""}); continue; } // same costs sent; only a setting moved the price
       if(!sigKnown){ // older downloads without fingerprints: judged on shape
         const ok = i<fullParts ? logged.filter(r=> r>=SAGE_MAX_IMPORT_LINES).length>i : logged.some(r=> r>0 && r<SAGE_MAX_IMPORT_LINES);
         if(ok){ partStates.push({state:"current", by:"", at:""}); continue; }
@@ -4574,7 +4591,7 @@ function priceExportStatus_(date, suggestionRows){
     }
     return {key:c.key, name:c.name, got, parts, complete: got>=parts && !stale, stale, partStates};
   });
-  return {date, total:n, parts, got:companies.reduce((a,c)=>a+c.got,0), complete:companies.every(c=>c.complete), companies, changedItems: companies.some(c=>c.stale) ? changedItems : [], changedDetail: companies.some(c=>c.stale) ? changedDetail : []};
+  return {date, total:n, parts, got:companies.reduce((a,c)=>a+c.got,0), complete:companies.every(c=>c.complete), companies, changedItems: companies.some(c=>c.stale) ? changedItems : [], changedDetail: companies.some(c=>c.stale) ? changedDetail : [], priceDrift: Array.from(priceDrift)};
 }
 function renderConfirmPrices(){
   const todayStr = new Date().toISOString().slice(0,10);
@@ -5148,7 +5165,8 @@ function renderSellingPrices(){
     </div>
     ${tooEarly ? `<div class="banner critical">🔒 The price export for ${esc(exportDate||"this date")} can only be downloaded from the next calendar day, so every delivery has the chance to be received and priced first. Pick an earlier purchase date.</div>` : ""}
     ${(!tooEarly && unpricedLines.length) ? `<div class="banner critical"><span>🔒 ${unpricedLines.length} received line${unpricedLines.length===1?"":"s"} for ${esc(exportDate)} still need${unpricedLines.length===1?"s":""} a confirmed price (${unpricedLines.slice(0,6).map(p=>esc(p.baseProduct)).filter((v,ix,a)=>a.indexOf(v)===ix).join(", ")}${unpricedLines.length>6?"…":""}). The download unlocks once every received delivery for this date is priced.</span><button class="btn small" data-goto-tab="confirmprices">Go to Confirm Prices →</button></div>` : ""}
-    ${(()=>{ if(tooEarly) return ""; const st = priceExportStatus_(exportDate, rows); const stale = st.companies.filter(c=>c.stale); if(!stale.length) return ""; return `<div class="banner warn">⚠ Prices or costs for ${esc(exportDate)} changed after they were downloaded (${esc(stale.map(c=> c.name + (c.parts>1 && c.partStates ? " — " + c.partStates.map((ps,ix)=> ps.state==="current" ? "" : "part "+(ix+1)).filter(Boolean).join(" and ") : "")).join("; "))}). Sage still has the old figures${st.changedDetail.length ? " for: "+st.changedDetail.slice(0,8).map(d=> esc(d.item)+" ("+[(d.oldPrice===null ? "not sent" : (Math.abs(d.oldPrice-d.newPrice)>=0.005 ? "price "+money(d.oldPrice)+" → "+money(d.newPrice) : "")), (d.oldCost!==null && Math.abs(d.oldCost-(d.newCost||0))>=0.005 ? "cost "+money(d.oldCost)+" → "+money(d.newCost||0) : "")].filter(Boolean).join(", ")+")").join("; ")+(st.changedDetail.length>8?" and "+(st.changedDetail.length-8)+" more":"") : ""}. Download the price and cost files again for ${stale.length>1?"each company":esc(stale[0].name)} and import them — importing the same day twice is safe.</div>`; })()}
+    ${(()=>{ if(tooEarly) return ""; const st = priceExportStatus_(exportDate, rows); const stale = st.companies.filter(c=>c.stale); if(!stale.length) return ""; return `<div class="banner warn">⚠ Prices or costs for ${esc(exportDate)} changed after they were downloaded (${esc(stale.map(c=> c.name + (c.parts>1 && c.partStates ? " — " + c.partStates.map((ps,ix)=> ps.state==="current" ? "" : "part "+(ix+1)).filter(Boolean).join(" and ") : "")).join("; "))}). Sage still has the old figures${st.changedDetail.length ? " for: "+st.changedDetail.slice(0,25).map(d=> esc(d.item)+" ("+(d.removed ? "no longer in the file — was "+money(d.oldPrice) : [(d.oldPrice===null ? "not sent" : (Math.abs(d.oldPrice-d.newPrice)>=0.005 ? "price "+money(d.oldPrice)+" → "+money(d.newPrice) : "")), (d.oldCost!==null && Math.abs(d.oldCost-(d.newCost||0))>=0.005 ? "cost "+money(d.oldCost)+" → "+money(d.newCost||0) : "")].filter(Boolean).join(", "))+")").join("; ")+(st.changedDetail.length>25?" and "+(st.changedDetail.length-25)+" more":"") : " — no individual item's price or cost differs from what was recorded as sent, so this is a flag from the way the file splits into parts (a line added or removed shifts which part it falls in) or from a download made before the app recorded exact figures. Re-downloading clears it"}. Download the price and cost files again for ${stale.length>1?"each company":esc(stale[0].name)} and import them — importing the same day twice is safe.</div>`; })()}
+    ${(()=>{ if(tooEarly) return ""; const st = priceExportStatus_(exportDate, rows); const stale = st.companies.some(c=>c.stale); if(stale || !st.priceDrift || !st.priceDrift.length) return ""; return `<div class="helptext" style="margin:6px 0 10px;">ℹ ${st.priceDrift.length} price${st.priceDrift.length===1?"":"s"} in ${esc(exportDate)}'s file would come out differently today (a margin, minimum price, wastage buffer or good-deal change since it was downloaded). The costs sent are unchanged, so it is <b>not</b> flagged as outdated.</div>`; })()}
     ${zeroCostRows.length ? `<div class="banner critical">⚠ ${zeroCostRows.length} item${zeroCostRows.length===1?"":"s"} would export at R0 cost — a buy was logged (and received) with no price: ${zeroCostRows.slice(0,6).map(r=>esc(r.item)).join(", ")}${zeroCostRows.length>6?` and ${zeroCostRows.length-6} more`:""}. Download is blocked until a real price is entered in Purchase Costs or Confirm Prices.</div>` : ""}
     ${jumpRows.length ? `<div class="banner warn">⚠ ${jumpRows.length} price${jumpRows.length===1?"":"s"} moved more than ${Math.round(PRICE_JUMP_WARN_PCT*100)}% since the last export — highlighted below (${jumpRows.slice(0,3).map(r=>esc(r.item)+" "+(r.jumpPct>0?"▲":"▼")+fmtNum(Math.abs(r.jumpPct)*100,0)+"%").join(", ")}${jumpRows.length>3?" …":""}). A check, not a block.</div>` : ""}
     ${(!tooEarly && !movedRows.length) ? `<div class="banner info">ℹ No items had a cost move on ${esc(exportDate||"this date")} (nothing was purchased that day), so there is nothing to export.</div>` : ""}
