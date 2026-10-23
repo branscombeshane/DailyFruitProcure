@@ -557,7 +557,7 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 // day has had the chance to be received and priced first. Today's — or a future — purchase date is never allowed.
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
-const APP_BUILD = "2026-10-22 · Price Export: only changed costs flag a day as outdated, not margin/min-price changes · GP Watch table: Short of target column + sticky product name · Phone menu button · Product GP Watch (from the Item Sales reports) · Made-to-order items can be removed from the stock take · Received-date grouping, changed-since-download check, queued download saves, lighter saves, stock take completeness checks, tick-box page access";
+const APP_BUILD = "2026-10-23 · Market vs Receiving audit · Price Export: only changed costs flag a day as outdated, not margin/min-price changes · GP Watch table: Short of target column + sticky product name · Phone menu button · Product GP Watch (from the Item Sales reports) · Made-to-order items can be removed from the stock take · Received-date grouping, changed-since-download check, queued download saves, lighter saves, stock take completeness checks, tick-box page access";
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
 // often than it's audited in bulk, so opening the tab should land on today's entries, not the full history.
 let purchaseDateFilter = new Date().toISOString().slice(0,10);
@@ -751,6 +751,7 @@ const NAV = [
     {id:"confirmprices", label:"Confirm Prices"},
     {id:"pricehistory", label:"Price History"},
     {id:"marketstatements", label:"Market Statements"},
+    {id:"marketaudit", label:"Market vs Receiving"},
   ]},
   {group:"Pricing", items:[
     {id:"sellingprices", label:"Price Export"},
@@ -784,7 +785,7 @@ if(!TABS.some(t=>t.id===currentTab)){
 // "home" (the landing Dashboard) is Owner + Procurement only, by Shane's explicit request — Stock Taker,
 // Receiving and Market stay scoped to their single-purpose tab(s), same as before.
 const ROLE_TABS = {
-  owner: ["home","shoppinglist","quickbuy","shoppingarchive","receiving","dashboard","salesdata","itemsetup","recipes","purchase","confirmprices","pricehistory","marketstatements","sellingprices","gpwatch","stocktake","users","stockvariance","marketmapping"],
+  owner: ["home","shoppinglist","quickbuy","shoppingarchive","receiving","dashboard","salesdata","itemsetup","recipes","purchase","confirmprices","pricehistory","marketstatements","marketaudit","sellingprices","gpwatch","stocktake","users","stockvariance","marketmapping"],
   procurement: ["home","shoppinglist","quickbuy","shoppingarchive","receiving","purchase","confirmprices","pricehistory","marketstatements","sellingprices","stocktake"],
   stocktaker: ["stocktake","receiving"],
   receiving: ["receiving"],
@@ -1410,6 +1411,151 @@ function wireGpWatch(){
     const head = ["Product","Company","Qty","Avg price","Avg cost","GP %","Profit","Short of target R","Last report GP %","GP % at today's cost","Status"];
     const lines = [head].concat(rows.map(r=>[r.item, r.company, r.qty, r.price.toFixed(2), r.basisCost.toFixed(2), (r.gp*100).toFixed(1), r.profit.toFixed(2), r.shortfall.toFixed(2), r.lastGp===null?"":(r.lastGp*100).toFixed(1), r.gpToday===null?"":(r.gpToday*100).toFixed(1), r.status==="neg"?"BELOW COST":(r.status==="low"?"LOW":"OK")]));
     browserDownload("product_gp_"+todaySA()+".csv", lines.map(r=>r.map(toCsvField).join(",")).join("\n"), "text/csv");
+  }, "click");
+}
+
+// ---------- Market vs Receiving audit ----------
+// Surveillance only (owner-only page, nothing blocks or notifies anyone): does the stock bought at the market actually arrive at the
+// factory? For each market statement day and Base Product, the quantity on the statement (statement qty × the Market Product Mapping
+// pack size, so it is in the same unit Receiving books in) is compared with what Receiving booked in that SAME day, from any supplier.
+// Any shortfall shows. A farm delivery of the same product on the same day can hide a market shortfall, so every row also names the
+// suppliers it was received from. Statement lines with no mapping / pack size can't be compared and are listed separately.
+let maPeriod = "14", maStatus = "short", maSearch = "", maOpen = "", maShowUnmapped = false;
+function maTodayPending_(d){ return d >= todaySA(); } // today's receiving may not be finished when the statement lands
+function maCompute_(){
+  const lookup = marketProductMapLookup();
+  const today = todaySA();
+  const allDates = Array.from(new Set((DATA.marketStatementLines||[]).map(r=>r.statementDate))).filter(Boolean).sort();
+  let dates = allDates;
+  if(maPeriod!=="all"){
+    const n = Number(maPeriod)||14;
+    const from = new Date(today+"T00:00:00Z"); from.setUTCDate(from.getUTCDate()-(n-1));
+    const f = from.toISOString().slice(0,10);
+    dates = allDates.filter(d=> d>=f);
+  }
+  const dateSet = new Set(dates);
+  const cells = {};      // date|baseProduct -> aggregate
+  const unmapped = {};   // market|commodity -> lines that can't be compared
+  (DATA.marketStatementLines||[]).forEach(r=>{
+    if(!dateSet.has(r.statementDate)) return;
+    const m = lookup.get(marketMapKey(r.market, r.commodity));
+    if(isMapIgnored(m)) return; // deliberately not used (pallets, firewood, things not bought for the factory)
+    const pack = m && m.packSize!=null && m.packSize!=="" ? Number(m.packSize) : null;
+    if(!m || !m.baseProduct || !(pack>0)){
+      const k = (r.market||"")+"::"+r.commodity;
+      const u = unmapped[k] || (unmapped[k] = {market:r.market, commodity:r.commodity, why: !m || !m.baseProduct ? "not mapped to a Base Product" : "no pack size", lines:0, qty:0, total:0, dates:new Set()});
+      u.lines++; u.qty += Number(r.qty)||0; u.total += Number(r.total)||0; u.dates.add(r.statementDate);
+      return;
+    }
+    const key = r.statementDate+"|"+m.baseProduct;
+    const c = cells[key] || (cells[key] = {key, date:r.statementDate, baseProduct:m.baseProduct, market:0, total:0, markets:new Set(), lines:[], received:0, receipts:[], suppliers:new Set(), ordered:[]});
+    const base = (Number(r.qty)||0)*pack;
+    c.market += base; c.total += Number(r.total)||0; c.markets.add(r.market||"?");
+    c.lines.push({agent:r.agent, invoice:r.invoice, commodity:r.commodity, qty:Number(r.qty)||0, pack, base, total:Number(r.total)||0, market:r.market});
+  });
+  (DATA.purchaseCosts||[]).forEach(p=>{
+    if(!p.baseProduct) return;
+    if(isReceived(p)){
+      const c = cells[p.receivedDate+"|"+p.baseProduct]; if(!c) return;
+      const q = Number(p.receivedQty)||0; if(!q) return;
+      c.received += q; c.receipts.push({qty:q, time:p.receivedTime||"", by:p.receivedBy||"", supplier:p.supplier||"", ordered:Number(p.qty)||0}); if(p.supplier) c.suppliers.add(String(p.supplier).replace(/\s+/g," ").trim());
+    }
+    const o = cells[p.date+"|"+p.baseProduct];
+    if(o) o.ordered.push({qty:Number(p.qty)||0, supplier:p.supplier||"", by:p.loggedBy||"", received: isReceived(p) ? (Number(p.receivedQty)||0) : null, notReceivedReason:p.notReceivedReason||"", receivedDate:p.receivedDate||""});
+  });
+  const rows = Object.values(cells).map(c=>{
+    const diff = c.received - c.market;
+    const pending = maTodayPending_(c.date);
+    const status = pending ? "pending" : (diff < -0.005 ? "short" : (diff > 0.005 ? "over" : "match"));
+    const unitPrice = c.market>0 ? c.total/c.market : 0;
+    const shortUnits = diff < -0.005 ? -diff : 0;
+    const nd = new Date(c.date+"T00:00:00Z"); nd.setUTCDate(nd.getUTCDate()+1); const nextDay = nd.toISOString().slice(0,10);
+    const nextDayQty = (DATA.purchaseCosts||[]).reduce((a,p)=> a + ((p.baseProduct===c.baseProduct && p.receivedDate===nextDay) ? (Number(p.receivedQty)||0) : 0), 0);
+    return Object.assign(c, {diff, status, kind: status==="short" ? (c.received<=0.005 ? "none" : "partial") : "", nextDayQty, shortUnits, shortPct: c.market>0 ? shortUnits/c.market : 0, shortRand: shortUnits*unitPrice, unitPrice});
+  });
+  return {rows, dates, allDates, unmapped:Object.values(unmapped).sort((a,b)=> b.total-a.total)};
+}
+function maFilter_(rows){
+  let r = rows;
+  if(maStatus==="partial" || maStatus==="none") r = r.filter(x=> x.kind===maStatus);
+  else if(maStatus!=="all") r = r.filter(x=> x.status===maStatus);
+  const q = maSearch.trim().toLowerCase();
+  if(q) r = r.filter(x=> x.baseProduct.toLowerCase().includes(q));
+  return r.slice().sort((a,b)=> (maStatus==="short"||maStatus==="partial"||maStatus==="none") ? (b.shortRand-a.shortRand) : (b.date.localeCompare(a.date) || a.baseProduct.localeCompare(b.baseProduct)));
+}
+function renderMarketAudit(){
+  const c = maCompute_();
+  const rows = c.rows;
+  const cnt = s=> rows.filter(r=>r.status===s).length;
+  const short = rows.filter(r=>r.status==="short");
+  const shortRand = short.reduce((a,r)=> a + r.shortRand, 0);
+  const cnt2 = k=> rows.filter(r=>r.kind===k).length, rand2 = k=> rows.filter(r=>r.kind===k).reduce((a,r)=> a + r.shortRand, 0);
+  const tile = (label, value, status, color, sub)=> `<div class="stat" data-ma-status="${status}" style="cursor:pointer;" title="Click to show these rows"><div class="label">${label}</div><div class="value" style="color:${color};">${value}</div>${sub?`<div class="helptext">${sub}</div>`:""}</div>`;
+  const tiles = `<div class="cardrow">
+    ${tile("Partly received", cnt2("partial"), "partial", cnt2("partial") ? "var(--critical)" : "inherit", money(Math.round(rand2("partial")))+" short — some came, some didn't")}
+    ${tile("Nothing booked in", cnt2("none"), "none", cnt2("none") ? "var(--warn)" : "inherit", money(Math.round(rand2("none")))+" — bought, none received that day")}
+    ${tile("Matched", cnt("match"), "match", "var(--good)", "received = statement")}
+    ${tile("Received over", cnt("over"), "over", cnt("over") ? "var(--warn)" : "inherit", "more than the statement")}
+    <div class="stat" id="maUnmappedTile" style="cursor:pointer;" title="Click to list the lines that can't be compared"><div class="label">Can't compare</div><div class="value" style="color:${c.unmapped.length ? "var(--warn)" : "inherit"};">${c.unmapped.length}</div><div class="helptext">statement lines with no mapping / pack size</div></div>
+  </div>`;
+  const sel = (id, opts, cur)=> `<select id="${id}">${opts.map(([v,l])=>`<option value="${v}" ${v===cur?"selected":""}>${l}</option>`).join("")}</select>`;
+  // per-day strip: how much was short each day (click filters to that day via the search box would be odd, so it just lists)
+  const byDay = c.dates.slice().reverse().map(d=>{
+    const dr = rows.filter(r=>r.date===d); const sr = dr.filter(r=>r.status==="short");
+    const pend = maTodayPending_(d);
+    const kind = pend ? "neutral" : (sr.length ? "critical" : "good");
+    return `<span style="display:inline-flex;gap:6px;align-items:center;margin:2px 10px 2px 0;">${chip(shortDayLabel(d), kind)} <span class="helptext">${pend ? "today — receiving not finished" : (sr.length ? sr.length+" short · "+money(Math.round(sr.reduce((a,r)=>a+r.shortRand,0))) : "all matched")}</span></span>`;
+  }).join("");
+  // repeat offenders per product
+  const prod = {};
+  rows.filter(r=> r.status!=="pending").forEach(r=>{ const p = prod[r.baseProduct] || (prod[r.baseProduct] = {baseProduct:r.baseProduct, days:0, shortDays:0, shortUnits:0, shortRand:0, market:0}); p.days++; p.market += r.market; if(r.status==="short"){ p.shortDays++; p.shortUnits += r.shortUnits; p.shortRand += r.shortRand; } });
+  const prodRows = Object.values(prod).filter(p=>p.shortDays>0).sort((a,b)=> b.shortRand-a.shortRand).slice(0,15);
+  const filtered = maFilter_(rows);
+  const shown = filtered.slice(0, 300);
+  const detail = r=> `<tr><td colspan="9" style="position:static;background:var(--surface-2, rgba(0,0,0,.03));"><div style="display:flex;gap:24px;flex-wrap:wrap;align-items:flex-start;">
+      <div><div class="helptext"><b>On the market statement</b></div><table><thead><tr><th>Market</th><th>Agent</th><th>Commodity</th><th class="num">Packs</th><th class="num">× pack</th><th class="num">Base qty</th><th class="num">Total</th></tr></thead><tbody>${r.lines.map(l=>`<tr><td>${esc(l.market||"")}</td><td>${esc(l.agent||"")}</td><td>${esc(l.commodity)}</td><td class="num">${fmtNum(l.qty,l.qty%1?2:0)}</td><td class="num">${fmtNum(l.pack,2)}</td><td class="num">${fmtNum(l.base,2)}</td><td class="num">${money(l.total)}</td></tr>`).join("")}</tbody></table></div>
+      <div><div class="helptext"><b>Booked in at the factory (${esc(r.date)})</b></div>${r.receipts.length ? `<table><thead><tr><th>Time</th><th>Received by</th><th>Supplier</th><th class="num">Qty</th></tr></thead><tbody>${r.receipts.map(x=>`<tr><td>${esc(x.time)}</td><td>${esc(x.by)}</td><td>${esc(x.supplier)}</td><td class="num">${fmtNum(x.qty,x.qty%1?2:0)}</td></tr>`).join("")}</tbody></table>` : `<div class="helptext">Nothing was booked in for this product that day.</div>`}</div>
+      <div><div class="helptext"><b>Orders logged that day (Shopping List / Quick Buy)</b></div>${r.ordered.length ? `<table><thead><tr><th>Logged by</th><th>Supplier</th><th class="num">Ordered</th><th class="num">Received</th></tr></thead><tbody>${r.ordered.map(o=>`<tr><td>${esc(o.by)}</td><td>${esc(o.supplier)}</td><td class="num">${fmtNum(o.qty,o.qty%1?2:0)}</td><td class="num">${o.received===null ? (o.notReceivedReason ? esc("not received: "+o.notReceivedReason) : "not yet") : fmtNum(o.received,o.received%1?2:0)}${o.received!==null && o.receivedDate && o.receivedDate!==r.date ? ` <span class="helptext">(${esc(o.receivedDate)})</span>` : ""}</td></tr>`).join("")}</tbody></table>` : `<div class="helptext">No order was logged for this product that day.</div>`}</div>
+    </div></td></tr>`;
+  const body = shown.map(r=>{
+    const diffTxt = (r.diff>0?"+":"")+fmtNum(r.diff, Math.abs(r.diff)%1?2:0);
+    const chipHtml = r.status==="short" ? chip(diffTxt,"critical") : (r.status==="over" ? chip(diffTxt,"warn") : (r.status==="pending" ? chip("pending","neutral") : chip("✓","good")));
+    return `<tr data-ma-open="${esc(r.key)}" style="cursor:pointer;" title="Click for the statement lines, receipts and orders"><td>${esc(shortDayLabel(r.date))}</td><td class="gpcol1">${maOpen===r.key?"▾":"▸"} ${esc(r.baseProduct)}</td><td class="num">${fmtNum(r.market, r.market%1?2:0)}</td><td class="num">${fmtNum(r.received, r.received%1?2:0)}</td><td class="num">${chipHtml}</td><td class="num">${r.status==="short" ? fmtNum(r.shortPct*100,0)+"%" : "—"}</td><td class="num" style="${r.status==="short"?"color:var(--critical);font-weight:600;":""}">${r.status==="short" ? money(Math.round(r.shortRand)) : "—"}</td><td>${Array.from(r.suppliers).map(esc).join(", ") || '<span class="helptext">none</span>'}</td><td>${r.status==="short" && r.nextDayQty>0 ? chip("+"+fmtNum(r.nextDayQty, r.nextDayQty%1?2:0)+" next day","neutral")+" " : ""}${r.kind==="none" && !r.ordered.length ? chip("no order logged","neutral") : ""}</td></tr>` + (maOpen===r.key ? detail(r) : "");
+  }).join("");
+  const unmappedCard = (maShowUnmapped && c.unmapped.length) ? `<div class="card"><div class="cardhead"><div><h3>Statement lines that can't be compared</h3><div class="desc">These market lines have no Base Product or no pack size in Market Product Mapping, so there is nothing to compare Receiving against. Fix them there and they join the audit.</div></div><button class="btn small" data-goto-tab="marketmapping">Market Product Mapping →</button></div>
+      <div class="cardbody" style="padding:0;"><div class="tablewrap" style="border:none;max-height:360px;overflow-y:auto;"><table><thead><tr><th>Market</th><th>Commodity</th><th>Why</th><th class="num">Lines</th><th class="num">Packs</th><th class="num">Total</th></tr></thead><tbody>${c.unmapped.map(u=>`<tr><td>${esc(u.market||"")}</td><td>${esc(u.commodity)}</td><td>${esc(u.why)}</td><td class="num">${u.lines}</td><td class="num">${fmtNum(u.qty,u.qty%1?2:0)}</td><td class="num">${money(u.total)}</td></tr>`).join("")}</tbody></table></div></div></div>` : "";
+  return `
+    <div class="pagehead"><div><h2>Market vs Receiving</h2><p>Checks that the stock bought at the market actually reaches the factory. Each market statement day and product is compared with what Receiving booked in that same day. Surveillance only — nothing here is visible to, or sent to, anyone but owners.</p></div></div>
+    <div class="card"><div class="cardbody" style="display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap;">
+      <div class="field" style="min-width:170px;"><label>Period</label>${sel("maPeriodSel",[["7","Last 7 days"],["14","Last 14 days"],["30","Last 30 days"],["all","Everything imported"]],maPeriod)}</div>
+      <span class="helptext">${c.dates.length ? c.dates.length+" statement day"+(c.dates.length===1?"":"s")+" in view ("+esc(c.dates[0])+(c.dates.length>1?" to "+esc(c.dates[c.dates.length-1]):"")+"). " : "No market statements in this period. "}Quantities are statement packs × the pack size in Market Product Mapping, compared with all receipts of that product on the statement date.</span></div></div>
+    ${tiles}
+    <div class="card"><div class="cardhead"><div><h3>By day</h3><div class="desc">Red = at least one product received short that day.</div></div></div><div class="cardbody">${byDay || '<span class="helptext">Nothing to show.</span>'}</div></div>
+    ${prodRows.length ? `<div class="card"><div class="cardhead"><div><h3>Products short most often</h3><div class="desc">Over the period shown. Click a product to see its days.</div></div></div><div class="cardbody" style="padding:0;"><div class="tablewrap" style="border:none;border-radius:0;"><table><thead><tr><th>Product</th><th class="num">Days short</th><th class="num">Of days bought</th><th class="num">Units short</th><th class="num">Value short</th></tr></thead><tbody>${prodRows.map(p=>`<tr data-ma-product="${esc(p.baseProduct)}" style="cursor:pointer;"><td>${esc(p.baseProduct)}</td><td class="num">${p.shortDays}</td><td class="num">${p.days}</td><td class="num">${fmtNum(p.shortUnits, p.shortUnits%1?2:0)}</td><td class="num" style="color:var(--critical);font-weight:600;">${money(Math.round(p.shortRand))}</td></tr>`).join("")}</tbody></table></div></div></div>` : ""}
+    ${unmappedCard}
+    <div class="card"><div class="cardhead"><div><h3>Product by day</h3><div class="desc">Difference = received − statement. Click a row for the statement lines, who booked it in and when, and the orders logged that day.</div></div>
+        <div class="field" style="min-width:170px;"><label>Show</label>${sel("maStatusSel",[["short","All shortfalls"],["partial","Partly received"],["none","Nothing booked in"],["over","Over only"],["match","Matched"],["pending","Today (pending)"],["all","Everything"]],maStatus)}</div>
+        <div class="searchbar">🔍 <input type="text" id="maSearch" placeholder="Search product…" value="${esc(maSearch)}"></div>
+        <button class="btn" id="maExport" ${filtered.length?"":"disabled"}>Export CSV</button></div>
+      <div class="cardbody" style="padding:0;"><div class="tablewrap" style="border:none;border-radius:0;max-height:620px;overflow-y:auto;"><table>
+        <thead><tr><th>Day</th><th class="gpcol1">Product</th><th class="num">Statement</th><th class="num">Received</th><th class="num">Difference</th><th class="num">Short %</th><th class="num">Value short</th><th>Received from</th><th>Note</th></tr></thead>
+        <tbody>${body || `<tr><td colspan="9" class="empty">${rows.length ? "Nothing matches this view." : "No comparable market statement lines in this period."}</td></tr>`}</tbody></table></div>
+        ${filtered.length>300 ? `<div class="helptext" style="padding:8px 14px;">Showing the first 300 of ${filtered.length} rows — narrow the period or Export CSV.</div>` : ""}</div></div>`;
+}
+function wireMarketAudit(){
+  const bind = (id, fn, ev)=>{ const el = document.getElementById(id); if(el) el.addEventListener(ev||"change", fn); };
+  bind("maPeriodSel", e=>{ maPeriod = e.target.value; maOpen = ""; render(); });
+  bind("maStatusSel", e=>{ maStatus = e.target.value; render(); });
+  bind("maSearch", e=>{ maSearch = e.target.value; const pos = e.target.selectionStart; render(); const el = document.getElementById("maSearch"); if(el){ el.focus(); try{ el.setSelectionRange(pos,pos); }catch(_){} } }, "input");
+  document.querySelectorAll("[data-ma-status]").forEach(b=> b.addEventListener("click", ()=>{ maStatus = b.dataset.maStatus; render(); }));
+  bind("maUnmappedTile", ()=>{ maShowUnmapped = !maShowUnmapped; render(); }, "click");
+  document.querySelectorAll("[data-ma-open]").forEach(tr=> tr.addEventListener("click", ()=>{ maOpen = (maOpen===tr.dataset.maOpen) ? "" : tr.dataset.maOpen; render(); }));
+  document.querySelectorAll("[data-ma-product]").forEach(tr=> tr.addEventListener("click", ()=>{ maSearch = tr.dataset.maProduct; maStatus = "all"; render(); }));
+  bind("maExport", ()=>{
+    const rows = maFilter_(maCompute_().rows);
+    const head = ["Date","Product","Statement qty","Received qty","Difference","Short %","Value short","Status","Nothing/Partly","Received next day","Received from","Statement market"];
+    const lines = [head].concat(rows.map(r=>[r.date, r.baseProduct, r.market.toFixed(2), r.received.toFixed(2), r.diff.toFixed(2), r.status==="short" ? (r.shortPct*100).toFixed(0) : "", r.status==="short" ? r.shortRand.toFixed(2) : "", r.status.toUpperCase(), r.kind, r.nextDayQty, Array.from(r.suppliers).join("; "), Array.from(r.markets).join("; ")]));
+    browserDownload("market_vs_receiving_"+todaySA()+".csv", lines.map(r=>r.map(toCsvField).join(",")).join("\n"), "text/csv");
   }, "click");
 }
 
@@ -2361,6 +2507,7 @@ function render(){
     else if(currentTab==="marketstatements") pageHtml = renderMarketStatements();
     else if(currentTab==="sellingprices") pageHtml = renderSellingPrices();
     else if(currentTab==="gpwatch") pageHtml = renderGpWatch();
+    else if(currentTab==="marketaudit") pageHtml = renderMarketAudit();
     else if(currentTab==="stocktake") pageHtml = renderStockTake();
     else if(currentTab==="users") pageHtml = renderUsers();
     else if(currentTab==="stockvariance") pageHtml = renderStockVariance();
@@ -7066,6 +7213,7 @@ function wireTabEvents(){
   }
 
   if(currentTab==="gpwatch") wireGpWatch();
+  if(currentTab==="marketaudit") wireMarketAudit();
 
   if(currentTab==="stockvariance"){
     const flagInput = document.getElementById("stockVarianceFlagPctInput");
