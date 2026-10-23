@@ -557,7 +557,7 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 // day has had the chance to be received and priced first. Today's — or a future — purchase date is never allowed.
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
-const APP_BUILD = "2026-10-23 · Market vs Receiving audit · Price Export: only changed costs flag a day as outdated, not margin/min-price changes · GP Watch table: Short of target column + sticky product name · Phone menu button · Product GP Watch (from the Item Sales reports) · Made-to-order items can be removed from the stock take · Received-date grouping, changed-since-download check, queued download saves, lighter saves, stock take completeness checks, tick-box page access";
+const APP_BUILD = "2026-10-23 · Market vs Receiving audit + optional Receiving pack in the mapping · Price Export: only changed costs flag a day as outdated, not margin/min-price changes · GP Watch table: Short of target column + sticky product name · Phone menu button · Product GP Watch (from the Item Sales reports) · Made-to-order items can be removed from the stock take · Received-date grouping, changed-since-download check, queued download saves, lighter saves, stock take completeness checks, tick-box page access";
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
 // often than it's audited in bulk, so opening the tab should land on today's entries, not the full history.
 let purchaseDateFilter = new Date().toISOString().slice(0,10);
@@ -1440,7 +1440,11 @@ function maCompute_(){
     if(!dateSet.has(r.statementDate)) return;
     const m = lookup.get(marketMapKey(r.market, r.commodity));
     if(isMapIgnored(m)) return; // deliberately not used (pallets, firewood, things not bought for the factory)
-    const pack = m && m.packSize!=null && m.packSize!=="" ? Number(m.packSize) : null;
+    const priceUnits = m && m.packSize!=null && m.packSize!=="" ? Number(m.packSize) : null;
+    // The pack size can be set to make PRICING work (e.g. an 8kg tomato box charged per kg-pack, entered as 1/6 of the 6kg box), which
+    // is not how many boxes Receiving counts. "Receiving pack" (optional) is what the audit uses; blank = the pack size.
+    const recvUnits = m && m.receivePack!=null && m.receivePack!=="" ? Number(m.receivePack) : null;
+    const pack = recvUnits>0 ? recvUnits : priceUnits;
     if(!m || !m.baseProduct || !(pack>0)){
       const k = (r.market||"")+"::"+r.commodity;
       const u = unmapped[k] || (unmapped[k] = {market:r.market, commodity:r.commodity, why: !m || !m.baseProduct ? "not mapped to a Base Product" : "no pack size", lines:0, qty:0, total:0, dates:new Set()});
@@ -1528,7 +1532,7 @@ function renderMarketAudit(){
     <div class="pagehead"><div><h2>Market vs Receiving</h2><p>Checks that the stock bought at the market actually reaches the factory. Each market statement day and product is compared with what Receiving booked in that same day. Surveillance only — nothing here is visible to, or sent to, anyone but owners.</p></div></div>
     <div class="card"><div class="cardbody" style="display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap;">
       <div class="field" style="min-width:170px;"><label>Period</label>${sel("maPeriodSel",[["7","Last 7 days"],["14","Last 14 days"],["30","Last 30 days"],["all","Everything imported"]],maPeriod)}</div>
-      <span class="helptext">${c.dates.length ? c.dates.length+" statement day"+(c.dates.length===1?"":"s")+" in view ("+esc(c.dates[0])+(c.dates.length>1?" to "+esc(c.dates[c.dates.length-1]):"")+"). " : "No market statements in this period. "}Quantities are statement packs × the pack size in Market Product Mapping, compared with all receipts of that product on the statement date.</span></div></div>
+      <span class="helptext">${c.dates.length ? c.dates.length+" statement day"+(c.dates.length===1?"":"s")+" in view ("+esc(c.dates[0])+(c.dates.length>1?" to "+esc(c.dates[c.dates.length-1]):"")+"). " : "No market statements in this period. "}Quantities are statement packs × the pack size in Market Product Mapping (or its optional Receiving pack, when Receiving counts the product differently from how it is priced), compared with all receipts of that product on the statement date.</span></div></div>
     ${tiles}
     <div class="card"><div class="cardhead"><div><h3>By day</h3><div class="desc">Red = at least one product received short that day.</div></div></div><div class="cardbody">${byDay || '<span class="helptext">Nothing to show.</span>'}</div></div>
     ${prodRows.length ? `<div class="card"><div class="cardhead"><div><h3>Products short most often</h3><div class="desc">Over the period shown. Click a product to see its days.</div></div></div><div class="cardbody" style="padding:0;"><div class="tablewrap" style="border:none;border-radius:0;"><table><thead><tr><th>Product</th><th class="num">Days short</th><th class="num">Of days bought</th><th class="num">Units short</th><th class="num">Value short</th></tr></thead><tbody>${prodRows.map(p=>`<tr data-ma-product="${esc(p.baseProduct)}" style="cursor:pointer;"><td>${esc(p.baseProduct)}</td><td class="num">${p.shortDays}</td><td class="num">${p.days}</td><td class="num">${fmtNum(p.shortUnits, p.shortUnits%1?2:0)}</td><td class="num" style="color:var(--critical);font-weight:600;">${money(Math.round(p.shortRand))}</td></tr>`).join("")}</tbody></table></div></div></div>` : ""}
@@ -5805,6 +5809,7 @@ function renderMarketMapping(){
     const m = mapLookup.get(key) || {};
     const mappedProduct = m.baseProduct || "";
     const packSize = m.packSize!=null ? m.packSize : "";
+    const receivePack = m.receivePack!=null ? m.receivePack : "";
     const unit = mappedProduct ? procurementUnitForBaseProduct(mappedProduct) : "";
     if(marketMappingShowIgnored){
       return `
@@ -5824,6 +5829,9 @@ function renderMarketMapping(){
       <td>
         <input class="rowinput num" data-mapping-idx="${i}" data-mapkey="${esc(key)}" data-mapfield="packSize" type="number" step="any" min="0" style="max-width:110px;" value="${esc(packSize)}" data-pristine="${esc(packSize)}" placeholder="e.g. 10">
         ${mappedProduct ? `<div class="helptext">${unit ? `in ${esc(unit)}` : "set a procurement unit on this Base Product in Item Setup"}</div>` : `<div class="helptext">map a Base Product first</div>`}
+      </td>
+      <td>
+        <input class="rowinput num" data-mapping-idx="${i}" data-mapkey="${esc(key)}" data-mapfield="receivePack" type="number" step="any" min="0" style="max-width:110px;" value="${esc(receivePack)}" data-pristine="${esc(receivePack)}" placeholder="same">
       </td>
       <td><button class="delbtn" data-remove-mapkey="${esc(key)}" title="Remove — this one won't be used or mapped">✕</button></td>
     </tr>`;
@@ -5848,8 +5856,8 @@ function renderMarketMapping(){
       </div>
       <div class="cardbody" style="padding:0;">
         <div class="tablewrap" style="border:none;border-radius:0;"><table>
-          <thead><tr><th>Market</th><th>Market commodity</th><th>Seen</th><th>Maps to Base Product</th><th>Pack size</th>${marketMappingShowIgnored ? "" : "<th></th>"}</tr></thead>
-          <tbody>${rows || `<tr><td colspan="6" class="empty">${marketMappingShowIgnored ? "Nothing has been removed." : (marketMappingOnlyUnmapped && totalUnmapped===0 ? "Nothing unmapped." : "No market statement data imported yet.")}</td></tr>`}</tbody>
+          <thead><tr><th>Market</th><th>Market commodity</th><th>Seen</th><th>Maps to Base Product</th><th>Pack size</th>${marketMappingShowIgnored ? "" : `<th title="Only fill this in when Receiving counts this product differently from how it is priced. Leave blank to use the pack size.">Receiving pack <span class="helptext">(optional)</span></th><th></th>`}</tr></thead>
+          <tbody>${rows || `<tr><td colspan="7" class="empty">${marketMappingShowIgnored ? "Nothing has been removed." : (marketMappingOnlyUnmapped && totalUnmapped===0 ? "Nothing unmapped." : "No market statement data imported yet.")}</td></tr>`}</tbody>
         </table></div>
       </div>
     </div>
@@ -7470,6 +7478,7 @@ function wireTabEvents(){
         const row = byKey.get(key);
         const val = inp.value.trim();
         if(field==="packSize"){ row.packSize = val==="" ? null : Number(val); return; }
+        if(field==="receivePack"){ row.receivePack = val==="" ? null : Number(val); return; }
         if(val===""){ row.baseProduct = ""; return; }
         if(knownBaseProducts.includes(val)){ row.baseProduct = val; return; }
         const canonical = knownBaseProducts.find(n=> n.toLowerCase()===val.toLowerCase());
