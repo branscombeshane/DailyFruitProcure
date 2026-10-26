@@ -558,9 +558,10 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
 // VERSION HISTORY (newest first). The menu shows only APP_VERSION; quote it when asking for a change so the exact build is known.
+//  v2026.10.26b  — Market Product Mapping: pack size calculator (works out Pack size + Receiving pack)
 //  v2026.10.26a  — footer shows only the version number (this list replaces the long on-screen text)
 //  Everything below was the on-screen build text up to 2026-10-23, newest first: Market vs Receiving audit + optional Receiving pack in the mapping | Price Export: only changed costs flag a day as outdated, not margin/min-price changes | GP Watch table: Short of target column + sticky product name | Phone menu button | Product GP Watch (from the Item Sales reports) | Made-to-order items can be removed from the stock take | Received-date grouping, changed-since-download check, queued download saves, lighter saves, stock take completeness checks, tick-box page access
-const APP_VERSION = "v2026.10.26a";
+const APP_VERSION = "v2026.10.26b";
 const APP_BUILD = APP_VERSION; // kept as an alias in case anything else reads it
 
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
@@ -730,6 +731,9 @@ let marketStatementSelectedDate = "";
 // seen so far or just the ones still waiting on a mapping (the far more common thing to want open,
 // since a raw commodity is written once and then never needs touching again once mapped).
 let marketMappingSearch = "";
+// Pack size calculator on Market Product Mapping (v2026.10.26b). Kept at module level because this page re-renders on
+// every search keystroke / toggle, which would otherwise wipe what was typed.
+let mpCalc = {open:false, a:"", b:"", c:"", qty:"", price:""};
 let marketMappingOnlyUnmapped = true;
 let marketMappingShowIgnored = false; // show raw commodities Shane has removed from the mapping list (with a Restore button) instead of hiding them
 
@@ -5788,6 +5792,64 @@ function describeRawCommodity(raw){
   return pack ? `${titled} (${pack})` : titled;
 }
 
+// ---- Pack size calculator (Market Product Mapping) ----
+// Everything is entered in ONE common measure (kg, or "units" for things not weighed). Then:
+//   Pack size      = statement unit  ÷  our Base Product unit      (drives pricing: base price = statement price ÷ pack size)
+//   Receiving pack = statement unit  ÷  what Receiving counts as 1 (only used by the Market vs Receiving audit)
+function mpNum_(v){ const n = parseFloat(String(v==null?"":v).replace(",", ".").trim()); return isFinite(n) ? n : null; }
+function mpTrim_(n){ return String(Number(Number(n).toFixed(6))); }
+function mpCalcOutHtml_(){
+  const a = mpNum_(mpCalc.a), b = mpNum_(mpCalc.b), c = mpNum_(mpCalc.c);
+  if(!(a>0) || !(b>0)) return `<div class="helptext">Fill in the first two boxes to see the answer.</div>`;
+  const pack = a/b;
+  const recvBlank = !(c>0) || Math.abs(a/c - pack) < 1e-9;
+  const recv = recvBlank ? null : a/c;
+  const copyBtn = v => `<button type="button" class="btn small" data-mpcopy="${esc(v)}">Copy</button>`;
+  let h = `<div style="display:flex;gap:24px;flex-wrap:wrap;align-items:flex-start;">
+    <div><div class="helptext">Type this in <b>Pack size</b></div>
+      <div style="font-size:22px;font-weight:700;">${esc(mpTrim_(pack))} ${copyBtn(mpTrim_(pack))}</div>
+      <div class="helptext">${esc(mpTrim_(a))} ÷ ${esc(mpTrim_(b))}</div></div>
+    <div><div class="helptext">Type this in <b>Receiving pack</b></div>
+      ${recvBlank
+        ? `<div style="font-size:22px;font-weight:700;">leave blank</div><div class="helptext">Receiving counts it the same way it is priced</div>`
+        : `<div style="font-size:22px;font-weight:700;">${esc(mpTrim_(recv))} ${copyBtn(mpTrim_(recv))}</div><div class="helptext">${esc(mpTrim_(a))} ÷ ${esc(mpTrim_(c))}</div>`}
+    </div></div>`;
+  const q = mpNum_(mpCalc.qty), pr = mpNum_(mpCalc.price);
+  if(q>0 || pr>0){
+    const auditPack = recvBlank ? pack : recv;
+    h += `<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--border,#ddd);" class="helptext">`;
+    if(q>0) h += `A statement line of <b>${esc(mpTrim_(q))}</b> means Receiving should have booked in <b>${esc(fmtNum(q*auditPack,2))}</b> of the Base Product (${esc(mpTrim_(q))} × ${esc(mpTrim_(auditPack))}). `;
+    if(pr>0) h += `A statement price of <b>${esc(money(pr))}</b> costs <b>${esc(money(pr/pack))}</b> per Base Product unit (${esc(money(pr))} ÷ ${esc(mpTrim_(pack))}).`;
+    h += `</div>`;
+  }
+  return h;
+}
+function mpCalcCardHtml_(){
+  const fld = (id, label, hint, val, ph) => `<div class="field" style="min-width:210px;flex:1;"><label for="${id}">${label}</label>
+      <input type="text" inputmode="decimal" id="${id}" value="${esc(val)}" placeholder="${ph}"><div class="helptext">${hint}</div></div>`;
+  return `<details class="card" id="mpCalcBox" ${mpCalc.open?"open":""} style="margin-bottom:12px;">
+    <summary style="cursor:pointer;padding:10px 14px;font-weight:600;">Pack size calculator <span class="helptext" style="font-weight:400;">— not sure what to type in the two boxes below? Work it out here</span></summary>
+    <div class="cardbody">
+      <p class="helptext" style="margin-top:0;">Measure all three in the <b>same thing</b> — kg for weighed products (or just "units" for anything counted). Use the market statement line to see what one statement unit really is: a line of <i>"1 × R20"</i> for tomatoes that are sold per 1kg pack is a 1kg unit; <i>"ONIONS,10KG POCKE"</i> is a 10kg unit.</p>
+      <div class="formgrid" style="align-items:flex-start;">
+        ${fld("mpCalcA","1. One unit on the market statement is…","e.g. 1 (charged per 1kg), 10 (a 10kg pocket)",mpCalc.a,"kg")}
+        ${fld("mpCalcB","2. One unit of our Base Product is…","What Item Setup holds it in. Tomato box = 6, anything held in kg = 1",mpCalc.b,"kg")}
+        ${fld("mpCalcC","3. Receiving counts one unit as…","Only if different from box 2. An 8kg box booked in as 1 box = 8",mpCalc.c,"kg (optional)")}
+      </div>
+      <div id="mpCalcOut" style="margin:6px 0;">${mpCalcOutHtml_()}</div>
+      <details style="margin-top:6px;"><summary class="helptext" style="cursor:pointer;">Check it against a real statement line (optional)</summary>
+        <div class="formgrid" style="margin-top:6px;">
+          ${fld("mpCalcQty","Statement qty","e.g. 80",mpCalc.qty,"")}
+          ${fld("mpCalcPrice","Statement unit price","e.g. 20",mpCalc.price,"R")}
+        </div></details>
+      <div class="helptext" style="margin-top:8px;">Examples:
+        <a href="#" data-mpex="10,1,">10kg onion pocket</a> ·
+        <a href="#" data-mpex="6,6,">6kg tomato box</a> ·
+        <a href="#" data-mpex="1,6,8">8kg tomato box (charged per 1kg)</a> ·
+        <a href="#" data-mpex="7,10,">7kg bag of a normally-10kg product</a></div>
+    </div></details>`;
+}
+
 function renderMarketMapping(){
   const baseProducts = distinctBaseProducts();
   const search = marketMappingSearch.trim().toLowerCase();
@@ -5851,6 +5913,7 @@ function renderMarketMapping(){
     </div>
     ${totalUnmapped ? `<div class="banner warn">⚠ ${totalUnmapped} raw commodity name${totalUnmapped===1?"":"s"} not mapped yet.</div>` : `<div class="banner good">Everything seen so far is mapped.</div>`}
     ${totalMissingPackSize ? `<div class="banner warn">⚠ ${totalMissingPackSize} mapped commodity name${totalMissingPackSize===1?"":"s"} ${totalMissingPackSize===1?"has":"have"} no pack size set yet — its Base qty/price won't show on Market Statements until it does.</div>` : ""}
+    ${mpCalcCardHtml_()}
     <div class="card">
       <div class="cardhead">
         <div class="formgrid" style="flex:1;">
@@ -7416,6 +7479,25 @@ function wireTabEvents(){
   }
 
   if(currentTab==="marketmapping"){
+    // Pack size calculator: updates the answer in place (no render(), so typing never loses focus).
+    const mpBox = document.getElementById("mpCalcBox");
+    if(mpBox) mpBox.addEventListener("toggle", ()=>{ mpCalc.open = mpBox.open; });
+    [["mpCalcA","a"],["mpCalcB","b"],["mpCalcC","c"],["mpCalcQty","qty"],["mpCalcPrice","price"]].forEach(([id,k])=>{
+      const el = document.getElementById(id);
+      if(el) el.addEventListener("input", ()=>{ mpCalc[k] = el.value; const out = document.getElementById("mpCalcOut"); if(out) out.innerHTML = mpCalcOutHtml_(); });
+    });
+    const mpOut = document.getElementById("mpCalcOut");
+    if(mpOut) mpOut.addEventListener("click", async (e)=>{
+      const b = e.target.closest("[data-mpcopy]"); if(!b) return;
+      try{ await navigator.clipboard.writeText(b.dataset.mpcopy); toast("Copied "+b.dataset.mpcopy); }
+      catch(err){ toast("Couldn't copy — type "+b.dataset.mpcopy+" in by hand"); }
+    });
+    document.querySelectorAll("[data-mpex]").forEach(a=> a.addEventListener("click", (e)=>{
+      e.preventDefault();
+      const [x,y,z] = a.dataset.mpex.split(",");
+      mpCalc.a = x; mpCalc.b = y; mpCalc.c = z||""; mpCalc.open = true;
+      render();
+    }));
     const searchInput = document.getElementById("marketMappingSearchInput");
     if(searchInput) searchInput.addEventListener("input", (e)=>{
       marketMappingSearch = e.target.value;
