@@ -558,10 +558,11 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
 // VERSION HISTORY (newest first). The menu shows only APP_VERSION; quote it when asking for a change so the exact build is known.
+//  v2026.10.26c  — Market Statements: product search box (filters the purchase lines by product, raw name, agent, invoice or market)
 //  v2026.10.26b  — Market Product Mapping: pack size calculator (works out Pack size + Receiving pack)
 //  v2026.10.26a  — footer shows only the version number (this list replaces the long on-screen text)
 //  Everything below was the on-screen build text up to 2026-10-23, newest first: Market vs Receiving audit + optional Receiving pack in the mapping | Price Export: only changed costs flag a day as outdated, not margin/min-price changes | GP Watch table: Short of target column + sticky product name | Phone menu button | Product GP Watch (from the Item Sales reports) | Made-to-order items can be removed from the stock take | Received-date grouping, changed-since-download check, queued download saves, lighter saves, stock take completeness checks, tick-box page access
-const APP_VERSION = "v2026.10.26b";
+const APP_VERSION = "v2026.10.26c";
 const APP_BUILD = APP_VERSION; // kept as an alias in case anything else reads it
 
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
@@ -731,6 +732,8 @@ let marketStatementSelectedDate = "";
 // seen so far or just the ones still waiting on a mapping (the far more common thing to want open,
 // since a raw commodity is written once and then never needs touching again once mapped).
 let marketMappingSearch = "";
+// Market Statements product search (v2026.10.26c). Module-level so it survives the re-render when the date changes.
+let marketStatementSearch = "";
 // Pack size calculator on Market Product Mapping (v2026.10.26b). Kept at module level because this page re-renders on
 // every search keystroke / toggle, which would otherwise wipe what was typed.
 let mpCalc = {open:false, a:"", b:"", c:"", qty:"", price:""};
@@ -5024,8 +5027,9 @@ function renderMarketStatements(){
     else if(!baseProduct) productCell = `<span class="helptext">${esc(r.commodity)}</span> ${chip("unmapped","warn")}`;
     else if(!packSize) productCell = `${esc(baseProduct)} ${chip("no pack size","warn")}`;
     else productCell = esc(baseProduct);
+    const searchText = [baseProduct, r.commodity, r.agent, r.invoice, r.market].filter(Boolean).join(" ").toLowerCase();
     return `
-    <tr>
+    <tr data-msq="${esc(searchText)}">
       <td>${chip(r.market||"—","neutral")}</td>
       <td class="helptext">${esc(r.invoice||"—")}</td>
       <td>${esc(r.agent)}</td>
@@ -5118,6 +5122,7 @@ function renderMarketStatements(){
     <div class="pagehead">
       <div><h2>Market Statements</h2><p>Raw line items imported automatically from each market's daily buyer statement (JHB Fresh Produce Market and Tshwane Market so far) — for review only, nothing here creates or confirms a Purchase Cost yet. Map raw commodity names to real Base Products under Admin &gt; Market Product Mapping.</p></div>
       <div class="actions">
+        <div class="field" style="min-width:220px;"><label>Search product</label><input type="text" id="marketStatementSearchInput" value="${esc(marketStatementSearch)}" placeholder="Product, agent or invoice…" autocomplete="off"></div>
         <div class="field" style="min-width:170px;"><label>Statement date</label><select id="marketStatementDateSel">${dateOptions}</select></div>
       </div>
     </div>
@@ -5125,11 +5130,11 @@ function renderMarketStatements(){
     ${unmappedCount ? `<div class="banner warn">⚠ ${unmappedCount} line${unmappedCount===1?"":"s"} on this date ${unmappedCount===1?"isn't":"aren't"} mapped to a Base Product yet — see Admin &gt; Market Product Mapping.</div>` : ""}
     ${missingPackSizeCount ? `<div class="banner warn">⚠ ${missingPackSizeCount} line${missingPackSizeCount===1?"":"s"} on this date ${missingPackSizeCount===1?"is":"are"} mapped to a Base Product but ${missingPackSizeCount===1?"has":"have"} no pack size set, so Base qty/price below can't be worked out yet — see Admin &gt; Market Product Mapping.</div>` : ""}
     <div class="card">
-      <div class="cardhead"><div><h3>Purchases — ${esc(marketStatementSelectedDate||"—")}</h3><div class="desc">${dayLines.length} line(s), total R${fmtNum(dayTotal,2)}. "Base qty"/"Base unit price" convert each line's raw market pack into the Base Product's own procurement unit, once it's mapped with a pack size (Admin &gt; Market Product Mapping) — the raw columns are always the market statement's own real figures.</div></div></div>
+      <div class="cardhead"><div><h3>Purchases — ${esc(marketStatementSelectedDate||"—")}</h3><div class="desc"><span id="marketStatementCount">${dayLines.length} line(s), total R${fmtNum(dayTotal,2)}.</span> "Base qty"/"Base unit price" convert each line's raw market pack into the Base Product's own procurement unit, once it's mapped with a pack size (Admin &gt; Market Product Mapping) — the raw columns are always the market statement's own real figures.</div></div></div>
       <div class="cardbody" style="padding:0;">
         <div class="tablewrap" style="border:none;border-radius:0;"><table>
           <thead><tr><th>Market</th><th>Invoice</th><th>Agent</th><th>Product</th><th class="num">Qty</th><th class="num">Unit price</th><th class="num">Total</th><th class="num">Base qty</th><th class="num">Base unit price</th></tr></thead>
-          <tbody>${lineRows || `<tr><td colspan="9" class="empty">No purchase lines for this date.</td></tr>`}</tbody>
+          <tbody id="marketStatementBody">${lineRows || `<tr><td colspan="9" class="empty">No purchase lines for this date.</td></tr>`}<tr id="marketStatementNoMatch" style="display:none;"><td colspan="9" class="empty">No purchase lines match this search.</td></tr></tbody>
         </table></div>
       </div>
     </div>
@@ -7433,6 +7438,30 @@ function wireTabEvents(){
   }
 
   if(currentTab==="marketstatements"){
+    // Product search: hides/shows rows in place (no re-render, so typing never loses focus). Totals in the card
+    // header follow the visible rows; the raw statement data itself is never changed.
+    const applyStmtSearch = ()=>{
+      const body = document.getElementById("marketStatementBody");
+      const countEl = document.getElementById("marketStatementCount");
+      if(!body || !countEl) return;
+      const terms = marketStatementSearch.trim().toLowerCase().split(/\s+/).filter(Boolean);
+      const dayLinesNow = (DATA.marketStatementLines||[]).filter(r=> r.statementDate===marketStatementSelectedDate);
+      const rows = Array.from(body.querySelectorAll("tr[data-msq]"));
+      let shown = 0, shownTotal = 0;
+      rows.forEach((tr,i)=>{
+        const hit = terms.every(t=> tr.getAttribute("data-msq").includes(t));
+        tr.style.display = hit ? "" : "none";
+        if(hit){ shown++; shownTotal += Number((dayLinesNow[i]||{}).total)||0; }
+      });
+      const nm = document.getElementById("marketStatementNoMatch");
+      if(nm) nm.style.display = (rows.length && !shown) ? "" : "none";
+      countEl.textContent = terms.length
+        ? `Showing ${shown} of ${rows.length} line(s), total R${fmtNum(round2(shownTotal),2)}.`
+        : `${rows.length} line(s), total R${fmtNum(round2(dayLinesNow.reduce((s,r)=> s + (Number(r.total)||0), 0)),2)}.`;
+    };
+    const stmtSearch = document.getElementById("marketStatementSearchInput");
+    if(stmtSearch) stmtSearch.addEventListener("input", (e)=>{ marketStatementSearch = e.target.value; applyStmtSearch(); });
+    applyStmtSearch();
     const dateSel = document.getElementById("marketStatementDateSel");
     if(dateSel) dateSel.addEventListener("change", (e)=>{
       marketStatementSelectedDate = e.target.value;
