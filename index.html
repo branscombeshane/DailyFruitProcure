@@ -557,7 +557,12 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 // day has had the chance to be received and priced first. Today's — or a future — purchase date is never allowed.
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
-const APP_BUILD = "2026-10-23 · Market vs Receiving audit + optional Receiving pack in the mapping · Price Export: only changed costs flag a day as outdated, not margin/min-price changes · GP Watch table: Short of target column + sticky product name · Phone menu button · Product GP Watch (from the Item Sales reports) · Made-to-order items can be removed from the stock take · Received-date grouping, changed-since-download check, queued download saves, lighter saves, stock take completeness checks, tick-box page access";
+// VERSION HISTORY (newest first). The menu shows only APP_VERSION; quote it when asking for a change so the exact build is known.
+//  v2026.10.26a  — footer shows only the version number (this list replaces the long on-screen text)
+//  Everything below was the on-screen build text up to 2026-10-23, newest first: Market vs Receiving audit + optional Receiving pack in the mapping | Price Export: only changed costs flag a day as outdated, not margin/min-price changes | GP Watch table: Short of target column + sticky product name | Phone menu button | Product GP Watch (from the Item Sales reports) | Made-to-order items can be removed from the stock take | Received-date grouping, changed-since-download check, queued download saves, lighter saves, stock take completeness checks, tick-box page access
+const APP_VERSION = "v2026.10.26a";
+const APP_BUILD = APP_VERSION; // kept as an alias in case anything else reads it
+
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
 // often than it's audited in bulk, so opening the tab should land on today's entries, not the full history.
 let purchaseDateFilter = new Date().toISOString().slice(0,10);
@@ -2371,7 +2376,7 @@ function renderNav(){
           <div style="font-weight:600;color:var(--ink);">${esc(currentUser.name)}</div>
           <div style="text-transform:capitalize;margin-bottom:6px;">${esc(currentUser.role)}</div>
           <button class="btn small" id="logoutBtn" style="width:100%;">Logout</button>
-          <div style="margin-top:8px;font-size:10px;opacity:.6;" title="Which version of the app this browser is running — bump APP_BUILD on every change">Version ${esc(APP_BUILD)}</div>
+          <div style="margin-top:8px;font-size:10px;opacity:.6;" title="Which version of the app this browser is running — quote it when asking for a change. Bump APP_VERSION on every change.">${esc(APP_VERSION)}</div>
         </div>`;
       const btn = document.getElementById("logoutBtn");
       if(btn) btn.addEventListener("click", ()=>{
