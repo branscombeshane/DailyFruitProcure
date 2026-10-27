@@ -558,11 +558,12 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
 // VERSION HISTORY (newest first). The menu shows only APP_VERSION; quote it when asking for a change so the exact build is known.
+//  v2026.10.27a  — Purchase logging: a double tap on Confirm/Save no longer logs a second (blank-product or duplicate) order; Purchase Costs gets a one-click "remove blank lines" and its ✕ now deletes just that one line
 //  v2026.10.26c  — Market Statements: product search box (filters the purchase lines by product, raw name, agent, invoice or market)
 //  v2026.10.26b  — Market Product Mapping: pack size calculator (works out Pack size + Receiving pack)
 //  v2026.10.26a  — footer shows only the version number (this list replaces the long on-screen text)
 //  Everything below was the on-screen build text up to 2026-10-23, newest first: Market vs Receiving audit + optional Receiving pack in the mapping | Price Export: only changed costs flag a day as outdated, not margin/min-price changes | GP Watch table: Short of target column + sticky product name | Phone menu button | Product GP Watch (from the Item Sales reports) | Made-to-order items can be removed from the stock take | Received-date grouping, changed-since-download check, queued download saves, lighter saves, stock take completeness checks, tick-box page access
-const APP_VERSION = "v2026.10.26c";
+const APP_VERSION = "v2026.10.27a";
 const APP_BUILD = APP_VERSION; // kept as an alias in case anything else reads it
 
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
@@ -734,6 +735,12 @@ let marketStatementSelectedDate = "";
 let marketMappingSearch = "";
 // Market Statements product search (v2026.10.26c). Module-level so it survives the re-render when the date changes.
 let marketStatementSearch = "";
+// True from the moment a Quick Buy / Shopping List order is handed to the server until the server answers. Without it a
+// second tap on Confirm during the save (the form stays on screen until the answer comes back) ran the handler again:
+// Quick Buy had already cleared its selected product, so that second run logged an order with NO product (the blank
+// "NOT FOUND" lines on Purchase Costs), and the Shopping List one logged a true duplicate under a fresh id.
+let purchaseLogBusy = false;
+let blankRemovalRunning = false; // the "remove blank lines" loop re-renders between lines, so it needs its own lock
 // Pack size calculator on Market Product Mapping (v2026.10.26b). Kept at module level because this page re-renders on
 // every search keystroke / toggle, which would otherwise wipe what was typed.
 let mpCalc = {open:false, a:"", b:"", c:"", qty:"", price:""};
@@ -2333,6 +2340,7 @@ async function persistPurchaseAction(payload, successMsg, onSuccess){
     toast("Could not save — check your connection and try again");
   }
   setSyncBusy(false);
+  purchaseLogBusy = false;
   render();
   return ok;
 }
@@ -4476,10 +4484,19 @@ function renderPurchase(){
       </div>`;
   }).join("");
 
+  // Orders saved with no product at all (the double-tap bug fixed in v2026.10.27a). They can never be received or costed, so
+  // they only add noise — and they are what shows "NOT FOUND" with a big "Item codes affected" number.
+  const blankOrders = DATA.purchaseCosts.filter(p=> !String(p.baseProduct||"").trim());
+  const blankRemovable = blankOrders.filter(p=> !isReceived(p));
+  const blankBanner = blankOrders.length ? `<div class="banner warn" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
+      <span>⚠ ${blankOrders.length} order line${blankOrders.length===1?" has":"s have"} no product (a double tap on Confirm created ${blankOrders.length===1?"it":"them"}) — they show as NOT FOUND below and can't be received or costed.${blankOrders.length>blankRemovable.length ? ` ${blankOrders.length-blankRemovable.length} of them already ${blankOrders.length-blankRemovable.length===1?"has":"have"} a received figure and must be removed by hand with the ✕.` : ""}</span>
+      ${blankRemovable.length ? `<button class="btn" id="removeBlankPurchasesBtn">Remove ${blankRemovable.length} blank line${blankRemovable.length===1?"":"s"}</button>` : ""}
+    </div>` : "";
   return `
     <div class="pagehead">
       <div><h2>Purchase Costs</h2><p>Every purchase logged through Receiving, Quick Buy, or the Shopping List lands here automatically — this page is for reviewing those figures and removing a line only if it was logged by mistake.</p></div>
     </div>
+    ${blankBanner}
     <div class="card">
       <div class="cardhead">
         <div><h3>Current entries</h3><div class="desc">Multiple lines for the same product on the same day (different suppliers) are expected — remove a line only if it was a mistake. Qty/Cost/Total show the confirmed Receiving figures once a line's been received (including any correction made there) — the "Ordered" tag marks a line still awaiting confirmation, still showing what it was ordered at.</div></div>
@@ -6011,6 +6028,7 @@ function wireTabEvents(){
     });
     document.querySelectorAll("[data-buy-tick]").forEach(btn=>{
       btn.addEventListener("click", ()=>{
+        if(purchaseLogBusy){ toast("Saving — one moment…"); return; } // a second tap while the first is still saving
         const container = btn.closest("[data-buy-row]");
         const bp = container.dataset.buyRow;
         const editId = container.dataset.buyEditid || "";
@@ -6084,6 +6102,8 @@ function wireTabEvents(){
         // same moment, and buying the same product from two suppliers today is just two separate rows.
         // This logs it as an ORDER, not an instant purchase — it stays "Ordered" until someone in
         // Receiving confirms it actually arrived (see the Receiving tab / receivePurchase in Code.gs).
+        purchaseLogBusy = true;
+        btn.disabled = true;
         persistPurchaseAction({action:"logPurchase", entry}, "Logged order for " + bp);
       });
     });
@@ -6234,6 +6254,7 @@ function wireTabEvents(){
       const confirmBtn = document.getElementById("quickBuyConfirm");
       if(confirmBtn){
         confirmBtn.addEventListener("click", ()=>{
+          if(purchaseLogBusy || !quickBuySelected){ toast("Saving — one moment…"); return; } // a second tap while the first is still saving
           const qtyVal = document.getElementById("quickBuyQty").value;
           const costVal = document.getElementById("quickBuyCost").value;
           const supplierVal = (document.getElementById("quickBuySupplier")||{}).value || "";
@@ -6302,6 +6323,8 @@ function wireTabEvents(){
           // never collide with, wait on, or overwrite whatever the other person is logging right now,
           // and buying the same product from two suppliers today is just two separate rows. This logs it
           // as an ORDER, not an instant purchase — see the Receiving tab / receivePurchase in Code.gs.
+          purchaseLogBusy = true;
+          confirmBtn.disabled = true;
           persistPurchaseAction({action:"logPurchase", entry}, "Logged order for " + bp);
         });
       }
@@ -6955,12 +6978,34 @@ function wireTabEvents(){
     // The manual "New purchase entry" draft form (add/clear/submit a batch of typed-in lines) was
     // removed here — Shane's call: everything now comes in through Receiving, Quick Buy, or the Shopping
     // List instead, so this tab is read/audit-only apart from deleting a mistaken row below.
+    // Removes exactly this one line by its own id (deletePurchaseLog is additive on the server) instead of re-saving the whole
+    // purchase list from this screen's copy, which could overwrite orders other people logged in the meantime.
     document.querySelectorAll("[data-del-purchase]").forEach(b=>{
       b.addEventListener("click", ()=>{
-        const i = Number(b.dataset.delPurchase);
-        DATA.purchaseCosts.splice(i,1);
-        persist("Purchase entry removed", ["purchaseCosts"]);
+        const row = DATA.purchaseCosts[Number(b.dataset.delPurchase)];
+        if(!row || purchaseLogBusy) return;
+        const id = row.id;
+        purchaseLogBusy = true;
+        b.disabled = true;
+        persistPurchaseAction({action:"deletePurchaseLog", id}, "Purchase entry removed", ()=>{ DATA.purchaseCosts = DATA.purchaseCosts.filter(p=> p.id !== id); });
       });
+    });
+    const removeBlankBtn = document.getElementById("removeBlankPurchasesBtn");
+    if(removeBlankBtn) removeBlankBtn.addEventListener("click", async ()=>{
+      const ids = DATA.purchaseCosts.filter(p=> !String(p.baseProduct||"").trim() && !isReceived(p)).map(p=> p.id);
+      if(!ids.length || purchaseLogBusy || blankRemovalRunning) return;
+      blankRemovalRunning = true;
+      removeBlankBtn.disabled = true;
+      removeBlankBtn.textContent = "Removing… 0 of " + ids.length;
+      let done = 0;
+      for(const id of ids){
+        purchaseLogBusy = true;
+        const ok = await persistPurchaseAction({action:"deletePurchaseLog", id}, "Removed " + (done+1) + " of " + ids.length, ()=>{ DATA.purchaseCosts = DATA.purchaseCosts.filter(p=> p.id !== id); });
+        if(!ok){ blankRemovalRunning = false; return; } // persistPurchaseAction has already shown why; stop rather than hammer a failing connection
+        done++;
+      }
+      blankRemovalRunning = false;
+      toast("Removed " + done + " blank line" + (done===1?"":"s"));
     });
   }
 
