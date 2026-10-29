@@ -562,6 +562,7 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
 // VERSION HISTORY (newest first). The menu shows only APP_VERSION; quote it when asking for a change so the exact build is known.
+//  v2026.10.30e  — "Read live from Sage" now reads BOTH companies and the check flags items whose average cost differs between Daily Fruit - Veg and Pyroca 79 (same stock).
 //  v2026.10.30d  — Check Sage card now compares Sage's default price AND average cost with what the app last sent (any age), with separate "Price not as sent" / "Avg cost not as sent" tiles and Cost sent column; the per-day "matches what was sent" check includes cost.
 //  v2026.10.30c  — Price Export: "Read live from Sage" button — the Check Sage card can now read Sage's current price and average cost straight from Sage (read-only), no Items export upload needed. It never unlocks the download or feeds an import file.
 //  v2026.10.30b  — Price Export: "Check Sage against what we sent" — upload a fresh Items export and the app lists items whose Sage price differs from the last price sent (e.g. cost landed but the price file did not) and anything priced below cost in Sage; from 30 Oct a day only counts as exported once each company has been checked and matches
@@ -573,7 +574,7 @@ function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 //  v2026.10.26b  — Market Product Mapping: pack size calculator (works out Pack size + Receiving pack)
 //  v2026.10.26a  — footer shows only the version number (this list replaces the long on-screen text)
 //  Everything below was the on-screen build text up to 2026-10-23, newest first: Market vs Receiving audit + optional Receiving pack in the mapping | Price Export: only changed costs flag a day as outdated, not margin/min-price changes | GP Watch table: Short of target column + sticky product name | Phone menu button | Product GP Watch (from the Item Sales reports) | Made-to-order items can be removed from the stock take | Received-date grouping, changed-since-download check, queued download saves, lighter saves, stock take completeness checks, tick-box page access
-const APP_VERSION = "v2026.10.30d";
+const APP_VERSION = "v2026.10.30e";
 const APP_BUILD = APP_VERSION; // kept as an alias in case anything else reads it
 
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
@@ -650,9 +651,9 @@ const SAGE_MAX_IMPORT_LINES = 150; // Lines per Sage import file. Sage's hard li
 let sagePriceListFile = null; // {name, loadedAt, listCols:[header,...], byCode:{code:{header:value}}, rowCount}
 // Read LIVE from Sage (Price Export > "Read live from Sage"): default price + average cost per item code. Used ONLY by the Check Sage card —
 // it carries no price lists and no VAT-type certainty, so it can never unlock the download or feed an import file (sagePriceListFile does that).
-let sageLiveFile = null; // {name, company, loadedAt, byCode:{code:{__desc,__active,__defEx,__cost,...}}, rowCount}
+let sageLiveByCo = {}; // company key -> {name, company, loadedAt, byCode:{code:{__desc,__active,__defEx,__cost,...}}, rowCount}; both companies are read together so their costs can be compared
 function sageCheckFile_(company){
-  if(sageLiveFile && sageLiveFile.company===company) return sageLiveFile;
+  if(sageLiveByCo[company]) return sageLiveByCo[company];
   if(sagePriceListFile && sagePriceListFile.company===company) return sagePriceListFile;
   return null;
 }
@@ -4887,6 +4888,9 @@ function sageCheckCompute_(){
   // The app's own target gross margin per item (item override > category > default — without any one-off "good deal" bonus).
   const targetByCode = {};
   try{ pricingSuggestionsAsOf_(todaySA()).forEach(r=>{ if(r.itemCode){ const m = marginFor(r.item, r.category==="Uncategorized" ? "" : r.category); if(m && m.value>0) targetByCode[r.itemCode] = m.value; } }); }catch(e){ /* margins are an extra — never break the check over them */ }
+  // Both companies supply from the same stock, so the same item code must carry the same average cost in each.
+  const otherCo = Object.keys(SAGE_COMPANIES).find(k=> k!==sageExportCompany);
+  const other = (f===sageLiveByCo[sageExportCompany] && otherCo) ? sageLiveByCo[otherCo] : null;
   const rows = [];
   Object.keys(f.byCode).forEach(code=>{
     const v = f.byCode[code];
@@ -4902,12 +4906,19 @@ function sageCheckCompute_(){
     const costMismatch = !!q && qCost!==null && qCost>0 && Math.abs((hasCost ? costN : 0) - qCost) >= 0.01;
     const costLanded = mismatch && qCost!==null && !costMismatch;
     const gp = (price>0 && hasCost) ? (price-costN)/price : null;
+    let otherCost = null, crossMismatch = false;
+    const ov = other ? other.byCode[code] : null;
+    if(ov && ov.__active!==false){
+      const oc = (ov.__cost==="" || ov.__cost===undefined || isNaN(Number(ov.__cost))) ? 0 : Number(ov.__cost);
+      otherCost = oc;
+      crossMismatch = (hasCost || oc>0) && Math.abs((hasCost ? costN : 0) - oc) >= 0.01;
+    }
     const target = targetByCode[code] || null;
     // "Healthy" = at least the app's target margin less a 2-point allowance (prices are rounded up to 50c, so a price the app set sits at or just above target).
     const thin = !below && gp!==null && target!==null && gp < target - 0.02;
-    rows.push({code, desc: v.__desc || itemOfCode[code] || "", price, cost: hasCost ? costN : null, gp, target, thin, q, qCost, below, mismatch, costMismatch, costLanded, attention: mismatch || costMismatch || below || thin, ok: !!q && !mismatch && !costMismatch && !below && !thin});
+    rows.push({code, desc: v.__desc || itemOfCode[code] || "", price, cost: hasCost ? costN : null, gp, target, thin, q, qCost, below, mismatch, costMismatch, costLanded, otherCost, crossMismatch, attention: mismatch || costMismatch || crossMismatch || below || thin, ok: !!q && !mismatch && !costMismatch && !below && !thin});
   });
-  return {rows};
+  return {rows, otherName: other ? SAGE_COMPANIES[otherCo].name : "", compared: !!other};
 }
 // One export date vs the loaded Sage export: items quoted that day (and not re-priced by a later day) whose Sage price differs.
 function sageCheckDate_(date, company){
@@ -4954,10 +4965,10 @@ function renderSageCheckCard_(exportDate, plCo){
   const checkSrc = sageCheckFile_(plCo.key);
   const chk = sageCheckCompute_();
   const rows = chk.rows;
-  const nMis = rows.filter(r=>r.mismatch).length, nCost = rows.filter(r=>r.costMismatch).length, nBelow = rows.filter(r=>r.below).length, nThin = rows.filter(r=>r.thin).length, nAttn = rows.filter(r=>r.attention).length;
+  const nMis = rows.filter(r=>r.mismatch).length, nCost = rows.filter(r=>r.costMismatch).length, nBelow = rows.filter(r=>r.below).length, nThin = rows.filter(r=>r.thin).length, nCross = rows.filter(r=>r.crossMismatch).length, nAttn = rows.filter(r=>r.attention).length;
   const f = sageCheckFilter;
-  const shownAll = rows.filter(r=> f==="attention" ? r.attention : f==="mismatch" ? r.mismatch : (f==="cost" ? r.costMismatch : (f==="below" ? r.below : (f==="thin" ? r.thin : true))))
-    .sort((a,b)=> ((b.mismatch||b.costMismatch) - (a.mismatch||a.costMismatch)) || ((b.below?1:0) - (a.below?1:0)) || ((b.thin?1:0) - (a.thin?1:0)) || ((a.gp===null?9:a.gp) - (b.gp===null?9:b.gp)) || a.code.localeCompare(b.code));
+  const shownAll = rows.filter(r=> f==="attention" ? r.attention : f==="cross" ? r.crossMismatch : f==="mismatch" ? r.mismatch : (f==="cost" ? r.costMismatch : (f==="below" ? r.below : (f==="thin" ? r.thin : true))))
+    .sort((a,b)=> ((b.mismatch||b.costMismatch||b.crossMismatch) - (a.mismatch||a.costMismatch||a.crossMismatch)) || ((b.below?1:0) - (a.below?1:0)) || ((b.thin?1:0) - (a.thin?1:0)) || ((a.gp===null?9:a.gp) - (b.gp===null?9:b.gp)) || a.code.localeCompare(b.code));
   const shown = shownAll.slice(0,200);
   const dls = costCsvDownloadsFor(exportDate).filter(x=> !x.company || x.company===plCo.key);
   const dateChk = dls.length ? sageCheckDate_(exportDate, plCo.key) : null;
@@ -4977,24 +4988,26 @@ function renderSageCheckCard_(exportDate, plCo){
     const flags = [];
     if(r.mismatch) flags.push(r.costLanded ? chip("cost landed, price didn't","critical") : chip("price off","critical"));
     if(r.costMismatch) flags.push(chip("cost off","critical"));
+    if(r.crossMismatch) flags.push(chip("differs from "+chk.otherName,"critical"));
     if(r.below) flags.push(chip("below cost","critical"));
     if(r.thin) flags.push(chip("thin margin","warn"));
     return `
     <tr>
       <td><b>${esc(r.code)}</b>${r.desc ? `<div class="helptext">${esc(r.desc)}</div>` : ""}</td>
       <td class="num"><b>${money(r.price)}</b>${r.q ? sub("sent "+money(r.q.price)+" · "+esc(shortDayLabel(r.q.date)), r.mismatch) : ""}</td>
-      <td class="num"><b>${r.cost!==null ? money(r.cost) : "—"}</b>${r.qCost!==null && r.qCost!==undefined ? sub("sent "+money(r.qCost), r.costMismatch) : ""}</td>
+      <td class="num"><b>${r.cost!==null ? money(r.cost) : "—"}</b>${r.qCost!==null && r.qCost!==undefined ? sub("sent "+money(r.qCost), r.costMismatch) : ""}${r.otherCost!==null && r.otherCost!==undefined ? sub(esc(chk.otherName)+" "+(r.otherCost>0 ? money(r.otherCost) : "R0 / none"), r.crossMismatch) : ""}</td>
       <td class="num" style="${r.thin||r.below?"color:var(--critical);font-weight:600;":""}">${r.gp!==null ? fmtNum(r.gp*100,1)+"%" : "—"}${r.target!==null ? sub("target "+fmtNum(r.target*100,0)+"%", r.thin) : ""}</td>
       <td>${flags.length ? flags.join(" ") : (r.ok ? chip("ok","good") : "")}</td>
     </tr>`; }).join("");
   return `
     <div class="card">
-      <div class="cardhead"><div><h3>Check ${esc(plCo.name)} in Sage against what we sent</h3><div class="desc">${checkSrc===sageLiveFile ? "Read live from Sage at "+esc(checkSrc.loadedAt)+"." : "From the Items export "+esc(checkSrc.name)+"."} Sage's default price and average cost against what this app last sent, plus any item below cost or more than 2 points under its target margin.</div></div></div></div>
+      <div class="cardhead"><div><h3>Check ${esc(plCo.name)} in Sage against what we sent</h3><div class="desc">${checkSrc===sageLiveByCo[plCo.key] ? "Read live from Sage at "+esc(checkSrc.loadedAt)+"." : "From the Items export "+esc(checkSrc.name)+"."} Sage's default price and average cost against what this app last sent, plus items whose average cost differs between the two companies (same stock), below cost, or more than 2 points under target margin.${chk.compared ? "" : " <b>Read live from Sage</b> reads both companies to compare costs."}</div></div></div></div>
       <div class="cardbody">
         <div class="cardrow" style="grid-template-columns:repeat(auto-fit,minmax(130px,1fr));margin-bottom:12px;">
           ${tile("attention","Needs attention", nAttn, nAttn?'var(--critical)':'var(--good)')}
           ${tile("mismatch","Price off", nMis, nMis?'var(--critical)':'var(--ink)')}
           ${tile("cost","Cost off", nCost, nCost?'var(--critical)':'var(--ink)')}
+          ${chk.compared ? tile("cross","Differs from "+chk.otherName, nCross, nCross?'var(--critical)':'var(--ink)') : ""}
           ${tile("below","Below cost", nBelow, nBelow?'var(--critical)':'var(--ink)')}
           ${tile("thin","Thin margin", nThin, nThin?'var(--warn)':'var(--ink)')}
           ${tile("all","All items", rows.length, 'var(--ink)')}
@@ -5004,7 +5017,7 @@ function renderSageCheckCard_(exportDate, plCo){
       <div class="cardbody" style="padding:0;">
         <div class="tablewrap" style="border:none;border-radius:0;"><table>
           <thead><tr><th>Item</th><th class="num">Sage price</th><th class="num">Sage avg cost</th><th class="num">GP</th><th>Status</th></tr></thead>
-          <tbody>${trs || `<tr><td colspan="5" class="empty">${f==="attention" ? "✓ Nothing needs attention — every price, cost and margin is as expected." : f==="thin" ? "Every margin is at or above its target." : f==="mismatch" ? "No price differs from what was sent." : (f==="cost" ? "No average cost differs from what was sent." : (f==="below" ? "Nothing is priced below its cost in this company." : "Nothing to show."))}</td></tr>`}</tbody>
+          <tbody>${trs || `<tr><td colspan="5" class="empty">${f==="cross" ? "Average cost is the same in both companies for every item they share." : f==="attention" ? "✓ Nothing needs attention — every price, cost and margin is as expected." : f==="thin" ? "Every margin is at or above its target." : f==="mismatch" ? "No price differs from what was sent." : (f==="cost" ? "No average cost differs from what was sent." : (f==="below" ? "Nothing is priced below its cost in this company." : "Nothing to show."))}</td></tr>`}</tbody>
         </table></div>
         ${shownAll.length>shown.length ? `<div class="helptext" style="padding:10px 16px;">Showing the first ${shown.length} of ${shownAll.length}.</div>` : ""}
       </div>
@@ -5740,7 +5753,7 @@ function renderSellingPrices(){
           </div>
           <div style="flex:1;min-width:220px;display:flex;flex-direction:column;gap:6px;">
             <button class="btn" id="sageLiveRead" ${plCo?"":"disabled"} style="flex:1;min-height:48px;" title="Asks Sage directly for each item's current price and average cost. Read-only. It does not unlock the download — only the Items export does, so no price list can be zeroed.">${plCo ? "Read live from Sage" : "Choose the company first"}</button>
-            <div class="helptext">${sageLiveFile && plCo && sageLiveFile.company===plCo.key ? "✓ Read "+esc(sageLiveFile.loadedAt)+" · "+sageLiveFile.rowCount+" items — results below" : "Optional check · read-only"}</div>
+            <div class="helptext">${plCo && sageLiveByCo[plCo.key] ? "✓ Read "+esc(sageLiveByCo[plCo.key].loadedAt)+" · "+Object.values(sageLiveByCo).map(x=>x.rowCount).join(" + ")+" items (both companies) — results below" : "Optional check · read-only"}</div>
           </div>
         </div>
         <div id="sagePriceListStatus"></div>
@@ -7571,7 +7584,6 @@ function wireTabEvents(){
         if(k===sageExportCompany) return;
         sageExportCompany = k;
         sagePriceListFile = null; // an export belongs to one company — never carried across a switch
-        sageLiveFile = null;
         sageRememberFile_();
         render();
       });
@@ -7621,15 +7633,24 @@ function wireTabEvents(){
       const co = sageExportCompany;
       if(!co){ toast("Choose the Sage company first"); return; }
       setSyncBusy(true);
+      const failed = [];
       try{
-        const res = await fetch(API_URL, {method:"POST", headers:{"Content-Type":"text/plain;charset=utf-8"}, body:JSON.stringify({action:"getSageItemsLive", company:co})});
-        const r = await res.json();
-        if(!r || !r.ok || !r.data || !r.data.byCode) throw new Error((r && r.error) || "No usable answer from Sage");
-        if(sageExportCompany!==co) return; // the company was switched while waiting — drop this answer
-        const n = new Date();
-        sageLiveFile = {name:"Live from Sage", company:co, loadedAt:n.toISOString().slice(0,10)+" "+n.toTimeString().slice(0,5), byCode:r.data.byCode, rowCount:r.data.rowCount};
+        // Both companies are read (this one first) — they supply from the same stock, so their costs are compared in the check.
+        for(const k of [co].concat(Object.keys(SAGE_COMPANIES).filter(x=>x!==co))){
+          try{
+            const res = await fetch(API_URL, {method:"POST", headers:{"Content-Type":"text/plain;charset=utf-8"}, body:JSON.stringify({action:"getSageItemsLive", company:k})});
+            const r = await res.json();
+            if(!r || !r.ok || !r.data || !r.data.byCode) throw new Error((r && r.error) || "No usable answer from Sage");
+            const n = new Date();
+            sageLiveByCo[k] = {name:"Live from Sage", company:k, loadedAt:n.toISOString().slice(0,10)+" "+n.toTimeString().slice(0,5), byCode:r.data.byCode, rowCount:r.data.rowCount};
+          }catch(e){
+            if(k===co) throw e;
+            failed.push(SAGE_COMPANIES[k].name+": "+String(e && e.message || e).slice(0,120));
+          }
+        }
         const stamped = sageAutoVerify_();
-        toast(stamped.length ? "Checked against Sage ✓ — "+stamped.map(shortDayLabel).join(", ")+" matches what was sent" : "Read "+r.data.rowCount+" items live from Sage");
+        toast(failed.length ? "Read "+SAGE_COMPANIES[co].name+", but not the other company — cost comparison skipped ("+failed[0]+")"
+          : (stamped.length ? "Checked against Sage ✓ — "+stamped.map(shortDayLabel).join(", ")+" matches what was sent" : "Read both companies live from Sage"));
       }catch(e){
         toast("Could not read Sage: "+String(e && e.message || e).slice(0,160));
       }finally{
