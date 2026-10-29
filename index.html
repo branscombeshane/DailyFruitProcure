@@ -78,6 +78,10 @@
   .navbtn .dot{width:6px;height:6px;border-radius:50%;background:var(--line);flex:none;}
   .navbtn:hover{background:var(--surface-2); color:var(--ink);}
   .navbtn.active{background:var(--accent-soft); color:var(--accent);}
+  .subtabs{display:flex; gap:6px; flex-wrap:wrap; margin:0 0 16px; padding-bottom:10px; border-bottom:1px solid var(--line);}
+  .subtab{font:inherit; font-size:13px; font-weight:600; padding:7px 14px; border-radius:999px; border:1px solid var(--line); background:var(--surface); color:var(--muted); cursor:pointer;}
+  .subtab:hover{color:var(--ink); background:var(--surface-2);}
+  .subtab.active{background:var(--accent-soft); color:var(--accent); border-color:var(--accent);}
   .navbtn.active .dot{background:var(--accent);}
   .navgroup{margin-bottom:14px;}
   .navgroup:last-child{margin-bottom:0;}
@@ -558,6 +562,7 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
 // VERSION HISTORY (newest first). The menu shows only APP_VERSION; quote it when asking for a change so the exact build is known.
+//  v2026.10.30a  — (1) Confirm Prices: "Different pack size?" box — type the bought pack size (e.g. 8kg), the base unit size (e.g. 6kg) and the invoice price per pack; the app works out the price per base unit and the base quantity (remembered per product + supplier). Receiving still counts what physically arrived. (2) Menu cut from 28 items to 12: related pages are now tabs on one page (Shopping List/Quick Buy/Archive, Receiving/Confirm Prices, Holdings/Item Sales/Stock Variance, Item Setup/Product Mixes, Purchases/Price History, Market Statements/vs Receiving/Product Mapping, Price Export/GP Watch)
 //  v2026.10.29a  — Two dashboards: "Operations Dashboard" (buying, receiving, stock take, sign-off, holdings flags — Owner + Procurement) and "Financial Dashboard" (prices, market statements and shortfalls, GP Watch, unmatched products — Owner only); every tile is clickable and shows a loading indicator
 //  v2026.10.28a  — Market vs Receiving, Product by day: every "Show" option lists the newest day first (biggest shortfall first within a day)
 //  v2026.10.27a  — Purchase logging: a double tap on Confirm/Save no longer logs a second (blank-product or duplicate) order; Purchase Costs gets a one-click "remove blank lines" and its ✕ now deletes just that one line
@@ -565,7 +570,7 @@ function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 //  v2026.10.26b  — Market Product Mapping: pack size calculator (works out Pack size + Receiving pack)
 //  v2026.10.26a  — footer shows only the version number (this list replaces the long on-screen text)
 //  Everything below was the on-screen build text up to 2026-10-23, newest first: Market vs Receiving audit + optional Receiving pack in the mapping | Price Export: only changed costs flag a day as outdated, not margin/min-price changes | GP Watch table: Short of target column + sticky product name | Phone menu button | Product GP Watch (from the Item Sales reports) | Made-to-order items can be removed from the stock take | Received-date grouping, changed-since-download check, queued download saves, lighter saves, stock take completeness checks, tick-box page access
-const APP_VERSION = "v2026.10.29a";
+const APP_VERSION = "v2026.10.30a";
 const APP_BUILD = APP_VERSION; // kept as an alias in case anything else reads it
 
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
@@ -749,45 +754,55 @@ let mpCalc = {open:false, a:"", b:"", c:"", qty:"", price:""};
 let marketMappingOnlyUnmapped = true;
 let marketMappingShowIgnored = false; // show raw commodities Shane has removed from the mapping list (with a Restore button) instead of hiding them
 
+// NAV lists every individual page (the Users page ticks pages from this list, and TABS/ROLE_TABS/access all work per page).
+// TAB_GROUPS (below) is what folds related pages into ONE sidebar entry with tabs across the top of the page — each page keeps its
+// own id, access rule and render function, so nothing about permissions or saved state changes (Oct 2026, to cut the menu down).
 const NAV = [
   {group:"Overview", items:[
     {id:"home", label:"Operations Dashboard"},
     {id:"findash", label:"Financial Dashboard"},
   ]},
-  {group:"Shopping List", items:[
+  {group:"Buying", items:[
     {id:"shoppinglist", label:"Shopping List"},
     {id:"quickbuy", label:"Quick Buy"},
     {id:"shoppingarchive", label:"Shopping List Archive"},
     {id:"receiving", label:"Receiving"},
+    {id:"confirmprices", label:"Confirm Prices"},
+    {id:"stocktake", label:"Input Stock Levels"},
   ]},
-  {group:"Holding Numbers", items:[
+  {group:"Products", items:[
     {id:"dashboard", label:"Calculated Holdings"},
     {id:"salesdata", label:"Item Sales"},
-  ]},
-  {group:"Product Setup", items:[
+    {id:"stockvariance", label:"Stock Variance"},
     {id:"itemsetup", label:"Item Setup"},
     {id:"recipes", label:"Product Mixes"},
   ]},
   {group:"Costings", items:[
     {id:"purchase", label:"Purchase Costs"},
-    {id:"confirmprices", label:"Confirm Prices"},
     {id:"pricehistory", label:"Price History"},
     {id:"marketstatements", label:"Market Statements"},
     {id:"marketaudit", label:"Market vs Receiving"},
-  ]},
-  {group:"Pricing", items:[
+    {id:"marketmapping", label:"Market Product Mapping"},
     {id:"sellingprices", label:"Price Export"},
     {id:"gpwatch", label:"Product GP Watch"},
   ]},
-  {group:"Stock Take", items:[
-    {id:"stocktake", label:"Input Stock Levels"},
-  ]},
   {group:"Admin", items:[
     {id:"users", label:"Users"},
-    {id:"stockvariance", label:"Stock Variance"},
-    {id:"marketmapping", label:"Market Product Mapping"},
   ]},
 ];
+// One sidebar entry per group, tabs across the top of the page. "tabs" = [pageId, tab label]. A user only ever sees the tabs they
+// can access; a group with a single accessible page shows that page's own name and no tab bar.
+const TAB_GROUPS = [
+  {id:"g_shop",   label:"Shopping List",    tabs:[["shoppinglist","Shopping List"],["quickbuy","Quick Buy"],["shoppingarchive","Archive"]]},
+  {id:"g_recv",   label:"Receiving",        tabs:[["receiving","Receiving"],["confirmprices","Confirm Prices"]]},
+  {id:"g_hold",   label:"Holdings & Sales", tabs:[["dashboard","Calculated Holdings"],["salesdata","Item Sales"],["stockvariance","Stock Variance"]]},
+  {id:"g_setup",  label:"Product Setup",    tabs:[["itemsetup","Item Setup"],["recipes","Product Mixes"]]},
+  {id:"g_cost",   label:"Purchase Costs",   tabs:[["purchase","Purchases"],["pricehistory","Price History"]]},
+  {id:"g_market", label:"Market",           tabs:[["marketstatements","Statements"],["marketaudit","vs Receiving"],["marketmapping","Product Mapping"]]},
+  {id:"g_price",  label:"Pricing",          tabs:[["sellingprices","Price Export"],["gpwatch","GP Watch"]]},
+];
+function tabGroupOf_(tabId){ return TAB_GROUPS.find(g=> g.tabs.some(t=> t[0]===tabId)) || null; }
+let groupLastTab = {}; // group id -> the tab last open in it, so the sidebar entry returns to where you were
 const TABS = NAV.flatMap(section=>section.items);
 if(currentTab==="sageimport") currentTab = "sellingprices"; // the old Cost CSV tab was merged into Price Export
 if(!TABS.some(t=>t.id===currentTab)){
@@ -1768,7 +1783,7 @@ function isNotReceived(p){
 function receivingDiscrepancy(p){
   if(!isReceived(p)) return null;
   const qtyKnown = p.qty!==undefined && p.qty!==null && p.qty!=="";
-  const qtyDiff = qtyKnown && Number(p.qty)!==Number(p.receivedQty);
+  const qtyDiff = qtyKnown && Number(p.qty)!==Number(physQty(p)); // physical count vs ordered (receivedQty may have been converted to base units on Confirm Prices)
   // Quantity only (Oct 2026): Receiving no longer records a price — it's confirmed separately on the Confirm
   // Prices tab — so a confirmed price that differs from the ordered one is a deliberate pricing decision
   // (visible in Price History), not a receiving discrepancy. costDiff is kept in the shape, always false, so
@@ -2369,16 +2384,34 @@ function applyMobileMenu_(){
   if(title){ const t = (typeof TABS!=="undefined") ? TABS.find(x=> x.id===currentTab) : null; title.textContent = (currentUser && t) ? t.label : ""; }
 }
 (function(){ document.addEventListener("click", (e)=>{ const b = e.target.closest && e.target.closest("#menuToggle"); if(!b) return; mobileMenuOpen = !mobileMenuOpen; applyMobileMenu_(); }); })();
+// Tab bar across the top of a merged page (see TAB_GROUPS). Only the tabs this user may open; nothing when only one.
+function renderSubTabs_(){
+  const g = currentUser ? tabGroupOf_(currentTab) : null;
+  if(!g) return "";
+  groupLastTab[g.id] = currentTab;
+  const mine = g.tabs.filter(x=> userCanAccessTab(currentUser, x[0]));
+  if(mine.length<2) return "";
+  return `<div class="subtabs" role="tablist">${mine.map(x=> `<button class="subtab ${x[0]===currentTab?'active':''}" data-subtab="${x[0]}" role="tab" aria-selected="${x[0]===currentTab}">${esc(x[1])}</button>`).join("")}</div>`;
+}
 function renderNav(){
   const nav = document.getElementById("nav");
   if(!currentUser){ nav.innerHTML = ""; }
   else {
     nav.innerHTML = NAV.map(section=>{
-      const items = section.items.filter(t=> userCanAccessTab(currentUser, t.id));
-      if(!items.length) return "";
-      const itemsHtml = items.map(t=>
-        `<button class="navbtn ${t.id===currentTab?'active':''}" data-tab="${t.id}"><span class="dot"></span>${esc(t.label)}</button>`
-      ).join("");
+      const done = new Set();
+      const itemsHtml = section.items.filter(t=> userCanAccessTab(currentUser, t.id)).map(t=>{
+        const g = tabGroupOf_(t.id);
+        if(!g){
+          return `<button class="navbtn ${t.id===currentTab?'active':''}" data-tab="${t.id}"><span class="dot"></span>${esc(t.label)}</button>`;
+        }
+        if(done.has(g.id)) return "";
+        done.add(g.id);
+        const mine = g.tabs.filter(x=> userCanAccessTab(currentUser, x[0]));
+        const target = (groupLastTab[g.id] && mine.some(x=> x[0]===groupLastTab[g.id])) ? groupLastTab[g.id] : mine[0][0];
+        const label = mine.length===1 ? (TABS.find(x=> x.id===mine[0][0])||{}).label || g.label : g.label;
+        return `<button class="navbtn ${mine.some(x=> x[0]===currentTab)?'active':''}" data-tab="${target}"><span class="dot"></span>${esc(label)}</button>`;
+      }).join("");
+      if(!itemsHtml) return "";
       const labelHtml = section.group ? `<div class="navgrouplabel">${esc(section.group)}</div>` : "";
       return `<div class="navgroup">${labelHtml}${itemsHtml}</div>`;
     }).join("");
@@ -2547,7 +2580,8 @@ function render(){
     // visible regardless of which one the user wanders to afterward. saveConflict (an actually-rejected
     // save) takes priority over staleDataAvailable (just a heads-up, nothing lost yet) when somehow both
     // are true at once.
-    main.innerHTML = (kiosk ? renderKioskTopBar() : "") + (saveConflict ? renderSaveConflictBanner(saveConflict) : (staleDataAvailable ? renderStaleDataBanner() : "")) + pageHtml;
+    main.innerHTML = (kiosk ? renderKioskTopBar() : "") + (saveConflict ? renderSaveConflictBanner(saveConflict) : (staleDataAvailable ? renderStaleDataBanner() : "")) + renderSubTabs_() + pageHtml;
+    document.querySelectorAll("[data-subtab]").forEach(b=> b.addEventListener("click", ()=>{ setCurrentTab(b.dataset.subtab); render(); window.scrollTo(0,0); }));
     if(!noPages) wireTabEvents();
     const reloadBtn = document.getElementById("saveConflictReload");
     if(reloadBtn) reloadBtn.addEventListener("click", ()=> location.reload());
@@ -3472,7 +3506,7 @@ function discrepancyChipHtml(p){
   const disc = receivingDiscrepancy(p);
   if(!disc) return "";
   return chip("⚠ " + [
-    disc.qtyDiff ? `qty differs (ordered ${fmtNum(p.qty)}, received ${fmtNum(p.receivedQty)})` : null,
+    disc.qtyDiff ? `qty differs (ordered ${fmtNum(p.qty)}, received ${fmtNum(physQty(p))})` : null,
   ].filter(Boolean).join(", "), "warn");
 }
 
@@ -3495,11 +3529,11 @@ function renderReceivingSlipHtml(p){
         <tr><td>Ordered by</td><td>${esc(p.loggedBy||"—")}</td></tr>
         <tr><td>Order date</td><td>${esc(p.date||"—")}${p.loggedTime ? " " + esc(fmtTime(p.loggedTime)) : ""}</td></tr>
         <tr><td>Ordered qty</td><td>${hasOrderedQty ? fmtNum(p.qty) : "—"}</td></tr>
-        <tr><td>Received qty</td><td>${fmtNum(p.receivedQty)}</td></tr>
+        <tr><td>Received qty</td><td>${fmtNum(physQty(p))}</td></tr>
         <tr><td>Received by</td><td>${esc(p.receivedBy||"—")}</td></tr>
         <tr><td>Received on</td><td>${esc(p.receivedDate||"—")}${p.receivedTime ? " at " + esc(fmtTime(p.receivedTime)) : ""}</td></tr>
       </table>
-      ${disc && disc.qtyDiff ? `<div class="print-slip-disc">⚠ Discrepancy — qty ordered ${fmtNum(p.qty)}, received ${fmtNum(p.receivedQty)}</div>` : ""}
+      ${disc && disc.qtyDiff ? `<div class="print-slip-disc">⚠ Discrepancy — qty ordered ${fmtNum(p.qty)}, received ${fmtNum(physQty(p))}</div>` : ""}
       <div class="print-slip-foot">Printed ${esc(new Date().toLocaleString())}${currentUser ? " by " + esc(currentUser.name) : ""}</div>
     </div>`;
 }
@@ -3644,7 +3678,7 @@ function renderReceiving(){
     const noOrderFlag = noOrder ? chip("no order on file","neutral") : "";
     const editForm = manage && editing ? `
       <div class="buyrow" data-receive-row="${esc(p.id||"")}" style="display:flex;align-items:center;gap:4px;white-space:nowrap;margin-top:4px;">
-        <input type="number" step="0.01" class="receive-qty" placeholder="Qty" value="${esc(p.receivedQty!==undefined?p.receivedQty:"")}" style="width:64px;">
+        <input type="number" step="0.01" class="receive-qty" placeholder="Qty" value="${esc(physQty(p)!==undefined?physQty(p):"")}" style="width:64px;">
         <button class="btn primary" data-receive-tick="${esc(p.id||"")}" title="Save correction" style="padding:2px 10px;font-size:12px;">✓ Save</button>
         <button class="btn" data-receive-edit-cancel="${esc(p.id||"")}" style="padding:2px 6px;font-size:12px;">✕</button>
       </div>` : "";
@@ -4883,6 +4917,58 @@ function priceExportStatus_(date, suggestionRows){
   });
   return {date, total:n, parts, got:companies.reduce((a,c)=>a+c.got,0), complete:companies.every(c=>c.complete), companies, changedItems: companies.some(c=>c.stale) ? changedItems : [], changedDetail: companies.some(c=>c.stale) ? changedDetail : [], priceDrift: Array.from(priceDrift)};
 }
+// ---- Pack conversion on Confirm Prices (Oct 2026) ----
+// Receiving counts what physically arrived (e.g. 10 boxes of 8kg) but the Base Product may be a different size (a 6kg box).
+// On Confirm Prices the user types the bought pack size, the base unit's size and the invoice price per bought pack; the app
+// works out the price per BASE unit and the quantity in BASE units (10 x 8/6 = 13.33) so nobody needs a calculator.
+// receivedQty/receivedCost always stay in BASE units — everything downstream (cost averaging, the Market vs Receiving audit,
+// Price Export) reads them — and the physical count/sizes/invoice price are kept in packQty/packSize/basePackSize/packPrice.
+function physQty(p){ return (p.packQty!==undefined && p.packQty!==null && p.packQty!=="") ? p.packQty : p.receivedQty; }
+function hasPack_(p){ return Number(p.packSize)>0 && Number(p.basePackSize)>0; }
+let packOpen = new Set();   // line ids whose "bought in a different pack size" box is open
+let packDraft = {};         // id -> {size, base, price} typed so far (survives re-renders such as the search box)
+function packHistoryFor_(p){
+  const lines = (DATA.purchaseCosts||[]).filter(x=> x.id!==p.id && x.baseProduct===p.baseProduct && hasPack_(x))
+    .slice().sort((a,b)=> String(b.priceConfirmedDate||b.receivedDate||"").localeCompare(String(a.priceConfirmedDate||a.receivedDate||"")));
+  const sameSupplier = lines.find(x=> String(x.supplier||"")===String(p.supplier||""));
+  const any = lines[0] || null;
+  return {sameSupplier, base: any ? Number(any.basePackSize) : ""};
+}
+function packInitial_(p){
+  if(packDraft[p.id]) return packDraft[p.id];
+  if(hasPack_(p)) return {size:p.packSize, base:p.basePackSize, price:p.packPrice};
+  const h = packHistoryFor_(p);
+  return {size: h.sameSupplier ? h.sameSupplier.packSize : "", base: h.base, price:""};
+}
+let packClosed = new Set();  // lines where the user switched the pack box off (so remembered pack sizes don't reopen it)
+function packIsOpen_(p){
+  if(packOpen.has(p.id)) return true;
+  if(packClosed.has(p.id)) return false;
+  if(hasPack_(p)) return true;
+  return needsPriceConfirm(p) && !!packHistoryFor_(p).sameSupplier;
+}
+function packBoxHtml_(p, unit){
+  if(!packIsOpen_(p)){
+    return `<div style="margin-top:4px;"><button class="btn small" data-pk-toggle="${esc(p.id||"")}" title="Use this when the delivery was a different box/pack size from the base unit">Different pack size?</button></div>`;
+  }
+  const v = packInitial_(p);
+  const phys = physQty(p);
+  return `<div class="pk-box" data-pk-box="${esc(p.id||"")}" data-pk-phys="${esc(phys)}" style="margin-top:6px;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);width:190px;white-space:normal;">
+    <div class="helptext" style="margin-bottom:4px;">Same unit for both sizes (e.g. kg)</div>
+    <div style="display:flex;gap:6px;">
+      <label class="helptext" style="flex:1;">Bought<input type="number" step="any" min="0" class="pk-size" value="${esc(v.size)}" style="width:100%;"></label>
+      <label class="helptext" style="flex:1;">Base<input type="number" step="any" min="0" class="pk-base" value="${esc(v.base)}" style="width:100%;"></label>
+    </div>
+    <label class="helptext" style="display:block;margin-top:4px;">Invoice price per bought pack<input type="number" step="0.01" min="0" class="pk-price" value="${esc(v.price)}" style="width:100%;"></label>
+    <div class="pk-result helptext" style="margin-top:4px;font-weight:600;"></div>
+    <button class="btn small" data-pk-toggle="${esc(p.id||"")}" style="margin-top:4px;">✕ Same size as base</button>
+  </div>`;
+}
+function packCalc_(size, base, price, phys){
+  size = Number(size); base = Number(base); price = Number(price); phys = Number(phys)||0;
+  if(!(size>0 && base>0 && price>0)) return null;
+  return {cost: round2(price*base/size), baseQty: Math.round(phys*size/base*1000)/1000};
+}
 function renderConfirmPrices(){
   const todayStr = new Date().toISOString().slice(0,10);
   const cpq = confirmPricesSearch.trim().toLowerCase();
@@ -4897,7 +4983,8 @@ function renderConfirmPrices(){
   const awaitingRows = awaiting.map(p=>{
     const hasOrdered = p.cost!==undefined && p.cost!==null && p.cost!=="" && Number(p.cost)>0;
     const enteredAtReceiving = hasCostValue(p); // typed at receiving by someone on the old app — unconfirmed, to be checked
-    const pre = enteredAtReceiving ? p.receivedCost : (hasOrdered ? p.cost : "");
+    const packMode = packIsOpen_(p);
+    const pre = packMode ? "" : (enteredAtReceiving ? p.receivedCost : (hasOrdered ? p.cost : ""));
     const unit = procUnitForBase(p.baseProduct);
     const total = ""; // line total shown after confirming, in Recently confirmed
     return `
@@ -4905,12 +4992,13 @@ function renderConfirmPrices(){
       <td>${esc(p.baseProduct)}</td>
       <td class="helptext">${esc(p.loggedBy||"—")}<div>${esc(p.date||"")}${p.loggedTime ? " " + esc(fmtTime(p.loggedTime)) : ""}</div></td>
       <td class="helptext">${esc(p.receivedDate||"—")}${p.receivedTime ? " " + esc(fmtTime(p.receivedTime)) : ""}<div>received by ${esc(p.receivedBy||"—")}</div></td>
-      <td class="num">${fmtNum(p.receivedQty)}</td>
+      <td class="num">${fmtNum(physQty(p))}</td>
       <td>${esc(p.supplier||"—")}</td>
       <td>${hasOrdered ? money(p.cost) : chip("none entered","neutral")}${enteredAtReceiving ? `<div>${chip("entered at receiving — check it","warn")}</div>` : ""}</td>
       <td>
-        <input type="number" step="0.01" min="0" class="confirm-price" data-confirm-id="${esc(p.id||"")}" placeholder="Price" value="${esc(pre)}" data-pristine="${esc(pre)}" style="width:100px;">
+        <input type="number" step="0.01" min="0" class="confirm-price" data-confirm-id="${esc(p.id||"")}" placeholder="${packMode ? "auto" : "Price"}" value="${esc(pre)}" ${packMode ? "readonly" : `data-pristine="${esc(pre)}"`} style="width:100px;">
         <div class="helptext">per ${esc(unit||"unit")}</div>
+        ${packBoxHtml_(p, unit)}
       </td>
       <td><button class="btn primary" data-price-confirm="${esc(p.id||"")}" style="padding:2px 10px;font-size:12px;">✓ Confirm</button></td>
     </tr>`;
@@ -4921,18 +5009,22 @@ function renderConfirmPrices(){
     const unit = procUnitForBase(p.baseProduct);
     const lineTotal = round2((Number(p.receivedQty)||0) * (Number(p.receivedCost)||0));
     const cur = String(p.receivedCost);
+    const editPack = editing && packIsOpen_(p);
     const editCell = editing ? `
-      <div style="display:flex;align-items:center;gap:4px;white-space:nowrap;" data-price-row="${esc(p.id||"")}">
-        <input type="number" step="0.01" min="0" class="confirm-price" data-confirm-id="${esc(p.id||"")}" value="${esc(cur)}" data-pristine="${esc(cur)}" style="width:90px;">
-        <button class="btn primary" data-price-confirm="${esc(p.id||"")}" style="padding:2px 10px;font-size:12px;">✓ Save</button>
-        <button class="btn" data-price-edit-cancel="${esc(p.id||"")}" style="padding:2px 6px;font-size:12px;">✕</button>
+      <div data-price-row="${esc(p.id||"")}">
+        <div style="display:flex;align-items:center;gap:4px;white-space:nowrap;">
+          <input type="number" step="0.01" min="0" class="confirm-price" data-confirm-id="${esc(p.id||"")}" value="${esc(cur)}" ${editPack ? "readonly" : `data-pristine="${esc(cur)}"`} style="width:90px;">
+          <button class="btn primary" data-price-confirm="${esc(p.id||"")}" style="padding:2px 10px;font-size:12px;">✓ Save</button>
+          <button class="btn" data-price-edit-cancel="${esc(p.id||"")}" style="padding:2px 6px;font-size:12px;">✕</button>
+        </div>
+        ${packBoxHtml_(p, unit)}
       </div>` : `<button class="btn small" data-price-edit="${esc(p.id||"")}">Change price</button>`;
     return `
     <tr>
       <td>${esc(p.baseProduct)}</td>
       <td class="helptext">${esc(p.receivedDate||"—")}<div>received by ${esc(p.receivedBy||"—")}</div></td>
-      <td class="num">${fmtNum(p.receivedQty)}</td>
-      <td class="num" style="font-weight:600;">${money(p.receivedCost)}<div class="helptext" style="font-weight:400;">per ${esc(unit||"unit")}</div></td>
+      <td class="num">${hasPack_(p) ? `${fmtNum(physQty(p))} × ${fmtNum(p.packSize,0)}<div class="helptext">= ${fmtNum(p.receivedQty)} base</div>` : fmtNum(p.receivedQty)}</td>
+      <td class="num" style="font-weight:600;">${money(p.receivedCost)}<div class="helptext" style="font-weight:400;">per ${esc(unit||"unit")}</div>${hasPack_(p) ? `<div class="helptext" style="font-weight:400;">${money(p.packPrice)} per ${fmtNum(p.packSize,0)} pack</div>` : ""}</td>
       <td class="num">${money(lineTotal)}</td>
       <td class="helptext">${p.priceConfirmedBy ? esc(p.priceConfirmedBy) + " · " + esc(p.priceConfirmedDate||"") + (p.priceConfirmedTime ? " " + esc(fmtTime(p.priceConfirmedTime)) : "") : "entered before this step existed"}</td>
       <td>${editCell}</td>
@@ -6208,6 +6300,7 @@ function wireTabEvents(){
           entry.priceConfirmedBy = existingRow.priceConfirmedBy;
           entry.priceConfirmedDate = existingRow.priceConfirmedDate;
           entry.priceConfirmedTime = existingRow.priceConfirmedTime;
+          entry.packQty = existingRow.packQty; entry.packSize = existingRow.packSize; entry.basePackSize = existingRow.basePackSize; entry.packPrice = existingRow.packPrice;
         }
         // a "not received" line being corrected here (its qty/cost typo'd at order time) must keep that
         // status too — logPurchase's full-row overwrite would otherwise silently reopen it
@@ -6428,6 +6521,7 @@ function wireTabEvents(){
             entry.priceConfirmedBy = existingRow.priceConfirmedBy;
             entry.priceConfirmedDate = existingRow.priceConfirmedDate;
             entry.priceConfirmedTime = existingRow.priceConfirmedTime;
+            entry.packQty = existingRow.packQty; entry.packSize = existingRow.packSize; entry.basePackSize = existingRow.basePackSize; entry.packPrice = existingRow.packPrice;
           }
           // a "not received" line being corrected here must keep that status too — see the matching
           // comment on the Shopping List edit path above
@@ -6612,6 +6706,8 @@ function wireTabEvents(){
         // qty/cost correction on an already-received line (see printReceivingSlip call).
         const wasAlreadyReceived = isReceived(existing);
         existing.receivedQty = Number(qtyVal);
+        // a line already priced in a different pack size keeps receivedQty in base units: the correction is of the physical count
+        if(hasPack_(existing)){ existing.packQty = Number(qtyVal); existing.receivedQty = Math.round(Number(qtyVal)*Number(existing.packSize)/Number(existing.basePackSize)*1000)/1000; }
         if(currentUser) existing.receivedBy = currentUser.name;
         existing.receivedDate = existing.receivedDate || todaySA(); // South African calendar day (the UTC date is a day behind between 00:00 and 02:00)
         // Shane's ask: a discrepancy needs a clock time to check against the camera system, not just a
@@ -6625,7 +6721,7 @@ function wireTabEvents(){
         // so the original qty/cost/supplier/loggedBy it was ordered under are preserved.
         persistPurchaseAction({
           action:"receivePurchase", id,
-          receivedQty: existing.receivedQty,
+          receivedQty: hasPack_(existing) ? existing.packQty : existing.receivedQty,
           receivedBy: existing.receivedBy, receivedDate: existing.receivedDate, receivedTime: existing.receivedTime,
         }, "Marked " + existing.baseProduct + " as received");
         // Auto-print, but only on the delivery's FIRST confirmation — not on a later correction to an
@@ -7167,33 +7263,73 @@ function wireTabEvents(){
       const items = [];
       let missing = 0;
       ids.forEach(id=>{
+        const box = document.querySelector('[data-pk-box="'+id+'"]');
+        if(box){ // priced in a different pack size: the typed sizes + invoice price decide the cost
+          const calc = packCalc_(box.querySelector(".pk-size").value, box.querySelector(".pk-base").value, box.querySelector(".pk-price").value, box.dataset.pkPhys);
+          if(!calc){ missing++; return; }
+          items.push({id, cost:calc.cost, packSize:Number(box.querySelector(".pk-size").value), basePackSize:Number(box.querySelector(".pk-base").value), packPrice:Number(box.querySelector(".pk-price").value)});
+          return;
+        }
         const inp = document.querySelector('.confirm-price[data-confirm-id="'+id+'"]');
         const v = inp ? inp.value.trim() : "";
         const n = Number(v);
         if(v==="" || isNaN(n) || n<=0){ missing++; return; }
         items.push({id, cost:n});
       });
-      if(!items.length){ toast("Enter a price above R0 first"); return; }
+      if(!items.length){ toast(document.querySelector("[data-pk-box]") ? "Fill in the pack size, base unit size and invoice price first" : "Enter a price above R0 first"); return; }
       const by = currentUser ? currentUser.name : "";
       persistPurchaseAction({action:"confirmPurchasePrices", items, confirmedBy:by}, msg || ("Confirmed " + items.length + " price" + (items.length===1?"":"s") + (missing ? " — " + missing + " skipped (no price entered)" : "")), ()=>{
         const nowD = new Date();
         items.forEach(it=>{
           const row = DATA.purchaseCosts.find(p=> p.id===it.id);
           if(!row) return;
+          const phys = Number(physQty(row))||0;
           row.receivedCost = it.cost;
+          if(it.packSize){
+            row.packQty = phys; row.packSize = it.packSize; row.basePackSize = it.basePackSize; row.packPrice = it.packPrice;
+            row.receivedQty = Math.round(phys*it.packSize/it.basePackSize*1000)/1000;
+          } else if(hasPack_(row)){
+            row.receivedQty = phys; row.packQty = ""; row.packSize = ""; row.basePackSize = ""; row.packPrice = "";
+          }
           row.priceConfirmedBy = by;
           row.priceConfirmedDate = nowD.toISOString().slice(0,10);
           row.priceConfirmedTime = nowD.toTimeString().slice(0,8);
-          pricesEditing.delete(it.id);
+          pricesEditing.delete(it.id); packOpen.delete(it.id); packClosed.delete(it.id); delete packDraft[it.id];
         });
       });
     };
     document.querySelectorAll("[data-price-confirm]").forEach(btn=>{
       btn.addEventListener("click", ()=> submitPrices([btn.dataset.priceConfirm]));
     });
+    // Pack box: open/close, and live-calculate the base price + base quantity as the sizes are typed.
+    document.querySelectorAll("[data-pk-toggle]").forEach(btn=>{
+      btn.addEventListener("click", ()=>{
+        const id = btn.dataset.pkToggle;
+        const line = DATA.purchaseCosts.find(p=> p.id===id);
+        const open = line ? packIsOpen_(line) : packOpen.has(id);
+        if(open){ packOpen.delete(id); packClosed.add(id); delete packDraft[id]; }
+        else { packClosed.delete(id); packOpen.add(id); }
+        render();
+      });
+    });
+    const pkRecalc = (box)=>{
+      const id = box.dataset.pkBox;
+      const size = box.querySelector(".pk-size").value, base = box.querySelector(".pk-base").value, price = box.querySelector(".pk-price").value;
+      packDraft[id] = {size, base, price};
+      const calc = packCalc_(size, base, price, box.dataset.pkPhys);
+      const out = box.querySelector(".pk-result");
+      const main = document.querySelector('.confirm-price[data-confirm-id="'+id+'"]');
+      if(main) main.value = calc ? calc.cost : "";
+      out.textContent = calc ? (fmtNum(box.dataset.pkPhys)+" × "+size+" = "+fmtNum(calc.baseQty)+" base units · "+money(calc.cost)+" per base unit") : "Enter all three numbers";
+    };
+    document.querySelectorAll("[data-pk-box]").forEach(box=>{
+      box.querySelectorAll("input").forEach(inp=> inp.addEventListener("input", ()=> pkRecalc(box)));
+      pkRecalc(box);
+    });
     const confirmAll = document.getElementById("confirmAllPrices");
     if(confirmAll) confirmAll.addEventListener("click", ()=>{
       // only the rows currently shown (the search filter applies) — same scoping as Selling Prices' "Update all shown"
+      // lines with nothing filled in are skipped (as before); a pack box that is open but incomplete counts as "nothing filled in"
       const ids = Array.from(document.querySelectorAll("tr[data-price-row]")).map(tr=> tr.dataset.priceRow).filter(id=> document.querySelector('.confirm-price[data-confirm-id="'+id+'"]') && awaitingPriceLines().some(p=>p.id===id));
       submitPrices(ids);
     });
@@ -7203,7 +7339,7 @@ function wireTabEvents(){
       btn.addEventListener("click", ()=>{ pricesEditing.add(btn.dataset.priceEdit); render(); });
     });
     document.querySelectorAll("[data-price-edit-cancel]").forEach(btn=>{
-      btn.addEventListener("click", ()=>{ pricesEditing.delete(btn.dataset.priceEditCancel); render(); });
+      btn.addEventListener("click", ()=>{ { const _id = btn.dataset.priceEditCancel; pricesEditing.delete(_id); packOpen.delete(_id); packClosed.delete(_id); delete packDraft[_id]; } render(); });
     });
   }
 
