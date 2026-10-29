@@ -562,6 +562,7 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
 // VERSION HISTORY (newest first). The menu shows only APP_VERSION; quote it when asking for a change so the exact build is known.
+//  v2026.10.30c  — Price Export: "Read live from Sage" button — the Check Sage card can now read Sage's current price and average cost straight from Sage (read-only), no Items export upload needed. It never unlocks the download or feeds an import file.
 //  v2026.10.30b  — Price Export: "Check Sage against what we sent" — upload a fresh Items export and the app lists items whose Sage price differs from the last price sent (e.g. cost landed but the price file did not) and anything priced below cost in Sage; from 30 Oct a day only counts as exported once each company has been checked and matches
 //  v2026.10.30a  — (1) Confirm Prices: "Different pack size?" box — type the bought pack size (e.g. 8kg), the base unit size (e.g. 6kg) and the invoice price per pack; the app works out the price per base unit and the base quantity (remembered per product + supplier). Receiving still counts what physically arrived. (2) Menu cut from 28 items to 12: related pages are now tabs on one page (Shopping List/Quick Buy/Archive, Receiving/Confirm Prices, Holdings/Item Sales/Stock Variance, Item Setup/Product Mixes, Purchases/Price History, Market Statements/vs Receiving/Product Mapping, Price Export/GP Watch)
 //  v2026.10.29a  — Two dashboards: "Operations Dashboard" (buying, receiving, stock take, sign-off, holdings flags — Owner + Procurement) and "Financial Dashboard" (prices, market statements and shortfalls, GP Watch, unmatched products — Owner only); every tile is clickable and shows a loading indicator
@@ -571,7 +572,7 @@ function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 //  v2026.10.26b  — Market Product Mapping: pack size calculator (works out Pack size + Receiving pack)
 //  v2026.10.26a  — footer shows only the version number (this list replaces the long on-screen text)
 //  Everything below was the on-screen build text up to 2026-10-23, newest first: Market vs Receiving audit + optional Receiving pack in the mapping | Price Export: only changed costs flag a day as outdated, not margin/min-price changes | GP Watch table: Short of target column + sticky product name | Phone menu button | Product GP Watch (from the Item Sales reports) | Made-to-order items can be removed from the stock take | Received-date grouping, changed-since-download check, queued download saves, lighter saves, stock take completeness checks, tick-box page access
-const APP_VERSION = "v2026.10.30b";
+const APP_VERSION = "v2026.10.30c";
 const APP_BUILD = APP_VERSION; // kept as an alias in case anything else reads it
 
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
@@ -646,6 +647,14 @@ const SAGE_MAX_IMPORT_LINES = 150; // Lines per Sage import file. Sage's hard li
 // Oct 2026 incident that zeroed every non-default list. So every export line carries the item's CURRENT value for every price
 // list, copied from a fresh Items export out of Sage. Sage stays the source of truth; nothing here can go stale.
 let sagePriceListFile = null; // {name, loadedAt, listCols:[header,...], byCode:{code:{header:value}}, rowCount}
+// Read LIVE from Sage (Price Export > "Read live from Sage"): default price + average cost per item code. Used ONLY by the Check Sage card —
+// it carries no price lists and no VAT-type certainty, so it can never unlock the download or feed an import file (sagePriceListFile does that).
+let sageLiveFile = null; // {name, company, loadedAt, byCode:{code:{__desc,__active,__defEx,__cost,...}}, rowCount}
+function sageCheckFile_(company){
+  if(sageLiveFile && sageLiveFile.company===company) return sageLiveFile;
+  if(sagePriceListFile && sagePriceListFile.company===company) return sagePriceListFile;
+  return null;
+}
 // The two Sage companies share this page but NOT their price lists, so a price file must only ever be built from (and imported
 // into) the company it was made for. Each company is recognised by price lists that exist only in its own Sage.
 const SAGE_COMPANIES = {
@@ -4866,7 +4875,7 @@ function sageCodeMaps_(){
 }
 // Every active item in the loaded Sage Items export: its Sage price and cost, the price last sent for it (if within 14 days), and flags.
 function sageCheckCompute_(){
-  const f = sagePriceListFile; if(!f) return null;
+  const f = sageCheckFile_(sageExportCompany); if(!f) return null;
   const {codeOfItem, itemOfCode} = sageCodeMaps_();
   const latest = {};
   (DATA.priceQuotes||[]).forEach(q=>{
@@ -4894,7 +4903,7 @@ function sageCheckCompute_(){
 }
 // One export date vs the loaded Sage export: items quoted that day (and not re-priced by a later day) whose Sage price differs.
 function sageCheckDate_(date, company){
-  const f = sagePriceListFile; if(!f || f.company!==company) return null;
+  const f = sageCheckFile_(company); if(!f) return null;
   const {codeOfItem} = sageCodeMaps_();
   const newer = {}; (DATA.priceQuotes||[]).forEach(q=>{ if(q.date>date) newer[q.item] = true; });
   let checked = 0; const bad = [];
@@ -4916,7 +4925,7 @@ function sageStampVerified_(date, company, rows, how){
 }
 // Run when a fresh Items export is loaded: every recent day this company has a price file for, and which matches Sage exactly, is stamped.
 function sageAutoVerify_(){
-  const co = sageExportCompany; if(!co || !sagePriceListFile || sagePriceListFile.company!==co) return [];
+  const co = sageExportCompany; if(!co || !sageCheckFile_(co)) return [];
   const done = [];
   for(let i=0;i<10;i++){
     const dd = new Date(todaySA()+"T00:00:00Z"); dd.setUTCDate(dd.getUTCDate()-i);
@@ -4929,7 +4938,8 @@ function sageAutoVerify_(){
   return done;
 }
 function renderSageCheckCard_(exportDate, plCo){
-  if(!plCo || !sagePriceListFile || sagePriceListFile.company!==plCo.key) return "";
+  if(!plCo || !sageCheckFile_(plCo.key)) return "";
+  const checkSrc = sageCheckFile_(plCo.key);
   const chk = sageCheckCompute_();
   const rows = chk.rows;
   const nMis = rows.filter(r=>r.mismatch).length, nBelow = rows.filter(r=>r.below).length, nOk = rows.filter(r=>r.ok).length;
@@ -4961,7 +4971,7 @@ function renderSageCheckCard_(exportDate, plCo){
     </tr>`).join("");
   return `
     <div class="card">
-      <div class="cardhead"><div><h3>Check ${esc(plCo.name)} in Sage against what we sent</h3><div class="desc">From the Items export you just uploaded (${esc(sagePriceListFile.name)}). Compares Sage's default price with the price last sent in the last 14 days, and lists anything priced below its cost in Sage — whether or not this app touched it.</div></div></div>
+      <div class="cardhead"><div><h3>Check ${esc(plCo.name)} in Sage against what we sent</h3><div class="desc">${checkSrc===sageLiveFile ? "Read live from Sage at "+esc(checkSrc.loadedAt)+" ("+checkSrc.rowCount+" items; average cost is Sage's own)." : "From the Items export you just uploaded ("+esc(checkSrc.name)+")."} Compares Sage's default price with the price last sent in the last 14 days, and lists anything priced below its cost in Sage — whether or not this app touched it.</div></div></div>
       <div class="cardbody">
         <div class="cardrow">
           ${tile("mismatch","Not as sent", nMis, nMis?'var(--critical)':'var(--good)')}
@@ -5708,6 +5718,11 @@ function renderSellingPrices(){
           </label>
           ${sagePriceListFile ? `<button class="btn small" id="sagePriceListClear" style="align-self:center;">Clear</button>` : ""}
         </div>
+        <div style="margin-top:10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+          <button class="btn" id="sageLiveRead" ${plCo?"":"disabled"} title="Read-only: asks Sage directly for each item's current price and average cost">${plCo ? "Read "+esc(plCo.name)+" live from Sage" : "Choose the company first"}</button>
+          <span class="helptext" style="flex:1;min-width:240px;">Read-only check of Sage's current prices and costs — no export needed. It does <b>not</b> unlock the download (that still needs the Items export above, so no price list can be zeroed).</span>
+        </div>
+        ${sageLiveFile && plCo && sageLiveFile.company===plCo.key ? `<div class="banner info" style="margin-top:10px;">✓ Read live from Sage at ${esc(sageLiveFile.loadedAt)} — ${esc(plCo.name)}, ${sageLiveFile.rowCount} items. Results are in the check below.</div>` : ""}
         <div id="sagePriceListStatus" style="margin-top:10px;"></div>
         ${plDupCodes.length ? `<div class="banner critical" style="margin-top:10px;">⛔ Item code ${plDupCodes.slice(0,6).map(c=>esc(c)+" ("+plDup[c].map(r=>esc(r.item)).join(" / ")+")").join("; ")}${plDupCodes.length>6?` and ${plDupCodes.length-6} more`:""} is used by more than one Item Setup row. Sage can only update a product once per import (the second line fails with "Row not found or changed"), so the download is blocked — delete or re-code the stale row in Item Setup.</div>` : ""}
         ${sagePriceListFile ? `<div class="banner ${plMissing.length?"critical":"info"}" style="margin-top:10px;">${plMissing.length
@@ -7538,6 +7553,7 @@ function wireTabEvents(){
         if(k===sageExportCompany) return;
         sageExportCompany = k;
         sagePriceListFile = null; // an export belongs to one company — never carried across a switch
+        sageLiveFile = null;
         sageRememberFile_();
         render();
       });
@@ -7582,6 +7598,26 @@ function wireTabEvents(){
         loadSageItemsFile(e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]);
       });
     }
+    const liveBtn = document.getElementById("sageLiveRead");
+    if(liveBtn) liveBtn.addEventListener("click", async ()=>{
+      const co = sageExportCompany;
+      if(!co){ toast("Choose the Sage company first"); return; }
+      setSyncBusy(true);
+      try{
+        const res = await fetch(API_URL, {method:"POST", headers:{"Content-Type":"text/plain;charset=utf-8"}, body:JSON.stringify({action:"getSageItemsLive", company:co})});
+        const r = await res.json();
+        if(!r || !r.ok || !r.data || !r.data.byCode) throw new Error((r && r.error) || "No usable answer from Sage");
+        if(sageExportCompany!==co) return; // the company was switched while waiting — drop this answer
+        const n = new Date();
+        sageLiveFile = {name:"Live from Sage", company:co, loadedAt:n.toISOString().slice(0,10)+" "+n.toTimeString().slice(0,5), byCode:r.data.byCode, rowCount:r.data.rowCount};
+        const stamped = sageAutoVerify_();
+        toast(stamped.length ? "Checked against Sage ✓ — "+stamped.map(shortDayLabel).join(", ")+" matches what was sent" : "Read "+r.data.rowCount+" items live from Sage");
+      }catch(e){
+        toast("Could not read Sage: "+String(e && e.message || e).slice(0,160));
+      }finally{
+        setSyncBusy(false); render();
+      }
+    });
     const plClear = document.getElementById("sagePriceListClear");
     if(plClear) plClear.addEventListener("click", ()=>{ sagePriceListFile = null; sageRememberFile_(); render(); });
     document.querySelectorAll("[data-sagecheck-filter]").forEach(el=>{
