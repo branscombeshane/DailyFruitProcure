@@ -558,13 +558,14 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
 // VERSION HISTORY (newest first). The menu shows only APP_VERSION; quote it when asking for a change so the exact build is known.
+//  v2026.10.29a  — Two dashboards: "Operations Dashboard" (buying, receiving, stock take, sign-off, holdings flags — Owner + Procurement) and "Financial Dashboard" (prices, market statements and shortfalls, GP Watch, unmatched products — Owner only); every tile is clickable and shows a loading indicator
 //  v2026.10.28a  — Market vs Receiving, Product by day: every "Show" option lists the newest day first (biggest shortfall first within a day)
 //  v2026.10.27a  — Purchase logging: a double tap on Confirm/Save no longer logs a second (blank-product or duplicate) order; Purchase Costs gets a one-click "remove blank lines" and its ✕ now deletes just that one line
 //  v2026.10.26c  — Market Statements: product search box (filters the purchase lines by product, raw name, agent, invoice or market)
 //  v2026.10.26b  — Market Product Mapping: pack size calculator (works out Pack size + Receiving pack)
 //  v2026.10.26a  — footer shows only the version number (this list replaces the long on-screen text)
 //  Everything below was the on-screen build text up to 2026-10-23, newest first: Market vs Receiving audit + optional Receiving pack in the mapping | Price Export: only changed costs flag a day as outdated, not margin/min-price changes | GP Watch table: Short of target column + sticky product name | Phone menu button | Product GP Watch (from the Item Sales reports) | Made-to-order items can be removed from the stock take | Received-date grouping, changed-since-download check, queued download saves, lighter saves, stock take completeness checks, tick-box page access
-const APP_VERSION = "v2026.10.28a";
+const APP_VERSION = "v2026.10.29a";
 const APP_BUILD = APP_VERSION; // kept as an alias in case anything else reads it
 
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
@@ -750,7 +751,8 @@ let marketMappingShowIgnored = false; // show raw commodities Shane has removed 
 
 const NAV = [
   {group:"Overview", items:[
-    {id:"home", label:"Dashboard"},
+    {id:"home", label:"Operations Dashboard"},
+    {id:"findash", label:"Financial Dashboard"},
   ]},
   {group:"Shopping List", items:[
     {id:"shoppinglist", label:"Shopping List"},
@@ -805,7 +807,7 @@ if(!TABS.some(t=>t.id===currentTab)){
 // "home" (the landing Dashboard) is Owner + Procurement only, by Shane's explicit request — Stock Taker,
 // Receiving and Market stay scoped to their single-purpose tab(s), same as before.
 const ROLE_TABS = {
-  owner: ["home","shoppinglist","quickbuy","shoppingarchive","receiving","dashboard","salesdata","itemsetup","recipes","purchase","confirmprices","pricehistory","marketstatements","marketaudit","sellingprices","gpwatch","stocktake","users","stockvariance","marketmapping"],
+  owner: ["home","findash","shoppinglist","quickbuy","shoppingarchive","receiving","dashboard","salesdata","itemsetup","recipes","purchase","confirmprices","pricehistory","marketstatements","marketaudit","sellingprices","gpwatch","stocktake","users","stockvariance","marketmapping"],
   procurement: ["home","shoppinglist","quickbuy","shoppingarchive","receiving","purchase","confirmprices","pricehistory","marketstatements","sellingprices","stocktake"],
   stocktaker: ["stocktake","receiving"],
   receiving: ["receiving"],
@@ -2446,6 +2448,7 @@ function wireLoginEvents(){
     // Receiving don't have a "home" tab at all (see ROLE_TABS), so they're left on whatever they had
     // open before, same as always.
     if(userCanAccessTab(u, "home")) setCurrentTab("home");
+    else if(userCanAccessTab(u, "findash")) setCurrentTab("findash");
     loginNameInput = "";
     loginError = "";
     render();
@@ -2519,6 +2522,7 @@ function render(){
     const noPages = userTabCount_(currentUser) === 0;
     if(noPages) pageHtml = `<div class="card"><div class="cardbody"><h3>No pages switched on for you</h3><p class="helptext">Your account is set up but has no pages ticked yet. Ask the owner to tick the pages you need on the Users page.</p></div></div>`;
     else if(currentTab==="home") pageHtml = renderHomeDashboard();
+    else if(currentTab==="findash") pageHtml = renderFinancialDashboard();
     else if(currentTab==="shoppinglist") pageHtml = renderShoppingList();
     else if(currentTab==="quickbuy") pageHtml = renderQuickBuy();
     else if(currentTab==="shoppingarchive") pageHtml = renderShoppingArchive();
@@ -3767,9 +3771,7 @@ function renderHomeDashboard(){
   const recentCutoff = new Date(Date.now() - RECEIVING_RECENT_DAYS*86400000).toISOString().slice(0,10);
   const recentlyReceived = DATA.purchaseCosts.filter(p=> p.baseProduct && isReceived(p) && p.receivedDate >= recentCutoff);
   const discrepancyRows = recentlyReceived.filter(p=> receivingDiscrepancy(p));
-  // ---- Costing step: received lines still needing a confirmed price, and whether today's cost CSV has been downloaded ----
-  const awaitingPrice = awaitingPriceLines();
-  const costTile = costCsvStatTile();
+  // (Costing / price items live on the Financial Dashboard — Owner only.)
   const stockTile = stockCountTile_();
 
   // ---- Over-suggested buys: orders logged more than 20% over the suggested buy (see
@@ -3781,15 +3783,6 @@ function renderHomeDashboard(){
   // ---- Calculated Holdings: consistency/missing-data flags ----
   const planRows = procurementPlanComputed();
   const flaggedRows = planRows.filter(r=> r.consistency!=="OK" || r.missing!=="OK");
-
-  // ---- Purchase Costs: base products logged that Item Setup doesn't recognize ----
-  const knownProducts = distinctBaseProducts();
-  const unmatchedNames = Array.from(new Set(
-    DATA.purchaseCosts.filter(p=> p.baseProduct && !knownProducts.includes(p.baseProduct)).map(p=>p.baseProduct)
-  )).sort();
-
-  // ---- Price History: products with a big purchase-to-purchase move recently ----
-  const priceAlerts = recentPriceAlerts(RECEIVING_RECENT_DAYS);
 
   const goto = (tabId, label)=> `<button class="btn small" data-goto-tab="${esc(tabId)}">${esc(label)}</button>`;
 
@@ -3861,22 +3854,9 @@ function renderHomeDashboard(){
       <td>${statusChip(r.missing)}</td>
     </tr>`).join("");
 
-  const unmatchedHtml = unmatchedNames.slice(0,10).map(bp=>{
-    const count = DATA.purchaseCosts.filter(p=>p.baseProduct===bp).length;
-    return `<tr><td>${esc(bp)}</td><td class="num">${count} line${count===1?"":"s"} logged</td></tr>`;
-  }).join("");
-
-  const priceAlertHtml = priceAlerts.slice(0,10).map(a=>`
-    <tr>
-      <td>${esc(a.baseProduct)}</td>
-      <td class="helptext">${esc(a.date)}</td>
-      <td class="num">${money(a.prevCost)} → ${money(a.cost)}</td>
-      <td>${chip((a.direction==="up"?"▲ +":"▼ ")+Math.round(a.changePct*100)+"%", a.direction==="up"?"critical":"good")}</td>
-    </tr>`).join("");
-
   return `
     <div class="pagehead">
-      <div><h2>Dashboard</h2><p>Everything that needs a look right now, pulled from Shopping List, Receiving, Calculated Holdings and Purchase Costs — open any section below for the full picture.</p></div>
+      <div><h2>Operations Dashboard</h2><p>The day-to-day: buying, receiving, stock take and sign-off — open any tile or section below for the full picture.</p></div>
     </div>
     <div class="cardrow">
       ${navStat("Critical stock", criticalCount, criticalCount?'var(--critical)':'var(--good)', "shoppinglist")}
@@ -3885,18 +3865,12 @@ function renderHomeDashboard(){
       ${navStat("Overdue orders", overduePending.length, overduePending.length?'var(--critical)':'var(--good)', "receiving")}
     </div>
     <div class="cardrow">
-      ${navStat("Prices awaiting confirmation", awaitingPrice.length, awaitingPrice.length?'var(--warn)':'var(--good)', "confirmprices")}
-      ${navStat(costTile.label, costTile.value, costTile.color, "sellingprices")}
       ${navStat(stockTile.label, stockTile.value, stockTile.color, "stocktake")}
-    </div>
-    <div class="cardrow">
       ${navStat("Receiving discrepancies ("+RECEIVING_RECENT_DAYS+"d)", discrepancyRows.length, discrepancyRows.length?'var(--warn)':'var(--good)', "receiving")}
       ${navStat("Over-suggested buys ("+RECEIVING_RECENT_DAYS+"d)", overBuyRows.length, overBuyRows.length?'var(--critical)':'var(--good)', "purchase")}
-      ${navStat("Price alerts ("+RECEIVING_RECENT_DAYS+"d)", priceAlerts.length, priceAlerts.length?'var(--warn)':'var(--good)', "pricehistory")}
       ${canSeeHoldings
         ? navStat("Flagged in Calculated Holdings", flaggedRows.length, flaggedRows.length?'var(--warn)':'var(--good)', "dashboard")
         : plainStat("Flagged in Calculated Holdings (Owner only)", flaggedRows.length, flaggedRows.length?'var(--warn)':'var(--good)')}
-      ${navStat("Unmatched products", unmatchedNames.length, unmatchedNames.length?'var(--warn)':'var(--good)', "purchase")}
     </div>
     <div class="card">
       <div class="cardhead">
@@ -3961,18 +3935,6 @@ function renderHomeDashboard(){
     </div>
     <div class="card">
       <div class="cardhead">
-        <div><h3>Price alerts</h3><div class="desc">${priceAlerts.length} product${priceAlerts.length===1?"":"s"} moved ${Math.round((Number(DATA.shoppingList.priceAlertPct)||0.25)*100)}% or more in the last ${RECEIVING_RECENT_DAYS} days.</div></div>
-        ${goto("pricehistory","Open Price History →")}
-      </div>
-      <div class="cardbody" style="padding:0;">
-        <div class="tablewrap" style="border:none;border-radius:0;"><table>
-          <thead><tr><th>Base product</th><th>Date</th><th>Was → Now</th><th>Move</th></tr></thead>
-          <tbody>${priceAlertHtml || `<tr><td colspan="4" class="empty">No big price moves in the last ${RECEIVING_RECENT_DAYS} days.</td></tr>`}</tbody>
-        </table></div>
-      </div>
-    </div>
-    <div class="card">
-      <div class="cardhead">
         <div><h3>Calculated Holdings flags</h3><div class="desc">${flaggedRows.length} of ${planRows.length} base products have inconsistent or missing data.</div></div>
         ${canSeeHoldings ? goto("dashboard","Open Calculated Holdings →") : ""}
       </div>
@@ -3982,6 +3944,154 @@ function renderHomeDashboard(){
           <tbody>${flaggedHtml || `<tr><td colspan="4" class="empty">Nothing flagged — every tracked product has clean, consistent data.</td></tr>`}</tbody>
         </table></div>
       </div>
+    </div>`;
+}
+
+// ---------- Financial Dashboard (Owner only) ----------
+// The money side, kept apart from the Operations Dashboard: price confirmation and export, price moves,
+// market statements and their shortfalls against Receiving, unmatched products, and GP Watch. Every tile
+// is clickable; tiles that stand for a filtered list ("short", "below cost") carry a data-goto-action so the
+// destination tab opens already filtered to exactly what the number counts.
+function finStat(label, value, color, tabId, action){
+  return `<div class="stat clickable" data-goto-tab="${esc(tabId)}"${action ? ` data-goto-action="${esc(action)}"` : ""} title="Go to ${esc(label)}">
+    <div class="label">${esc(label)}</div><div class="value" style="color:${color}">${value}</div>
+  </div>`;
+}
+// Applied just before the destination tab renders. Always resets the filters it relies on so the number on the tile
+// and the list it opens can never disagree.
+function applyGotoAction_(a){
+  if(!a) return;
+  if(a==="ma-short" || a==="ma-unmapped"){ maPeriod = "14"; maStatus = "short"; maSearch = ""; maShowUnmapped = (a==="ma-unmapped"); }
+  else if(a==="gp-neg" || a==="gp-low" || a==="gp-flag"){ gpStatus = a.slice(3); gpCompany = "all"; gpSearch = ""; }
+}
+function gpPeriodLabel_(){ return gpPeriod==="month" ? "this month" : (gpPeriod==="latest" ? "latest day" : "last "+(Number(gpPeriod)||7)+" days"); }
+function renderFinancialDashboard(){
+  const N = RECEIVING_RECENT_DAYS;
+  const goto = (tabId, label)=> `<button class="btn small" data-goto-tab="${esc(tabId)}">${esc(label)}</button>`;
+  const emptyRow = (cols, msg)=> `<tr><td colspan="${cols}" class="empty">${msg}</td></tr>`;
+
+  // ---- Costing: prices still to confirm, Sage export status, price moves, unmatched products ----
+  const awaitingPrice = awaitingPriceLines();
+  const costTile = costCsvStatTile();
+  const priceAlerts = recentPriceAlerts(N);
+  const knownProducts = distinctBaseProducts();
+  const unmatchedNames = Array.from(new Set(
+    DATA.purchaseCosts.filter(p=> p.baseProduct && !knownProducts.includes(p.baseProduct)).map(p=>p.baseProduct)
+  )).sort();
+
+  // ---- Market statements ----
+  const stmtDates = distinctMarketStatementDates();
+  const latestStmt = stmtDates[0] || "";
+  const latestLines = (DATA.marketStatementLines||[]).filter(r=> r.statementDate===latestStmt);
+  const latestTotal = latestLines.reduce((a,r)=> a + (Number(r.total)||0), 0);
+  let ma = {rows:[], unmapped:[]};
+  { const keep = maPeriod; maPeriod = "14"; try{ ma = maCompute_(); }catch(e){ console.error("Financial dashboard: market audit failed", e); } maPeriod = keep; }
+  const shortRows = ma.rows.filter(r=> r.status==="short").sort((a,b)=> b.date.localeCompare(a.date) || (b.shortRand||0)-(a.shortRand||0));
+  const shortRand = shortRows.reduce((a,r)=> a + (r.shortRand||0), 0);
+  const palletsHeld = marketPalletTallyComputed().reduce((a,r)=> a + (r.held||0), 0);
+
+  // ---- GP Watch ----
+  let gp = {rows:[], minGp:0.2, allDates:[]};
+  try{ gp = gpCompute_(); }catch(e){ console.error("Financial dashboard: GP failed", e); }
+  const gpNeg = gp.rows.filter(r=> r.status==="neg");
+  const gpLow = gp.rows.filter(r=> r.status==="low");
+  const gpShortfall = gp.rows.reduce((a,r)=> a + (r.shortfall>0 ? r.shortfall : 0), 0);
+  const gpFlagged = gp.rows.filter(r=> r.status!=="ok").sort((a,b)=> a.gp-b.gp);
+  const gpTarget = Math.round(gp.minGp*100);
+
+  const awaitingHtml = awaitingPrice.slice(0,10).map(p=>`
+    <tr>
+      <td>${esc(p.baseProduct)}</td>
+      <td class="helptext">received ${esc(p.receivedDate||"—")}</td>
+      <td>${esc(p.supplier||"—")}</td>
+      <td>${hasCostValue(p) ? chip("price not confirmed","warn") : chip("no price yet","critical")}</td>
+    </tr>`).join("");
+  const priceAlertHtml = priceAlerts.slice(0,10).map(a=>`
+    <tr>
+      <td>${esc(a.baseProduct)}</td>
+      <td class="helptext">${esc(a.date)}</td>
+      <td class="num">${money(a.prevCost)} → ${money(a.cost)}</td>
+      <td>${chip((a.direction==="up"?"▲ +":"▼ ")+Math.round(a.changePct*100)+"%", a.direction==="up"?"critical":"good")}</td>
+    </tr>`).join("");
+  const shortHtml = shortRows.slice(0,10).map(r=>`
+    <tr>
+      <td>${esc(r.baseProduct)}</td>
+      <td class="helptext">${esc(r.date)}</td>
+      <td class="num">${fmtNum(r.market)} bought</td>
+      <td class="num">${fmtNum(r.received)} received</td>
+      <td class="num">${chip("short "+fmtNum(r.shortUnits)+" · "+money(r.shortRand), r.kind==="none"?"critical":"warn")}</td>
+    </tr>`).join("");
+  const gpHtml = gpFlagged.slice(0,10).map(r=>`
+    <tr>
+      <td>${esc(r.item)}</td>
+      <td class="helptext">${esc(r.company==="pyroca" ? "Pyroca" : (r.company==="dfv" ? "Daily Fruit–Veg" : r.company))}</td>
+      <td class="num">${money(r.price)} / ${money(r.basisCost)}</td>
+      <td>${gpChip_(r.gp, r.status)}</td>
+      <td class="num">${r.shortfall>0 ? gpMoney_(r.shortfall) : "—"}</td>
+    </tr>`).join("");
+  const unmatchedHtml = unmatchedNames.slice(0,10).map(bp=>{
+    const count = DATA.purchaseCosts.filter(p=>p.baseProduct===bp).length;
+    return `<tr><td>${esc(bp)}</td><td class="num">${count} line${count===1?"":"s"} logged</td></tr>`;
+  }).join("");
+  const tbl = (head, body)=> `<div class="tablewrap" style="border:none;border-radius:0;"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+
+  return `
+    <div class="pagehead">
+      <div><h2>Financial Dashboard</h2><p>Pricing, costs, market statements and margins in one place — Owner only. Every tile opens the list behind its number.</p></div>
+    </div>
+    <div class="cardrow">
+      ${finStat("Prices awaiting confirmation", awaitingPrice.length, awaitingPrice.length?'var(--warn)':'var(--good)', "confirmprices")}
+      ${finStat(costTile.label, costTile.value, costTile.color, "sellingprices")}
+      ${finStat("Price alerts ("+N+"d)", priceAlerts.length, priceAlerts.length?'var(--warn)':'var(--good)', "pricehistory")}
+      ${finStat("Unmatched products", unmatchedNames.length, unmatchedNames.length?'var(--warn)':'var(--good)', "purchase")}
+    </div>
+    <div class="cardrow">
+      ${finStat("Latest market statement", latestStmt ? esc(shortDayLabel(latestStmt)) : "None yet", latestStmt?'var(--ink)':'var(--muted)', "marketstatements")}
+      ${finStat("Latest statement total", latestStmt ? money(latestTotal) : "—", 'var(--ink)', "marketstatements")}
+      ${finStat("Pallets held", fmtNum(palletsHeld,0), 'var(--ink)', "marketstatements")}
+      ${finStat("Unmapped statement lines (14d)", ma.unmapped.length, ma.unmapped.length?'var(--warn)':'var(--good)', "marketaudit", "ma-unmapped")}
+    </div>
+    <div class="cardrow">
+      ${finStat("Market shortfalls (14d)", shortRows.length, shortRows.length?'var(--critical)':'var(--good)', "marketaudit", "ma-short")}
+      ${finStat("Shortfall value (14d)", money(shortRand), shortRand>0?'var(--critical)':'var(--good)', "marketaudit", "ma-short")}
+      ${finStat("GP below cost", gpNeg.length, gpNeg.length?'var(--critical)':'var(--good)', "gpwatch", "gp-neg")}
+      ${finStat("GP under "+gpTarget+"% target", gpLow.length, gpLow.length?'var(--warn)':'var(--good)', "gpwatch", "gp-low")}
+    </div>
+    <div class="card">
+      <div class="cardhead">
+        <div><h3>Prices awaiting confirmation</h3><div class="desc">${awaitingPrice.length} received line${awaitingPrice.length===1?"":"s"} still need a confirmed price${awaitingPrice.length>10?" (oldest 10 shown)":""}.</div></div>
+        ${goto("confirmprices","Open Confirm Prices →")}
+      </div>
+      <div class="cardbody" style="padding:0;">
+        ${tbl("<th>Base product</th><th>Received</th><th>Supplier</th><th>Status</th>", awaitingHtml || emptyRow(4,"Nothing waiting — every received line has a confirmed price."))}
+      </div>
+    </div>
+    <div class="card">
+      <div class="cardhead">
+        <div><h3>Market vs Receiving shortfalls</h3><div class="desc">${shortRows.length} product-day${shortRows.length===1?"":"s"} in the last 14 days where Receiving counted less than the market statement charged — about ${money(shortRand)} in total. Newest first.</div></div>
+        <span style="display:flex;gap:6px;flex-wrap:wrap;"><button class="btn small" data-goto-tab="marketaudit" data-goto-action="ma-short">Open Market vs Receiving →</button><button class="btn small" data-goto-tab="marketstatements">Market Statements →</button></span>
+      </div>
+      <div class="cardbody" style="padding:0;">
+        ${tbl("<th>Base product</th><th>Date</th><th class=\"num\">Statement</th><th class=\"num\">Receiving</th><th class=\"num\">Shortfall</th>", shortHtml || emptyRow(5,"No shortfalls in the last 14 days."))}
+      </div>
+    </div>
+    <div class="card">
+      <div class="cardhead">
+        <div><h3>Product GP Watch</h3><div class="desc">${gpNeg.length} below cost and ${gpLow.length} under the ${gpTarget}% target, ${gpPeriodLabel_()} — lowest GP first.${gpShortfall>0?` Extra revenue needed to reach target: ${gpMoney_(gpShortfall)}.`:""}</div></div>
+        <button class="btn small" data-goto-tab="gpwatch" data-goto-action="gp-flag">Open GP Watch →</button>
+      </div>
+      <div class="cardbody" style="padding:0;">
+        ${tbl("<th>Product</th><th>Company</th><th class=\"num\">Price / cost</th><th>GP</th><th class=\"num\">Short of target</th>", gpHtml || emptyRow(5,"Nothing flagged — every product is at or above target GP."))}
+      </div>
+    </div>
+    <div class="card">
+      <div class="cardhead">
+        <div><h3>Price alerts</h3><div class="desc">${priceAlerts.length} product${priceAlerts.length===1?"":"s"} moved ${Math.round((Number(DATA.shoppingList.priceAlertPct)||0.25)*100)}% or more in the last ${N} days.</div></div>
+        ${goto("pricehistory","Open Price History →")}
+      </div>
+      <div class="cardbody" style="padding:0;">
+        ${tbl("<th>Base product</th><th>Date</th><th>Was → Now</th><th>Move</th>", priceAlertHtml || emptyRow(4,"No big price moves in the last "+N+" days."))}
+      </div>
     </div>
     <div class="card">
       <div class="cardhead">
@@ -3989,13 +4099,11 @@ function renderHomeDashboard(){
         ${goto("purchase","Open Purchase Costs →")}
       </div>
       <div class="cardbody" style="padding:0;">
-        <div class="tablewrap" style="border:none;border-radius:0;"><table>
-          <thead><tr><th>Base product</th><th></th></tr></thead>
-          <tbody>${unmatchedHtml || `<tr><td colspan="2" class="empty">Nothing unmatched — every logged purchase lines up with an Item Setup product.</td></tr>`}</tbody>
-        </table></div>
+        ${tbl("<th>Base product</th><th></th>", unmatchedHtml || emptyRow(2,"Nothing unmatched — every logged purchase lines up with an Item Setup product."))}
       </div>
     </div>`;
 }
+
 
 // ---------- Dashboard / Procurement Plan ----------
 function renderDashboard(){
@@ -5969,14 +6077,26 @@ function renderMarketMapping(){
 // isn't coming back — don't re-add it without a hard rethink of that write path first.
 
 
-function wireTabEvents(){
-    if(currentTab==="home"){
-    document.querySelectorAll("[data-goto-tab]").forEach(el=>{
-      el.addEventListener("click", ()=>{
-        setCurrentTab(el.dataset.gotoTab);
-        render();
-      });
+// Dashboard tiles/buttons: jump to a tab (optionally pre-filtered via data-goto-action). The destination can be
+// heavy to build (GP Watch, Market vs Receiving), so the "Updating…" overlay goes up first and the page is built
+// on the next tick — the tap is acknowledged immediately instead of the screen appearing frozen.
+function wireGotoTabs_(){
+  document.querySelectorAll("[data-goto-tab]").forEach(el=>{
+    el.addEventListener("click", ()=>{
+      const tab = el.dataset.gotoTab, action = el.dataset.gotoAction || "";
+      setSyncBusy(true);
+      setTimeout(()=>{
+        try{ applyGotoAction_(action); setCurrentTab(tab); render(); }
+        finally{ setSyncBusy(false); }
+      }, 30);
     });
+  });
+}
+
+function wireTabEvents(){
+    if(currentTab==="findash") wireGotoTabs_();
+    if(currentTab==="home"){
+    wireGotoTabs_();
     const signoffBtn = document.getElementById("signoffBtn");
     if(signoffBtn) signoffBtn.addEventListener("click", async ()=>{
       if(!currentUser || !userHasFn_(currentUser,"signoff")) return; // defensive — button only ever renders for a procurement user without today's sign-off yet
