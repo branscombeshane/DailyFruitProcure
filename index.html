@@ -575,6 +575,7 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
 // VERSION HISTORY (newest first). The menu shows only APP_VERSION; quote it when asking for a change so the exact build is known.
+//  v2026.10.30h  — Check Sage card: the company buttons are hidden until Sage has been read (they only choose which company's results are shown, so before a read they looked like a required choice).
 //  v2026.10.30g  — Price Export (owner only): "Push prices to Sage" — previews what would change in Sage's default selling price (new vs now, % move, blocked if a jump over the limit or below Sage's cost), then pushes 10 at a time with a stop button; pushed prices are recorded as sent. Average cost still comes from the cost file.
 //  v2026.10.30f  — "Check both companies now" is its own button on the Check Sage card (no company needs choosing first); the card has its own company switcher showing how many items need attention in each.
 //  v2026.10.30e  — "Read live from Sage" now reads BOTH companies and the check flags items whose average cost differs between Daily Fruit - Veg and Pyroca 79 (same stock).
@@ -589,7 +590,7 @@ function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 //  v2026.10.26b  — Market Product Mapping: pack size calculator (works out Pack size + Receiving pack)
 //  v2026.10.26a  — footer shows only the version number (this list replaces the long on-screen text)
 //  Everything below was the on-screen build text up to 2026-10-23, newest first: Market vs Receiving audit + optional Receiving pack in the mapping | Price Export: only changed costs flag a day as outdated, not margin/min-price changes | GP Watch table: Short of target column + sticky product name | Phone menu button | Product GP Watch (from the Item Sales reports) | Made-to-order items can be removed from the stock take | Received-date grouping, changed-since-download check, queued download saves, lighter saves, stock take completeness checks, tick-box page access
-const APP_VERSION = "v2026.10.30g";
+const APP_VERSION = "v2026.10.30h";
 const APP_BUILD = APP_VERSION; // kept as an alias in case anything else reads it
 
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
@@ -5174,7 +5175,9 @@ function renderSageCheckCard_(exportDate){
   const haveLive = Object.keys(sageLiveByCo).length>0;
   const head = `<div class="cardhead" style="display:flex;justify-content:space-between;align-items:center;gap:14px;flex-wrap:wrap;"><div style="flex:1;min-width:260px;"><h3>Check Sage against the app</h3><div class="desc">${haveLive ? "Read live from Sage at "+esc(liveAt)+" (both companies). " : ""}Default price and average cost against what this app last sent, the same item's cost in both companies (same stock), anything below cost, and margins more than 2 points under target.</div></div><button class="btn ${haveLive?"":"primary"}" id="sageLiveRead" style="min-height:40px;" title="Read-only. Asks Sage for every item's current price and average cost in both companies. It does not unlock the price-file download — only the Items export does.">${haveLive ? "Re-read both companies" : "Check both companies now"}</button></div>`;
   const attn = k=>{ const c = sageCheckFile_(k) ? sageCheckCompute_(k) : null; return c ? c.rows.filter(r=>r.attention).length : null; };
-  const sw = `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;">${Object.values(SAGE_COMPANIES).map(c=>{ const n = attn(c.key); return `<button class="btn ${co===c.key?"primary":""}" data-sagecheck-co="${c.key}" style="font-weight:700;">${esc(c.name)}${n===null ? "" : (n ? ` · ${n} to check` : " · ✓")}</button>`; }).join("")}</div>`;
+  // The company buttons only choose which company's RESULTS are shown, so they are hidden until there is something to show.
+  const anyData = Object.values(SAGE_COMPANIES).some(c=> !!sageCheckFile_(c.key));
+  const sw = !anyData ? "" : `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;align-items:center;"><span class="helptext" style="margin-right:2px;">Showing results for:</span>${Object.values(SAGE_COMPANIES).map(c=>{ const n = attn(c.key); return `<button class="btn ${co===c.key?"primary":""}" data-sagecheck-co="${c.key}" style="font-weight:700;">${esc(c.name)}${n===null ? "" : (n ? ` · ${n} to check` : " · ✓")}</button>`; }).join("")}</div>`;
   if(!checkSrc) return `<div class="card">${head}<div class="cardbody">${sw}<div class="helptext">${haveLive ? "No data for "+esc(plCo.name)+" yet." : "Nothing read yet — click <b>Check both companies now</b>. It takes about 15 seconds."}</div></div></div>`;
   const chk = sageCheckCompute_(co);
   const rows = chk.rows;
