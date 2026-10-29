@@ -575,6 +575,8 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
 // VERSION HISTORY (newest first). The menu shows only APP_VERSION; quote it when asking for a change so the exact build is known.
+//  v2026.10.30j  — Procurement users can push selling prices to Sage too (owner + procurement; the server re-checks name, PIN and role).
+//  v2026.10.30i  — Price Export simplified: the top now has just "Push to <company>" (owner, with preview) for selling prices and the cost file for average cost. The Items-export upload and price-file buttons moved into a collapsed "Manual price file (fallback)" card.
 //  v2026.10.30h  — Check Sage card: the company buttons are hidden until Sage has been read (they only choose which company's results are shown, so before a read they looked like a required choice).
 //  v2026.10.30g  — Price Export (owner only): "Push prices to Sage" — previews what would change in Sage's default selling price (new vs now, % move, blocked if a jump over the limit or below Sage's cost), then pushes 10 at a time with a stop button; pushed prices are recorded as sent. Average cost still comes from the cost file.
 //  v2026.10.30f  — "Check both companies now" is its own button on the Check Sage card (no company needs choosing first); the card has its own company switcher showing how many items need attention in each.
@@ -590,7 +592,7 @@ function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 //  v2026.10.26b  — Market Product Mapping: pack size calculator (works out Pack size + Receiving pack)
 //  v2026.10.26a  — footer shows only the version number (this list replaces the long on-screen text)
 //  Everything below was the on-screen build text up to 2026-10-23, newest first: Market vs Receiving audit + optional Receiving pack in the mapping | Price Export: only changed costs flag a day as outdated, not margin/min-price changes | GP Watch table: Short of target column + sticky product name | Phone menu button | Product GP Watch (from the Item Sales reports) | Made-to-order items can be removed from the stock take | Received-date grouping, changed-since-download check, queued download saves, lighter saves, stock take completeness checks, tick-box page access
-const APP_VERSION = "v2026.10.30h";
+const APP_VERSION = "v2026.10.30j";
 const APP_BUILD = APP_VERSION; // kept as an alias in case anything else reads it
 
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
@@ -952,6 +954,7 @@ function canManageReceiving(){
 // Deleting a confirmed "Recently received" line outright (as opposed to correcting its qty/cost, which
 // any receiving-capable role can already do) is a step further than a routine count correction — Shane's
 // call: only Owner should be able to remove one entirely. See renderReceiving()'s receivedRows.
+function canPushSage_(){ return !!currentUser && (currentUser.role==="owner" || currentUser.role==="procurement"); } // owner + procurement may push selling prices to Sage (server re-checks name, PIN and role)
 function isOwner(){
   return !!currentUser && currentUser.role==="owner";
 }
@@ -4908,10 +4911,10 @@ async function sagePushCall_(action, extra){
   if(!r || !r.ok || !r.data){ const err = new Error((r && r.error) || "No usable answer from the server."); err.unknown = !r || r.ok!==false || r.unknown===true; throw err; }
   return r.data;
 }
-async function sagePushOpen_(){
-  if(!isOwner()){ toast("Only an owner can push prices to Sage"); return; }
-  const co = SAGE_COMPANIES[sageExportCompany];
-  if(!co){ toast("Choose the Sage company first (Step 1)"); return; }
+async function sagePushOpen_(key){
+  if(!canPushSage_()){ toast("Only an owner or procurement user can push prices to Sage"); return; }
+  const co = SAGE_COMPANIES[key];
+  if(!co){ toast("Choose the Sage company first"); return; }
   if(costCsvTooEarly(sellingCsvDate)){ toast("A day's prices can only be pushed from the next morning"); return; }
   if(DATA.purchaseCosts.some(p=> p.baseProduct && p.receivedDate===sellingCsvDate && needsPriceConfirm(p))){ toast("Can't push — some received deliveries still need a confirmed price (Confirm Prices tab)."); return; }
   const rows = sellingPricesMovedOn(sellingCsvDate);
@@ -5935,15 +5938,13 @@ function renderSellingPrices(){
 
   return `
     <div class="pagehead">
-      <div><h2>Sage Price Export</h2><p>Selling prices and costs for the items <b>received</b> on one date, as two Sage imports. Available from the next day, once every received delivery is price-confirmed. Price = cost + wastage buffer + target margin, rounded up to 50c, never below the item's Min price.</p></div>
+      <div><h2>Sage Price Export</h2><p>Selling prices and costs for the items <b>received</b> on one date. Available from the next day, once every received delivery is price-confirmed. Price = cost + wastage buffer + target margin, rounded up to 50c, never below the item's Min price.</p></div>
       <div class="actions">
-        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;">
+        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:8px;">
           <div class="field" style="min-width:170px;"><label>Received date</label><input type="date" id="sellingCsvDate" value="${esc(sellingCsvDate)}"></div>
-          <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;">${partButtons}</div>
-          <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;">${costButtons}</div>
-          ${isOwner() ? `<div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;"><button class="btn" data-sagepush ${(canCostDownload && plCo)?"":`disabled title="${esc(plCo ? costTitle : "Choose the Sage company first (Step 1)")}"`} style="border-color:var(--accent);color:var(--accent);font-weight:600;">Push prices to ${plCo ? esc(plCo.name) : "Sage"} (preview first)</button></div>
-          <div class="helptext" style="max-width:420px;text-align:right;">Owner only. Updates Sage's default selling price directly after a preview — no price file import. Costs still use the cost file.</div>` : ""}
-          <div class="helptext" style="max-width:420px;text-align:right;">Import the price file(s), then the cost file (Average Cost import).</div>
+          ${canPushSage_() ? `<div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;"><span class="helptext" style="align-self:center;">1. Selling prices:</span>${Object.values(SAGE_COMPANIES).map(c=>`<button class="btn primary" data-sagepush="${c.key}" ${canCostDownload?"":`disabled title="${esc(costTitle)}"`}>Push to ${esc(c.name)}…</button>`).join("")}</div>` : `<div class="helptext" style="max-width:420px;text-align:right;">Pushing selling prices straight into Sage isn't available for your login — use "Manual price file" below.</div>`}
+          <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;"><span class="helptext" style="align-self:center;">${canPushSage_() ? "2. " : ""}Average cost:</span>${costButtons}</div>
+          <div class="helptext" style="max-width:440px;text-align:right;">Selling prices go into Sage after a preview. Sage won't accept an average cost from outside, so the cost file is still imported with Sage's Average Cost import.</div>
         </div>
       </div>
     </div>
@@ -5954,9 +5955,10 @@ function renderSellingPrices(){
     ${zeroCostRows.length ? `<div class="banner critical">⚠ ${zeroCostRows.length} item${zeroCostRows.length===1?"":"s"} would export at R0 cost — a buy was logged (and received) with no price: ${zeroCostRows.slice(0,6).map(r=>esc(r.item)).join(", ")}${zeroCostRows.length>6?` and ${zeroCostRows.length-6} more`:""}. Download is blocked until a real price is entered in Purchase Costs or Confirm Prices.</div>` : ""}
     ${jumpRows.length ? `<div class="banner warn">⚠ ${jumpRows.length} price${jumpRows.length===1?"":"s"} moved more than ${Math.round(PRICE_JUMP_WARN_PCT*100)}% since the last export — highlighted below (${jumpRows.slice(0,3).map(r=>esc(r.item)+" "+(r.jumpPct>0?"▲":"▼")+fmtNum(Math.abs(r.jumpPct)*100,0)+"%").join(", ")}${jumpRows.length>3?" …":""}). A check, not a block.</div>` : ""}
     ${(!tooEarly && !movedRows.length) ? `<div class="banner info">ℹ No items had a cost move on ${esc(exportDate||"this date")} (nothing was purchased that day), so there is nothing to export.</div>` : ""}
-    <div class="card">
-      <div class="cardhead"><div><h3>Step 1 — Choose the Sage company, then upload its Items export</h3><div class="desc">Sage: Products &amp; Services → Export. Upload it here so every other price list is carried unchanged. If Sage says "Row not found or changed" on a few rows, just import the same file again.</div></div></div>
+    <details class="card" ${(sagePriceListFile || !canPushSage_()) ? "open" : ""}>
+      <summary class="cardhead" style="cursor:pointer;list-style:none;"><div><h3>Manual price file (fallback)</h3><div class="desc">The old way: upload a fresh Sage Items export, then download and import a price file. Not needed when you push prices above.</div></div></summary>
       <div class="cardbody">
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;">${partButtons}</div>
         <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;align-items:center;">
           ${Object.values(SAGE_COMPANIES).map(c=>`<button class="btn ${sageExportCompany===c.key?"primary":""}" data-sage-company="${c.key}" style="font-weight:700;padding:8px 16px;">${esc(c.name)}</button>`).join("")}
           ${plCo ? "" : `<span class="helptext">Pick the company you are about to import into. The price file is built for that company only.</span>`}
@@ -5975,7 +5977,7 @@ function renderSellingPrices(){
         ${plDupCodes.length ? `<div class="banner critical" style="margin-top:10px;">⛔ Item code ${plDupCodes.slice(0,6).map(c=>esc(c)+" ("+plDup[c].map(r=>esc(r.item)).join(" / ")+")").join("; ")}${plDupCodes.length>6?` and ${plDupCodes.length-6} more`:""} is used by more than one Item Setup row. Sage can only update a product once per import (the second line fails with "Row not found or changed"), so the download is blocked — delete or re-code the stale row in Item Setup.</div>` : ""}
         ${sagePriceListFile && plMissing.length ? `<div class="banner critical" style="margin-top:10px;">⛔ ${plMissing.length} item${plMissing.length===1?"":"s"} in this export ${plMissing.length===1?"isn't":"aren't"} in the uploaded Items file (${plMissing.slice(0,8).map(r=>esc((r.itemCode||"no code")+" · "+r.item)).join("; ")}${plMissing.length>8?` and ${plMissing.length-8} more`:""}). Their price lists would be zeroed in Sage, so the download is blocked — check the Item code in Item Setup, or re-export the Items list from Sage.</div>` : ""}
       </div>
-    </div>
+    </details>
     ${renderSageCheckCard_(exportDate)}
     <div class="card">
       <div class="cardhead"><div><h3>Export for ${esc(exportDate||"—")}</h3><div class="desc">${movedRows.length} row${movedRows.length===1?"":"s"} — exactly what the download contains. Price = the formula price worked out from the Cost in this file (buffered cost + target margin, rounded up to 50c, never below the item's Min price); Cost includes the wastage buffer. Previous price = what was last sent to Sage.</div></div></div>
@@ -7843,8 +7845,7 @@ function wireTabEvents(){
         loadSageItemsFile(e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]);
       });
     }
-    const pushBtn = document.querySelector("[data-sagepush]");
-    if(pushBtn) pushBtn.addEventListener("click", ()=>{ sagePushOpen_(); });
+    document.querySelectorAll("[data-sagepush]").forEach(pb=> pb.addEventListener("click", ()=>{ sagePushOpen_(pb.dataset.sagepush); }));
     const liveBtn = document.getElementById("sageLiveRead");
     if(liveBtn) liveBtn.addEventListener("click", async ()=>{
       const co = sageCheckCoKey_();
