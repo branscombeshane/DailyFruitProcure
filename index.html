@@ -562,6 +562,7 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
 // VERSION HISTORY (newest first). The menu shows only APP_VERSION; quote it when asking for a change so the exact build is known.
+//  v2026.10.30b  — Price Export: "Check Sage against what we sent" — upload a fresh Items export and the app lists items whose Sage price differs from the last price sent (e.g. cost landed but the price file did not) and anything priced below cost in Sage; from 30 Oct a day only counts as exported once each company has been checked and matches
 //  v2026.10.30a  — (1) Confirm Prices: "Different pack size?" box — type the bought pack size (e.g. 8kg), the base unit size (e.g. 6kg) and the invoice price per pack; the app works out the price per base unit and the base quantity (remembered per product + supplier). Receiving still counts what physically arrived. (2) Menu cut from 28 items to 12: related pages are now tabs on one page (Shopping List/Quick Buy/Archive, Receiving/Confirm Prices, Holdings/Item Sales/Stock Variance, Item Setup/Product Mixes, Purchases/Price History, Market Statements/vs Receiving/Product Mapping, Price Export/GP Watch)
 //  v2026.10.29a  — Two dashboards: "Operations Dashboard" (buying, receiving, stock take, sign-off, holdings flags — Owner + Procurement) and "Financial Dashboard" (prices, market statements and shortfalls, GP Watch, unmatched products — Owner only); every tile is clickable and shows a loading indicator
 //  v2026.10.28a  — Market vs Receiving, Product by day: every "Show" option lists the newest day first (biggest shortfall first within a day)
@@ -570,7 +571,7 @@ function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 //  v2026.10.26b  — Market Product Mapping: pack size calculator (works out Pack size + Receiving pack)
 //  v2026.10.26a  — footer shows only the version number (this list replaces the long on-screen text)
 //  Everything below was the on-screen build text up to 2026-10-23, newest first: Market vs Receiving audit + optional Receiving pack in the mapping | Price Export: only changed costs flag a day as outdated, not margin/min-price changes | GP Watch table: Short of target column + sticky product name | Phone menu button | Product GP Watch (from the Item Sales reports) | Made-to-order items can be removed from the stock take | Received-date grouping, changed-since-download check, queued download saves, lighter saves, stock take completeness checks, tick-box page access
-const APP_VERSION = "v2026.10.30a";
+const APP_VERSION = "v2026.10.30b";
 const APP_BUILD = APP_VERSION; // kept as an alias in case anything else reads it
 
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
@@ -3942,7 +3943,7 @@ function renderHomeDashboard(){
           ${signoffBlocked
             ? `${needsActionRows.length ? `<div class="helptext" style="margin-bottom:8px;">Still need action today before you can sign off: ${shownOutstanding}${moreOutstanding>0?` and ${moreOutstanding} more`:""}. ${goto("shoppinglist","Open Shopping List →")}</div>` : ""}
                ${!stockCover.complete ? `<div class="helptext" style="margin-bottom:8px;">Last night's stock take (${esc(shortDayLabel(stockCover.since))}) is incomplete — ${stockCover.missing.length} item${stockCover.missing.length===1?"":"s"} not counted: ${stockCover.missing.slice(0,8).map(m=>esc(m.baseProduct)).join(", ")}${stockCover.missing.length>8?" and "+(stockCover.missing.length-8)+" more":""}. ${goto("stocktake","Open Stock Take →")}</div>` : ""}
-               ${!exportStatus.complete ? `<div class="helptext" style="margin-bottom:8px;">The Sage price export for ${esc(shortDayLabel(exportDue))} hasn't been completed (${exportStatus.companies.map(c=> esc(c.name)+": "+(c.complete?"done":(c.stale?"prices changed since it was downloaded — "+(c.parts>1 && c.partStates ? c.partStates.map((ps,ix)=> ps.state==="current" ? "" : "part "+(ix+1)).filter(Boolean).join(" and ")+" " : "")+"download again":(c.got?c.got+" of "+c.parts+" parts":"not downloaded")))).join(" · ")}). ${goto("sellingprices","Open Price Export →")}</div>` : ""}
+               ${!exportStatus.complete ? `<div class="helptext" style="margin-bottom:8px;">The Sage price export for ${esc(shortDayLabel(exportDue))} hasn't been completed (${exportStatus.companies.map(c=> esc(c.name)+": "+(c.complete?"done":(c.unverified?"downloaded, but not checked against Sage yet — upload a fresh Items export on Price Export":(c.stale?"prices changed since it was downloaded — "+(c.parts>1 && c.partStates ? c.partStates.map((ps,ix)=> ps.state==="current" ? "" : "part "+(ix+1)).filter(Boolean).join(" and ")+" " : "")+"download again":(c.got?c.got+" of "+c.parts+" parts":"not downloaded"))))).join(" · ")}). ${goto("sellingprices","Open Price Export →")}</div>` : ""}
                <button class="btn primary" id="signoffBtn" disabled title="${needsActionRows.length ? "Clear every Critical/Consider Buying item first" : (!stockCover.complete ? "Last night's stock take is incomplete" : "Complete the Sage price export first")}">Sign off for today</button>`
             : `<button class="btn primary" id="signoffBtn">Sign off for today</button>`}
         </div>` : (mySignoff ? `<div class="helptext" style="margin-top:12px;">You signed off for today at ${esc(fmtTime(mySignoff.time))}.</div>` : "")}
@@ -4817,7 +4818,7 @@ function costCsvDownloadsFor(purchaseDate){
   // Only SELLING-price file downloads count toward "price export done" — the separate average-cost file (fileType "cost") is logged too, but
   // it is not what the completeness checks, the sign-off or the changed-since-download check are about. Rows from before file types were
   // recorded have no fileType and were all selling-price downloads.
-  return (DATA.costCsvDownloads||[]).filter(d=> d.exportDate===purchaseDate && d.fileType!=="cost")
+  return (DATA.costCsvDownloads||[]).filter(d=> d.exportDate===purchaseDate && d.fileType!=="cost" && d.fileType!=="verified")
     .slice().sort((a,b)=> (String(a.downloadedDate)+String(a.downloadedTime)).localeCompare(String(b.downloadedDate)+String(b.downloadedTime)));
 }
 function shortDayLabel(d){ return new Date(d+"T00:00:00Z").toUTCString().slice(5,11); } // "12 Oct"
@@ -4836,7 +4837,7 @@ function costCsvStatTile(){
   const got = costCsvDownloadsFor(due);
   const last = got.length ? got[got.length-1] : null;
   const st = priceExportStatus_(due);
-  if(last && !st.complete){ return {label:"Price export · "+shortDayLabel(due), value: st.companies.filter(c=>!c.complete).map(c=> c.name+": "+(c.stale ? "changed since download" : (c.got ? c.got+" of "+c.parts+" parts" : "not done"))).join(" · "), color:"var(--warn)"}; }
+  if(last && !st.complete){ return {label:"Price export · "+shortDayLabel(due), value: st.companies.filter(c=>!c.complete).map(c=> c.name+": "+(c.stale ? "changed since download" : (c.unverified ? "downloaded — not checked in Sage" : (c.got ? c.got+" of "+c.parts+" parts" : "not done")))).join(" · "), color:"var(--warn)"}; }
   return {label:"Price export · "+shortDayLabel(due), value: (last||st.complete) ? ("✓ " + ((last&&last.downloadedBy)||"done")) : "Not yet", color: (last||st.complete) ? "var(--good)" : "var(--warn)"};
 }
 // Has the price export for a purchase date been fully downloaded? Every part of the day's file must have been downloaded
@@ -4847,6 +4848,137 @@ function partSig_(slice){
   const str = slice.map(r=> r.item+"|"+Number(r.price).toFixed(2)+"|"+((r.cost===null||r.cost===undefined||r.cost==="")?"":Number(r.cost).toFixed(2))).join("\n");
   let h = 5381; for(let i=0;i<str.length;i++) h = ((h*33) ^ str.charCodeAt(i)) >>> 0;
   return h.toString(36)+"."+slice.length;
+}
+// ---- Check Sage against what was sent (Oct 2026) ----
+// The app only knows a price file was DOWNLOADED, not that Sage took it: on 27 Oct the cost file reached Pyroca but its price file
+// didn't, leaving products priced below cost there. When a fresh Sage Items export is loaded on Price Export it is compared with the
+// prices last sent (PriceQuotes) — anything still at a different price is flagged, and so is anything priced below its cost in Sage,
+// whether or not the app ever touched it. A day's export only counts as DONE once each company has been checked and matches
+// (from SAGE_VERIFY_FROM onward, so earlier days don't suddenly reopen).
+const SAGE_VERIFY_FROM = "2026-10-30";
+let sageCheckFilter = "mismatch";
+function sageVerifyNeeded_(date){ return !!date && date >= SAGE_VERIFY_FROM; }
+function sageVerifiedFor_(date, company){ return (DATA.costCsvDownloads||[]).some(d=> d.fileType==="verified" && d.exportDate===date && d.company===company); }
+function sageCodeMaps_(){
+  const codeOfItem = {}, itemOfCode = {};
+  (DATA.itemSetup||[]).forEach(it=>{ if(it.item && it.itemCode){ codeOfItem[it.item] = it.itemCode; itemOfCode[it.itemCode] = it.item; } });
+  return {codeOfItem, itemOfCode};
+}
+// Every active item in the loaded Sage Items export: its Sage price and cost, the price last sent for it (if within 14 days), and flags.
+function sageCheckCompute_(){
+  const f = sagePriceListFile; if(!f) return null;
+  const {codeOfItem, itemOfCode} = sageCodeMaps_();
+  const latest = {};
+  (DATA.priceQuotes||[]).forEach(q=>{
+    const c = codeOfItem[q.item]; if(!c) return;
+    const cur = latest[c];
+    if(!cur || q.date>cur.date || (q.date===cur.date && String(q.time||"")>String(cur.time||""))) latest[c] = q;
+  });
+  const cd = new Date(todaySA()+"T00:00:00Z"); cd.setUTCDate(cd.getUTCDate()-14);
+  const cutoff = cd.toISOString().slice(0,10);
+  const rows = [];
+  Object.keys(f.byCode).forEach(code=>{
+    const v = f.byCode[code];
+    if(v.__active===false || v.__defEx==="" || v.__defEx===undefined) return;
+    const price = Number(v.__defEx); if(isNaN(price)) return;
+    const costN = v.__cost==="" || v.__cost===undefined ? NaN : Number(v.__cost);
+    const hasCost = !isNaN(costN) && costN>0;
+    const q = latest[code] || null;
+    const recent = !!q && q.date>=cutoff;
+    const below = hasCost && price < costN - 0.005;
+    const mismatch = recent && Math.abs(price - Number(q.price)) >= 0.005;
+    const costLanded = mismatch && hasCost && q.cost!==null && q.cost!==undefined && q.cost!=="" && Math.abs(costN - Number(q.cost)) < 0.01;
+    rows.push({code, desc: v.__desc || itemOfCode[code] || "", price, cost: hasCost ? costN : null, gp: (price>0 && hasCost) ? (price-costN)/price : null, q, recent, below, mismatch, costLanded, ok: recent && !mismatch && !below});
+  });
+  return {rows};
+}
+// One export date vs the loaded Sage export: items quoted that day (and not re-priced by a later day) whose Sage price differs.
+function sageCheckDate_(date, company){
+  const f = sagePriceListFile; if(!f || f.company!==company) return null;
+  const {codeOfItem} = sageCodeMaps_();
+  const newer = {}; (DATA.priceQuotes||[]).forEach(q=>{ if(q.date>date) newer[q.item] = true; });
+  let checked = 0; const bad = [];
+  (DATA.priceQuotes||[]).forEach(q=>{
+    if(q.date!==date || newer[q.item]) return;
+    const code = codeOfItem[q.item]; const v = code ? f.byCode[code] : null;
+    if(!v || v.__defEx==="" || v.__defEx===undefined) return;
+    checked++;
+    if(Math.abs(Number(v.__defEx) - Number(q.price)) >= 0.005) bad.push({code, item:q.item, sent:Number(q.price), sage:Number(v.__defEx)});
+  });
+  return {checked, bad};
+}
+function sageStampVerified_(date, company, rows, how){
+  const entry = {id:newId(), exportDate:date, downloadedBy: currentUser ? currentUser.name : "", rows, company, sig:"", fileType:"verified", part: how||""};
+  const now = new Date();
+  DATA.costCsvDownloads = DATA.costCsvDownloads || [];
+  DATA.costCsvDownloads.push(Object.assign({}, entry, {downloadedDate: now.toISOString().slice(0,10), downloadedTime: now.toTimeString().slice(0,8)}));
+  dlSaveChain = dlSaveChain.then(()=> persistPurchaseAction({action:"logCostCsvDownload", entry}, "Checked against Sage — recorded")).catch(()=>{});
+}
+// Run when a fresh Items export is loaded: every recent day this company has a price file for, and which matches Sage exactly, is stamped.
+function sageAutoVerify_(){
+  const co = sageExportCompany; if(!co || !sagePriceListFile || sagePriceListFile.company!==co) return [];
+  const done = [];
+  for(let i=0;i<10;i++){
+    const dd = new Date(todaySA()+"T00:00:00Z"); dd.setUTCDate(dd.getUTCDate()-i);
+    const d = dd.toISOString().slice(0,10);
+    if(!sageVerifyNeeded_(d) || sageVerifiedFor_(d, co)) continue;
+    if(!costCsvDownloadsFor(d).some(x=> !x.company || x.company===co)) continue;
+    const chk = sageCheckDate_(d, co);
+    if(chk && chk.checked>0 && !chk.bad.length){ sageStampVerified_(d, co, chk.checked, ""); done.push(d); }
+  }
+  return done;
+}
+function renderSageCheckCard_(exportDate, plCo){
+  if(!plCo || !sagePriceListFile || sagePriceListFile.company!==plCo.key) return "";
+  const chk = sageCheckCompute_();
+  const rows = chk.rows;
+  const nMis = rows.filter(r=>r.mismatch).length, nBelow = rows.filter(r=>r.below).length, nOk = rows.filter(r=>r.ok).length;
+  const f = sageCheckFilter;
+  const shownAll = rows.filter(r=> f==="mismatch" ? r.mismatch : (f==="below" ? r.below : (f==="ok" ? r.ok : true)))
+    .sort((a,b)=> (b.mismatch - a.mismatch) || ((a.gp===null?9:a.gp) - (b.gp===null?9:b.gp)) || a.code.localeCompare(b.code));
+  const shown = shownAll.slice(0,200);
+  const dls = costCsvDownloadsFor(exportDate).filter(x=> !x.company || x.company===plCo.key);
+  const dateChk = dls.length ? sageCheckDate_(exportDate, plCo.key) : null;
+  const verified = sageVerifiedFor_(exportDate, plCo.key);
+  let banner;
+  if(!dls.length) banner = `<div class="banner info" style="margin-top:10px;">No ${esc(plCo.name)} price file has been downloaded for ${esc(exportDate)} yet, so there is nothing to check for that day.</div>`;
+  else if(dateChk && dateChk.checked>0 && !dateChk.bad.length) banner = `<div class="banner info" style="margin-top:10px;">✓ ${esc(plCo.name)} in Sage matches the prices sent for ${esc(exportDate)} (${dateChk.checked} items checked).${verified ? " Recorded as checked." : ""}</div>`;
+  else if(dateChk && dateChk.bad.length){
+    const landed = rows.filter(r=> r.mismatch && r.costLanded && r.q && r.q.date===exportDate).length;
+    banner = `<div class="banner critical" style="margin-top:10px;"><div style="flex:1;min-width:240px;">⛔ <b>${dateChk.bad.length} of ${dateChk.checked}</b> items for ${esc(exportDate)} are NOT at the price that was sent — ${esc(plCo.name)} in Sage did not take the price file${landed ? ` (the cost did land on ${landed} of them, so these now show a worse GP than before)` : ""}, or the prices were changed afterwards. Re-download the price file and import it into <b>${esc(plCo.name)}</b>, then upload a fresh Items export here to check again.
+      ${currentUser && currentUser.role==="owner" && !verified ? `<div style="margin-top:8px;"><button class="btn small" id="sageCheckAccept" data-date="${esc(exportDate)}" data-co="${esc(plCo.key)}" data-n="${dateChk.checked}" title="Owner only — use when Sage was changed on purpose after the import">Accept Sage as it is for ${esc(exportDate)}</button></div>` : ""}</div></div>`;
+  } else banner = `<div class="banner warn" style="margin-top:10px;">None of the items sent for ${esc(exportDate)} could be found in this Items export — check it is the right company's export.</div>`;
+  const tile = (key, label, count, color)=> `<div class="stat clickable ${f===key?'selected':''}" data-sagecheck-filter="${key}" title="Show these in the list below" style="${f===key?'outline:2px solid var(--accent);':''}"><div class="label">${esc(label)}</div><div class="value" style="color:${color}">${count}</div></div>`;
+  const trs = shown.map(r=>`
+    <tr>
+      <td>${esc(r.code)}</td>
+      <td>${esc(r.desc)}</td>
+      <td class="num">${r.q ? money(r.q.price) + `<div class="helptext">${esc(shortDayLabel(r.q.date))}</div>` : "—"}</td>
+      <td class="num" style="font-weight:600;">${money(r.price)}</td>
+      <td class="num">${r.cost!==null ? money(r.cost) : "—"}</td>
+      <td class="num">${r.gp!==null ? fmtNum(r.gp*100,1)+"%" : "—"}</td>
+      <td>${r.mismatch ? (r.costLanded ? chip("cost landed, price didn't","critical") : chip("price not as sent","critical")) : ""} ${r.below ? chip("below cost","critical") : ""} ${r.ok ? chip("matches","good") : ""}</td>
+    </tr>`).join("");
+  return `
+    <div class="card">
+      <div class="cardhead"><div><h3>Check ${esc(plCo.name)} in Sage against what we sent</h3><div class="desc">From the Items export you just uploaded (${esc(sagePriceListFile.name)}). Compares Sage's default price with the price last sent in the last 14 days, and lists anything priced below its cost in Sage — whether or not this app touched it.</div></div></div>
+      <div class="cardbody">
+        <div class="cardrow">
+          ${tile("mismatch","Not as sent", nMis, nMis?'var(--critical)':'var(--good)')}
+          ${tile("below","Below cost in Sage", nBelow, nBelow?'var(--critical)':'var(--good)')}
+          ${tile("ok","Match what we sent", nOk, 'var(--good)')}
+          ${tile("all","All Sage items", rows.length, 'var(--ink)')}
+        </div>
+        ${banner}
+      </div>
+      <div class="cardbody" style="padding:0;">
+        <div class="tablewrap" style="border:none;border-radius:0;"><table>
+          <thead><tr><th>Code</th><th>Product</th><th class="num">Last sent</th><th class="num">Sage price</th><th class="num">Sage cost</th><th class="num">GP in Sage</th><th>Status</th></tr></thead>
+          <tbody>${trs || `<tr><td colspan="7" class="empty">${f==="mismatch" ? "Nothing differs from what was sent." : (f==="below" ? "Nothing is priced below its cost in this company." : "Nothing to show.")}</td></tr>`}</tbody>
+        </table></div>
+        ${shownAll.length>shown.length ? `<div class="helptext" style="padding:10px 16px;">Showing the first ${shown.length} of ${shownAll.length}.</div>` : ""}
+      </div>
+    </div>`;
 }
 function priceExportStatus_(date, suggestionRows){
   const none = {date:date||"", total:0, parts:0, got:0, complete:true, companies:[]};
@@ -4884,7 +5016,7 @@ function priceExportStatus_(date, suggestionRows){
     partCostOk.push(slice.length>0 && slice.every(r=>{ const q = sentQuote[r.item]; return q && (Math.abs((Number(q.cost)||0)-(r.cost||0))<0.005 || lastQuoteDate[r.item] > date); }));
     slice.forEach(r=>{ const q = sentQuote[r.item]; if(q && Math.abs((Number(q.cost)||0)-(r.cost||0))<0.005 && Math.abs(Number(q.price)-r.price)>=0.005) priceDrift.add(r.item); });
   }
-  const companies = Object.values(SAGE_COMPANIES).map(c=>{
+  const companies0 = Object.values(SAGE_COMPANIES).map(c=>{
     const logged = all.filter(d=> !d.company || d.company===c.key).map(d=> Number(d.rows)||0);
     const mine = all.filter(d=> !d.company || d.company===c.key);
     // Only judged when EVERY download for this company+day carries a fingerprint (older downloads don't, and are judged on their shape).
@@ -4914,6 +5046,11 @@ function priceExportStatus_(date, suggestionRows){
       else partStates.push({state:"missing", by:"", at:""});
     }
     return {key:c.key, name:c.name, got, parts, complete: got>=parts && !stale, stale, partStates};
+  });
+  // From SAGE_VERIFY_FROM onward a company's day only counts as done once its Sage Items export has been checked against what was sent.
+  const companies = companies0.map(c=>{
+    if(!c.complete || !sageVerifyNeeded_(date)) return c;
+    return sageVerifiedFor_(date, c.key) ? Object.assign({}, c, {verified:true}) : Object.assign({}, c, {complete:false, unverified:true});
   });
   return {date, total:n, parts, got:companies.reduce((a,c)=>a+c.got,0), complete:companies.every(c=>c.complete), companies, changedItems: companies.some(c=>c.stale) ? changedItems : [], changedDetail: companies.some(c=>c.stale) ? changedDetail : [], priceDrift: Array.from(priceDrift)};
 }
@@ -5458,6 +5595,7 @@ function renderSellingPrices(){
     const hadPurchases = DATA.purchaseCosts.some(p=> p.baseProduct && isReceived(p) && p.receivedDate===d && !isNotReceived(p));
     if(got.length){
       if(hadPurchases && priceExportStatus_(d, rows).companies.some(c=>c.stale)) return chip("⚠ " + label + " · changed since download", "warn");
+      if(hadPurchases && sageVerifyNeeded_(d) && priceExportStatus_(d, rows).companies.some(c=>c.unverified)) return chip("⚠ " + label + " · not checked in Sage", "warn");
       return chip("✓ " + label + " · " + got.map(g=>g.downloadedBy||"?").filter((v,ix,a)=>a.indexOf(v)===ix).join("/"), "good");
     }
     if(!hadPurchases) return chip("– " + label, "neutral");
@@ -5467,7 +5605,7 @@ function renderSellingPrices(){
     <tr>
       <td style="font-weight:600;">${esc(d.exportDate||"all dates")}</td>
       <td class="helptext">${esc(d.downloadedDate||"—")} ${esc(fmtTime(d.downloadedTime))}</td>
-      <td>${d.fileType==="cost" ? chip("Cost","neutral") : chip("Selling prices","good")}${d.part ? ` <span class="helptext">part ${esc(d.part)}</span>` : ""}</td>
+      <td>${d.fileType==="cost" ? chip("Cost","neutral") : (d.fileType==="verified" ? chip("Checked in Sage ✓"+(d.part?" (accepted)":""),"good") : chip("Selling prices","good"))}${d.part ? ` <span class="helptext">part ${esc(d.part)}</span>` : ""}</td>
       <td>${d.company && SAGE_COMPANIES[d.company] ? `<b>${esc(SAGE_COMPANIES[d.company].name)}</b>` : `<span class="helptext" title="Logged before the company was recorded">—</span>`}</td>
       <td>${esc(d.downloadedBy||"—")}</td>
       <td class="num">${esc(d.rows===undefined||d.rows===null?"":d.rows)}</td>
@@ -5555,7 +5693,7 @@ function renderSellingPrices(){
     ${jumpRows.length ? `<div class="banner warn">⚠ ${jumpRows.length} price${jumpRows.length===1?"":"s"} moved more than ${Math.round(PRICE_JUMP_WARN_PCT*100)}% since the last export — highlighted below (${jumpRows.slice(0,3).map(r=>esc(r.item)+" "+(r.jumpPct>0?"▲":"▼")+fmtNum(Math.abs(r.jumpPct)*100,0)+"%").join(", ")}${jumpRows.length>3?" …":""}). A check, not a block.</div>` : ""}
     ${(!tooEarly && !movedRows.length) ? `<div class="banner info">ℹ No items had a cost move on ${esc(exportDate||"this date")} (nothing was purchased that day), so there is nothing to export.</div>` : ""}
     <div class="card">
-      <div class="cardhead"><div><h3>Step 1 — Choose the Sage company, then upload its Items export</h3><div class="desc">Sage: Products &amp; Services → Export. Upload it here so every other price list is carried unchanged. If Sage says "Row not found or changed" on a few rows, just import the same file again.</div></div>
+      <div class="cardhead"><div><h3>Step 1 — Choose the Sage company, then upload its Items export</h3><div class="desc">Sage: Products &amp; Services → Export. Upload it here so every other price list is carried unchanged. If Sage says "Row not found or changed" on a few rows, just import the same file again.</div></div></div>
       <div class="cardbody">
         <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;align-items:center;">
           ${Object.values(SAGE_COMPANIES).map(c=>`<button class="btn ${sageExportCompany===c.key?"primary":""}" data-sage-company="${c.key}" style="font-weight:700;padding:8px 16px;">${esc(c.name)}</button>`).join("")}
@@ -5577,6 +5715,7 @@ function renderSellingPrices(){
           : `✓ <b>${esc(sagePriceListFile.name)}</b> loaded — ${esc(plCo ? plCo.name : "")}, ${sagePriceListFile.rowCount} Sage items. `}</div>` : `<div class="banner warn" style="margin-top:10px;">${plCo ? "Upload the "+esc(plCo.name)+" Items export to unlock the download." : "Choose the Sage company to unlock the download."}</div>`}
       </div>
     </div>
+    ${renderSageCheckCard_(exportDate, plCo)}
     <div class="card">
       <div class="cardhead"><div><h3>Export for ${esc(exportDate||"—")}</h3><div class="desc">${movedRows.length} row${movedRows.length===1?"":"s"} — exactly what the download contains. Price = the formula price worked out from the Cost in this file (buffered cost + target margin, rounded up to 50c, never below the item's Min price); Cost includes the wastage buffer. Previous price = what was last sent to Sage.</div></div></div>
       <div class="cardbody" style="padding:0;">
@@ -7427,6 +7566,8 @@ function wireTabEvents(){
         const n = new Date();
         sagePriceListFile = {name:f.name, company:sageExportCompany, loadedAt:n.toISOString().slice(0,10)+" "+n.toTimeString().slice(0,5), listCols:res.listCols, byCode:res.byCode, rowCount:res.rowCount};
         sageRememberFile_();
+        const stamped = sageAutoVerify_();
+        if(stamped.length) toast("Checked against Sage ✓ — "+stamped.map(shortDayLabel).join(", ")+" matches what was sent");
         render();
       };
       reader.onerror = ()=> toast("Could not read that file");
@@ -7443,6 +7584,19 @@ function wireTabEvents(){
     }
     const plClear = document.getElementById("sagePriceListClear");
     if(plClear) plClear.addEventListener("click", ()=>{ sagePriceListFile = null; sageRememberFile_(); render(); });
+    document.querySelectorAll("[data-sagecheck-filter]").forEach(el=>{
+      el.addEventListener("click", ()=>{
+        sageCheckFilter = el.dataset.sagecheckFilter;
+        setSyncBusy(true);
+        setTimeout(()=>{ try{ render(); } finally{ setSyncBusy(false); } }, 30);
+      });
+    });
+    const sageAcceptBtn = document.getElementById("sageCheckAccept");
+    if(sageAcceptBtn) sageAcceptBtn.addEventListener("click", ()=>{
+      if(!confirm("Record "+sageAcceptBtn.dataset.date+" as checked even though Sage differs from what was sent?\n\nOnly do this if Sage's prices were changed on purpose after the import.")) return;
+      sageStampVerified_(sageAcceptBtn.dataset.date, sageAcceptBtn.dataset.co, Number(sageAcceptBtn.dataset.n)||0, "accepted");
+      render();
+    });
     document.querySelectorAll("[data-costcsv-part]").forEach(btn=>{
       btn.addEventListener("click", ()=>{
         const part = Number(btn.dataset.costcsvPart);
