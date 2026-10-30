@@ -575,6 +575,7 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
 // VERSION HISTORY (newest first). The menu shows only APP_VERSION; quote it when asking for a change so the exact build is known.
+//  v2026.10.30l  — Push to Sage: if the Packing app is busy with another job (e.g. an order import) a batch waits and retries itself instead of stopping the run.
 //  v2026.10.30k  — Push to Sage: price rises are no longer limited; only a big drop (over 50%) or a price below Sage's average cost is blocked.
 //  v2026.10.30j  — Procurement users can push selling prices to Sage too (owner + procurement; the server re-checks name, PIN and role).
 //  v2026.10.30i  — Price Export simplified: the top now has just "Push to <company>" (owner, with preview) for selling prices and the cost file for average cost. The Items-export upload and price-file buttons moved into a collapsed "Manual price file (fallback)" card.
@@ -593,7 +594,7 @@ function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 //  v2026.10.26b  — Market Product Mapping: pack size calculator (works out Pack size + Receiving pack)
 //  v2026.10.26a  — footer shows only the version number (this list replaces the long on-screen text)
 //  Everything below was the on-screen build text up to 2026-10-23, newest first: Market vs Receiving audit + optional Receiving pack in the mapping | Price Export: only changed costs flag a day as outdated, not margin/min-price changes | GP Watch table: Short of target column + sticky product name | Phone menu button | Product GP Watch (from the Item Sales reports) | Made-to-order items can be removed from the stock take | Received-date grouping, changed-since-download check, queued download saves, lighter saves, stock take completeness checks, tick-box page access
-const APP_VERSION = "v2026.10.30k";
+const APP_VERSION = "v2026.10.30l";
 const APP_BUILD = APP_VERSION; // kept as an alias in case anything else reads it
 
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
@@ -4960,7 +4961,22 @@ async function sagePushRun_(){
     setSyncBusy(true);
     let halt = false;
     try{
-      const d = await sagePushCall_("runSagePricePush", {rows: batch.map(b=>({code:b.code, price:b.price})), allowRisky: S.risky});
+      // "The Packing app is busy" means the server refused BEFORE doing anything (another job such as an order import held its lock),
+      // so waiting and sending the same batch again is safe. Any other failure is not retried.
+      let d = null;
+      for(let attempt=1; ; attempt++){
+        try{
+          d = await sagePushCall_("runSagePricePush", {rows: batch.map(b=>({code:b.code, price:b.price})), allowRisky: S.risky});
+          break;
+        }catch(err){
+          if(!(err && !err.unknown && /busy with another job/.test(String(err.message))) || attempt>=6 || S.stop) throw err;
+          S.waiting = "The Packing app is busy with another job — waiting a few seconds and trying this batch again ("+attempt+" of 5)…";
+          sagePushDraw_();
+          await new Promise(r=> setTimeout(r, 10000));
+          S.waiting = "";
+        }
+      }
+      S.waiting = "";
       const res = Array.isArray(d.results) ? d.results : [];
       batch.forEach((b,j)=>{
         const rec = res[j];
@@ -5044,7 +5060,7 @@ function sagePushDraw_(){
       return `<tr><td>${esc(x.r.itemCode||"—")}</td><td>${esc(x.r.item)}${p.desc && p.desc!==x.r.item ? `<div class="helptext">Sage: ${esc(p.desc)}</div>` : ""}</td><td class="num">${oldEx!==null&&oldEx!==undefined ? money(oldEx) : "—"}</td><td class="num" style="font-weight:600;">${newEx!==null&&newEx!==undefined ? money(newEx) : money(x.r.price)}</td><td class="num">${pct===null ? "—" : (pct>0?"+":"")+fmtNum(pct,1)+"%"}</td><td>${chip(SAGE_PUSH_LABEL[e]||e, kind)}${note ? `<div class="helptext">${esc(note)}</div>` : ""}</td></tr>`;
     }).join("");
     const todoN = S.phase==="preview" ? sagePushTodo_().length : 0;
-    const prog = running ? `<div class="banner info" style="display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap;"><span><span class="sync-spinner" style="vertical-align:middle;"></span> Pushing ${esc(String(Math.min(S.done,S.total)))} of ${esc(String(S.total))} done… please keep this window open.</span><button class="btn small" data-sp="stop"${S.stop?" disabled":""}>${S.stop?"Stopping after this batch…":"Stop after this batch"}</button></div>` : "";
+    const prog = running ? `<div class="banner info" style="display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap;"><span><span class="sync-spinner" style="vertical-align:middle;"></span> Pushing ${esc(String(Math.min(S.done,S.total)))} of ${esc(String(S.total))} done… please keep this window open.${S.waiting ? `<br><b>${esc(S.waiting)}</b>` : ""}</span><button class="btn small" data-sp="stop"${S.stop?" disabled":""}>${S.stop?"Stopping after this batch…":"Stop after this batch"}</button></div>` : "";
     inner = `<div class="spbody">
       ${S.phase==="preview" && !P.enabled ? `<div class="banner warn">Pushing is switched off in the Packing app (Script Property <b>SAGE_PRICE_PUSH_ENABLED</b> is not "true"). You can look at the preview, but not push.</div>` : ""}
       ${S.phase==="preview" ? `<div class="helptext" style="margin-bottom:8px;">Read from Sage at ${esc(P.readAt ? String(P.readAt).replace("T"," ").slice(0,16) : "just now")}. Nothing has been changed yet. Prices can rise by any amount. A price that <b>drops</b> more than ${esc(String(P.maxJumpPct))}% or ends up below Sage's average cost is <b>blocked</b> unless you tick the box below.</div>` : ""}
