@@ -575,6 +575,7 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
 // VERSION HISTORY (newest first). The menu shows only APP_VERSION; quote it when asking for a change so the exact build is known.
+//  v2026.10.30m  — Push to Sage: 5 prices per batch (a batch of 10 could outrun the 60 s limit on a slow Sage day and lose its answer).
 //  v2026.10.30l  — Push to Sage: if the Packing app is busy with another job (e.g. an order import) a batch waits and retries itself instead of stopping the run.
 //  v2026.10.30k  — Push to Sage: price rises are no longer limited; only a big drop (over 50%) or a price below Sage's average cost is blocked.
 //  v2026.10.30j  — Procurement users can push selling prices to Sage too (owner + procurement; the server re-checks name, PIN and role).
@@ -594,7 +595,7 @@ function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 //  v2026.10.26b  — Market Product Mapping: pack size calculator (works out Pack size + Receiving pack)
 //  v2026.10.26a  — footer shows only the version number (this list replaces the long on-screen text)
 //  Everything below was the on-screen build text up to 2026-10-23, newest first: Market vs Receiving audit + optional Receiving pack in the mapping | Price Export: only changed costs flag a day as outdated, not margin/min-price changes | GP Watch table: Short of target column + sticky product name | Phone menu button | Product GP Watch (from the Item Sales reports) | Made-to-order items can be removed from the stock take | Received-date grouping, changed-since-download check, queued download saves, lighter saves, stock take completeness checks, tick-box page access
-const APP_VERSION = "v2026.10.30l";
+const APP_VERSION = "v2026.10.30m";
 const APP_BUILD = APP_VERSION; // kept as an alias in case anything else reads it
 
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
@@ -4889,7 +4890,7 @@ function partSig_(slice){
 // VAT types and costs are never touched. The server (not this page) checks the owner's PIN, the kill switch, the size of each jump
 // and whether the new price is below Sage's cost, re-reads every item before saving, and logs every attempt in the Packing app.
 // State is kept by ROW POSITION (not code) so a repeated or blank code can never mix two rows up.
-const SAGE_PUSH_BATCH = 10; // matches SAGE_PUSH_MAX_BATCH in the Packing app (a batch has to finish inside one 60 s request)
+const SAGE_PUSH_BATCH = 5; // a batch has to finish inside one 60 s request (Procurement -> Packing -> Sage); 10 was too many on a slow Sage day. The Packing app accepts up to 10.
 let sagePush = null;
 const SAGE_PUSH_PROBLEM = ["rejected","mismatch","sideeffect","unverified","error","unknown"];
 const SAGE_PUSH_LABEL = {change:"will change", same:"already correct", blocked:"blocked", notfound:"not in Sage", inactive:"inactive in Sage", noratio:"no usable Sage price", badprice:"bad price", duplicate:"repeated code", updated:"✓ updated", rejected:"Sage refused it", mismatch:"saved differently", sideeffect:"stopped — other field changed", unverified:"could not confirm", error:"error", unknown:"unknown — check Sage", skipped:"not attempted"};
