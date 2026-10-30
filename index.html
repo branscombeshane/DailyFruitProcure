@@ -575,6 +575,7 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
 // VERSION HISTORY (newest first). The menu shows only APP_VERSION; quote it when asking for a change so the exact build is known.
+//  v2026.10.30k  — (1) Item Sales: a day is now waiting (dashed amber), not missing, until Sage is due to deliver it — 2 days back, and Friday/Saturday/Sunday on the Tuesday — with a status card (latest day in, days overdue); this matches the new daily pull in SageSalesPull.gs. (2) Market Statements: the Pallets card starts collapsed and opens on click.
 //  v2026.10.30j  — Procurement users can push selling prices to Sage too (owner + procurement; the server re-checks name, PIN and role).
 //  v2026.10.30i  — Price Export simplified: the top now has just "Push to <company>" (owner, with preview) for selling prices and the cost file for average cost. The Items-export upload and price-file buttons moved into a collapsed "Manual price file (fallback)" card.
 //  v2026.10.30h  — Check Sage card: the company buttons are hidden until Sage has been read (they only choose which company's results are shown, so before a read they looked like a required choice).
@@ -592,7 +593,7 @@ function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 //  v2026.10.26b  — Market Product Mapping: pack size calculator (works out Pack size + Receiving pack)
 //  v2026.10.26a  — footer shows only the version number (this list replaces the long on-screen text)
 //  Everything below was the on-screen build text up to 2026-10-23, newest first: Market vs Receiving audit + optional Receiving pack in the mapping | Price Export: only changed costs flag a day as outdated, not margin/min-price changes | GP Watch table: Short of target column + sticky product name | Phone menu button | Product GP Watch (from the Item Sales reports) | Made-to-order items can be removed from the stock take | Received-date grouping, changed-since-download check, queued download saves, lighter saves, stock take completeness checks, tick-box page access
-const APP_VERSION = "v2026.10.30j";
+const APP_VERSION = "v2026.10.30k";
 const APP_BUILD = APP_VERSION; // kept as an alias in case anything else reads it
 
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
@@ -768,6 +769,7 @@ function sageInclFrom_(exStr, standard){
 // most recent date with data each time the tab is opened fresh (see renderMarketStatements()); "" only
 // means nothing has ever been imported yet.
 let marketStatementSelectedDate = "";
+let marketPalletsOpen = false; // the Pallets card on Market Statements starts collapsed; remembered while the page stays open
 // Admin > Market Product Mapping — free-text filter, and whether to show every raw commodity string
 // seen so far or just the ones still waiting on a mapping (the far more common thing to want open,
 // since a raw commodity is written once and then never needs touching again once mapped).
@@ -4487,24 +4489,52 @@ function renderSalesEntityCard(title, entityKey, pending, currentCount){
 // Which recent days have had an Item Sales report submitted for them, so a missed day is easy to
 // spot at a glance rather than discovered later as an unexplained gap in Calculated Holdings' averages.
 const UPLOAD_COVERAGE_WINDOW = 30;
-// Oldest-first list of ISO dates in the last UPLOAD_COVERAGE_WINDOW days (excluding today) with no
-// submitted Item Sales report yet. Shared by the Upload history strip below and by renderSalesData's
-// auto-default for the Report date field (Shane's ask: default to the oldest missing date).
+// Item Sales now come from Sage automatically (SageSalesPull.gs, every morning ~06:00): a day is pulled 2 days after it happened,
+// EXCEPT Friday, Saturday and Sunday, which are first pulled on the following Tuesday (the admin team works on those invoices on
+// Monday). So a day that is not due yet is "waiting", not "missing". Mirrors salesPullEligible_ in SageSalesPull.gs; the pull runs at
+// ~06:00, so a day only counts as overdue from 07:00 on the day it falls due.
+const SAGE_SALES_READY_HOUR = 7;
+function saHourNow_(){ return Number(new Intl.DateTimeFormat("en-GB",{timeZone:"Africa/Johannesburg", hour:"numeric", hourCycle:"h23"}).format(new Date())); }
+function sageSalesEligible_(iso, todayIso){
+  const d = new Date(iso+"T00:00:00Z"), t = new Date(todayIso+"T00:00:00Z");
+  const days = Math.round((t.getTime()-d.getTime())/86400000), dow = d.getUTCDay();
+  const need = dow===5 ? 4 : (dow===6 ? 3 : 2);
+  if(days>need) return true;
+  return days===need && saHourNow_()>=SAGE_SALES_READY_HOUR;
+}
+// "Tue 3 Nov" — the day a given sales day is first pulled
+function sageSalesPullDay_(iso){
+  const dow = new Date(iso+"T00:00:00Z").getUTCDay(), add = dow===5 ? 4 : (dow===6 ? 3 : 2);
+  const d = new Date(iso+"T00:00:00Z"); d.setUTCDate(d.getUTCDate()+add);
+  return d.toUTCString().slice(0,11).replace(",","");
+}
+function renderSageSalesCard_(){
+  const hist = (DATA.salesHistory||[]).map(h=>h.date).sort();
+  const latest = hist.length ? hist[hist.length-1] : "";
+  const cutoff = (()=>{ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate(d.getUTCDate()-10); return d.toISOString().slice(0,10); })();
+  const overdue = salesUploadMissingDates().filter(d=> d>=cutoff); // the pull only catches up the last 10 days; older gaps are old history that is not being backfilled
+  const warn = overdue.length ? `<div class="banner warn" style="margin-top:10px;"><div style="flex:1;min-width:240px;">⚠ ${overdue.length} day${overdue.length===1?" is":"s are"} due from Sage but not in yet: <b>${overdue.slice(-6).map(esc).join(", ")}</b>${overdue.length>6?` and ${overdue.length-6} more`:""}. The pull tries again every morning; if it stays like this, check the Apps Script executions for <b>dailySageSalesPull</b>, or upload that day by hand below. (A day with no sales in either company is never recorded, so it stays here too.)</div></div>` : "";
+  return `<div class="card"><div class="cardhead"><div><h3>Item Sales — pulled from Sage</h3><div class="desc">Every morning, each day's Item Sales for both companies is pulled automatically 2 days after the day. Friday, Saturday and Sunday are pulled on the Tuesday, once the admin team has worked on those invoices on Monday. A day that was missed is picked up on the next run. You only need to upload by hand if a day stays missing.</div></div></div>
+    <div class="cardbody"><div class="helptext">${latest ? "Latest day in: <b>" + esc(latest) + "</b>." : "No days in yet."}</div>${warn}</div></div>`;
+}
+// Oldest-first list of ISO dates in the last UPLOAD_COVERAGE_WINDOW days (excluding today) that Sage should have delivered by now
+// (see sageSalesEligible_) and that have no submitted Item Sales report yet. Shared by the Upload history strip below and by
+// renderSalesData's auto-default for the Report date field (Shane's ask: default to the oldest missing date).
 function salesUploadMissingDates(){
   const uploaded = new Set(DATA.salesHistory.map(h=>h.date));
-  const today = new Date().toISOString().slice(0,10);
+  const today = new Date().toISOString().slice(0,10), saToday = todaySA();
   const missing = [];
   for(let i=UPLOAD_COVERAGE_WINDOW-1;i>=0;i--){
     const d = new Date();
     d.setDate(d.getDate()-i);
     const iso = d.toISOString().slice(0,10);
-    if(iso<today && !uploaded.has(iso)) missing.push(iso);
+    if(iso<today && !uploaded.has(iso) && sageSalesEligible_(iso, saToday)) missing.push(iso);
   }
   return missing;
 }
 function renderUploadCoverage(){
   const uploaded = new Set(DATA.salesHistory.map(h=>h.date));
-  const today = new Date().toISOString().slice(0,10);
+  const today = new Date().toISOString().slice(0,10), saToday = todaySA();
   const DOW = ["Su","Mo","Tu","We","Th","Fr","Sa"];
   const days = [];
   for(let i=UPLOAD_COVERAGE_WINDOW-1;i>=0;i--){
@@ -4515,8 +4545,9 @@ function renderUploadCoverage(){
   const missing = salesUploadMissingDates();
   const cells = days.map(d=>{
     let status = "pending", label = "Today — not yet uploaded";
-    if(uploaded.has(d.iso)){ status = "done"; label = "Uploaded"; }
-    else if(d.iso<today){ status = "missing"; label = "Missing — no report submitted"; }
+    if(uploaded.has(d.iso)){ status = "done"; label = "In"; }
+    else if(d.iso<today && !sageSalesEligible_(d.iso, saToday)){ status = "pending"; label = "Waiting — not due from Sage until " + sageSalesPullDay_(d.iso); }
+    else if(d.iso<today){ status = "missing"; label = "Missing — due from Sage but not in yet"; }
     return `<div class="covday ${status}" title="${esc(d.iso)}: ${label}"><span class="dow">${d.dow}</span><span class="num">${d.num}</span></div>`;
   }).join("");
   const shown = missing.slice(-6).map(esc).join(", ");
@@ -4525,7 +4556,7 @@ function renderUploadCoverage(){
     : chip("No gaps in the last " + UPLOAD_COVERAGE_WINDOW + " days", "good");
   return `
     <div class="card">
-      <div class="cardhead"><div><h3>Upload history</h3><div class="desc">Last ${UPLOAD_COVERAGE_WINDOW} days — green means a report was submitted for that date, red means none was. Hover a day for the exact date.</div></div></div>
+      <div class="cardhead"><div><h3>Upload history</h3><div class="desc">Last ${UPLOAD_COVERAGE_WINDOW} days — green means the day is in, red means Sage should have delivered it by now but it isn't in, dashed amber means it is not due yet (2 days back; Friday, Saturday and Sunday on Tuesday). Hover a day for the exact date.</div></div></div>
       <div class="cardbody">
         <div class="covgrid">${cells}</div>
         <div class="helptext" style="margin-top:10px;">${summary}</div>
@@ -4559,6 +4590,7 @@ function renderSalesData(){
     <div class="pagehead">
       <div><h2>Item Sales</h2><p>Manual backup for now — this will pull automatically from Sage once the API is connected. Drop each company's "Sales By Item Report" export here as a CSV: Item, Qty Sold, Total Cost, Total Selling. Both companies need a file staged for the report date before Submit goes live.</p></div>
     </div>
+    ${renderSageSalesCard_()}
     ${renderUploadCoverage()}
     <div class="card">
       <div class="cardhead"><div><h3>Report date</h3><div class="desc">Which date this upload covers. Defaults to the oldest date with no submitted report yet — wind it further back, or forward, to cover a different date in the sales history archive that Calculated Holdings averages over (${histCount} day${histCount===1?"":"s"} archived so far). Upload daily for the fastest, most accurate rolling average.</div></div></div>
@@ -5757,15 +5789,15 @@ function renderMarketStatements(){
         </table></div>
       </div>
     </div>
-    <div class="card">
-      <div class="cardhead"><div><h3>Pallets — ${esc(marketStatementSelectedDate||"—")}</h3><div class="desc">${dayPallets.length} line(s) from this statement's own pallet section.</div></div></div>
+    <details class="card" id="marketPalletsBox" ${marketPalletsOpen ? "open" : ""}>
+      <summary class="cardhead" style="cursor:pointer;list-style:none;" title="Click to show or hide the pallet lines"><div><h3>Pallets — ${esc(marketStatementSelectedDate||"—")} <span class="helptext" style="font-weight:400;">${marketPalletsOpen ? "▾ click to hide" : "▸ click to show"}</span></h3><div class="desc">${dayPallets.length} line(s) from this statement's own pallet section.</div></div></summary>
       <div class="cardbody" style="padding:0;">
         <div class="tablewrap" style="border:none;border-radius:0;"><table>
           <thead><tr><th>Market</th><th>Invoice</th><th>Agent</th><th>Pallet type</th><th>Description</th><th class="num">Qty</th><th class="num">Deposit/price</th><th class="num">Usage fee</th><th class="num">Total</th></tr></thead>
           <tbody>${palletRows || `<tr><td colspan="9" class="empty">No pallet lines for this date.</td></tr>`}</tbody>
         </table></div>
       </div>
-    </div>
+    </details>
     <div class="card">
       <div class="cardhead">
         <div><h3>Pallet tally${lastReset ? " (since last reset)" : " (all time)"}</h3><div class="desc">${tallyPeriodLine} Running count of pallets currently held, per market and pallet type${lastReset ? `, counting only statements dated after the last reset (${esc(lastReset.resetDate)}${lastReset.resetBy ? `, by ${esc(lastReset.resetBy)}` : ""})` : ", across every statement imported so far"}. A pallet going out to the buyer adds to the tally; a pallet coming back (a refund, same-day refund, or cancelled sale) subtracts — a usage/rental fee alone doesn't change the count. "Current cost" is deposits paid minus deposits refunded: the money still tied up in pallets. See the note on marketPalletTallyComputed for how "out"/"in" is worked out per market — flag it if a count here ever looks wrong.</div></div>
@@ -8194,6 +8226,11 @@ function wireTabEvents(){
   }
 
   if(currentTab==="marketstatements"){
+    const palBox = document.getElementById("marketPalletsBox");
+    if(palBox) palBox.addEventListener("toggle", ()=>{
+      marketPalletsOpen = palBox.open;
+      const hint = palBox.querySelector("summary .helptext"); if(hint) hint.textContent = palBox.open ? "▾ click to hide" : "▸ click to show";
+    });
     // Product search: hides/shows rows in place (no re-render, so typing never loses focus). Totals in the card
     // header follow the visible rows; the raw statement data itself is never changed.
     const applyStmtSearch = ()=>{
