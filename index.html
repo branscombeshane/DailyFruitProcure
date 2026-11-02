@@ -575,6 +575,7 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
 // VERSION HISTORY (newest first). The menu shows only APP_VERSION; quote it when asking for a change so the exact build is known.
+//  v2026.11.02d  — Download history: a price push to Sage no longer shows "part 2 of 2" (that is the 150-row file split, meaningless for a push); it shows which items it covered, e.g. "items 151–185".
 //  v2026.11.02c  — Push prices to Sage: when the Packing app cuts a batch short because Sage is slow ("time budget"), the skipped items are sent again in the next batch automatically instead of stopping the whole push (stops only if two batches in a row save nothing).
 //  v2026.11.02b  — Push prices to Sage: removed the orange "recorded as sent / average cost not pushed" banner after a push (the result tiles and rows already show what happened).
 //  v2026.11.02a  — Weekend cover: on Friday and Saturday the holding target is raised where needed so stock lasts until Monday's delivery (that weekday's own recent demand through Monday, plus Monday's variation); a "Monday at risk" tile (Shopping List and Operations Dashboard) and a "Monday short" tag list what will still be short after today's buying; "Have enough stock till tomorrow" on a Friday/Saturday is refused unless the count really lasts until Monday (owner can override).
@@ -599,7 +600,7 @@ function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 //  v2026.10.26b  — Market Product Mapping: pack size calculator (works out Pack size + Receiving pack)
 //  v2026.10.26a  — footer shows only the version number (this list replaces the long on-screen text)
 //  Everything below was the on-screen build text up to 2026-10-23, newest first: Market vs Receiving audit + optional Receiving pack in the mapping | Price Export: only changed costs flag a day as outdated, not margin/min-price changes | GP Watch table: Short of target column + sticky product name | Phone menu button | Product GP Watch (from the Item Sales reports) | Made-to-order items can be removed from the stock take | Received-date grouping, changed-since-download check, queued download saves, lighter saves, stock take completeness checks, tick-box page access
-const APP_VERSION = "v2026.11.02c";
+const APP_VERSION = "v2026.11.02d";
 const APP_BUILD = APP_VERSION; // kept as an alias in case anything else reads it
 
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
@@ -6018,7 +6019,7 @@ function renderSellingPrices(){
     <tr>
       <td style="font-weight:600;">${esc(d.exportDate||"all dates")}</td>
       <td class="helptext">${esc(d.downloadedDate||"—")} ${esc(fmtTime(d.downloadedTime))}</td>
-      <td>${d.fileType==="cost" ? chip("Cost","neutral") : (d.fileType==="verified" ? chip("Checked in Sage ✓"+(d.part?" (accepted)":""),"good") : chip("Selling prices","good"))}${d.part ? ` <span class="helptext">part ${esc(d.part)}</span>` : ""}</td>
+      <td>${d.fileType==="cost" ? chip("Cost","neutral") : (d.fileType==="verified" ? chip("Checked in Sage ✓"+(d.part?" (accepted)":""),"good") : chip("Selling prices","good"))}${d.part ? ` <span class="helptext">${(()=>{ const pm = /^(\d+) of (\d+)$/.exec(String(d.part)); if(pm && /pushed to Sage/i.test(String(d.downloadedBy||"")) && d.rows){ const f0 = (Number(pm[1])-1)*SAGE_MAX_IMPORT_LINES+1; return "items "+f0+"–"+(f0+Number(d.rows)-1); } return "part "+esc(d.part); })()}</span>` : ""}</td>
       <td>${d.company && SAGE_COMPANIES[d.company] ? `<b>${esc(SAGE_COMPANIES[d.company].name)}</b>` : `<span class="helptext" title="Logged before the company was recorded">—</span>`}</td>
       <td>${esc(d.downloadedBy||"—")}</td>
       <td class="num">${esc(d.rows===undefined||d.rows===null?"":d.rows)}</td>
