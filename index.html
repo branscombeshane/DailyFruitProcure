@@ -575,6 +575,8 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
 // VERSION HISTORY (newest first). The menu shows only APP_VERSION; quote it when asking for a change so the exact build is known.
+//  v2026.11.02c  — Push prices to Sage: when the Packing app cuts a batch short because Sage is slow ("time budget"), the skipped items are sent again in the next batch automatically instead of stopping the whole push (stops only if two batches in a row save nothing).
+//  v2026.11.02b  — Push prices to Sage: removed the orange "recorded as sent / average cost not pushed" banner after a push (the result tiles and rows already show what happened).
 //  v2026.11.02a  — Weekend cover: on Friday and Saturday the holding target is raised where needed so stock lasts until Monday's delivery (that weekday's own recent demand through Monday, plus Monday's variation); a "Monday at risk" tile (Shopping List and Operations Dashboard) and a "Monday short" tag list what will still be short after today's buying; "Have enough stock till tomorrow" on a Friday/Saturday is refused unless the count really lasts until Monday (owner can override).
 //  v2026.10.30n  — Merged: (1) Item Sales: a day is waiting (dashed amber), not missing, until Sage is due to deliver it (2 days back; Friday/Saturday/Sunday on the Tuesday), with a status card — matches the daily pull in SageSalesPull.gs. (2) Market Statements: the Pallets card starts collapsed. (3) Market vs Receiving: the "Show" filter opens on Everything.
 //  v2026.10.30m  — Push to Sage: 5 prices per batch (a batch of 10 could outrun the 60 s limit on a slow Sage day and lose its answer).
@@ -597,7 +599,7 @@ function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 //  v2026.10.26b  — Market Product Mapping: pack size calculator (works out Pack size + Receiving pack)
 //  v2026.10.26a  — footer shows only the version number (this list replaces the long on-screen text)
 //  Everything below was the on-screen build text up to 2026-10-23, newest first: Market vs Receiving audit + optional Receiving pack in the mapping | Price Export: only changed costs flag a day as outdated, not margin/min-price changes | GP Watch table: Short of target column + sticky product name | Phone menu button | Product GP Watch (from the Item Sales reports) | Made-to-order items can be removed from the stock take | Received-date grouping, changed-since-download check, queued download saves, lighter saves, stock take completeness checks, tick-box page access
-const APP_VERSION = "v2026.11.02a";
+const APP_VERSION = "v2026.11.02c";
 const APP_BUILD = APP_VERSION; // kept as an alias in case anything else reads it
 
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
@@ -5077,8 +5079,12 @@ async function sagePushRun_(){
   if(!confirm("Push "+todo.length+" selling price"+(todo.length===1?"":"s")+" into "+S.coName.toUpperCase()+" in Sage now?\n\nThis changes the LIVE default selling price (and its VAT pair) of each item. Other price lists, costs and VAT settings are not touched. Every change is logged in the Packing app.\n\nIt runs "+SAGE_PUSH_BATCH+" at a time and can be stopped between batches.")) return;
   S.phase = "running"; S.stop = false; S.done = 0; S.total = todo.length; S.msg = "";
   sagePushDraw_();
-  for(let k=0; k<todo.length && !S.stop; k+=SAGE_PUSH_BATCH){
-    const batch = todo.slice(k, k+SAGE_PUSH_BATCH);
+  // A batch the server cuts short because Sage was slow ("the time budget for this batch was used") has NOT touched the items it skipped,
+  // so those go back to the front of the queue and are sent again in the next batch. Two cut-offs in a row with nothing done = stop.
+  const queue = todo.slice();
+  let stalls = 0;
+  while(queue.length && !S.stop){
+    const batch = queue.splice(0, SAGE_PUSH_BATCH);
     setSyncBusy(true);
     let halt = false;
     try{
@@ -5099,12 +5105,19 @@ async function sagePushRun_(){
       }
       S.waiting = "";
       const res = Array.isArray(d.results) ? d.results : [];
+      const timeStop = !!d.stopped && /time budget/i.test(String(d.stopReason||""));
+      const requeue = [];
       batch.forEach((b,j)=>{
-        const rec = res[j];
-        S.results[b.i] = (rec && String(rec.code||"")===String(b.code||"")) ? rec : {code:b.code, status:"unknown", note:"No result came back for this item — check Sage."};
+        const rec = res[j], match = rec && String(rec.code||"")===String(b.code||"");
+        if(timeStop && match && rec.status==="skipped"){ requeue.push(b); return; }
+        S.results[b.i] = match ? rec : {code:b.code, status:"unknown", note:"No result came back for this item — check Sage."};
       });
-      S.done += batch.length;
-      if(d.stopped){ S.msg = "Stopped: "+(d.stopReason || "the server stopped the run")+"."; halt = true; }
+      S.done += batch.length - requeue.length;
+      if(timeStop){
+        stalls = (requeue.length===batch.length) ? stalls+1 : 0;
+        if(stalls>=2){ requeue.forEach(b=>{ delete S.results[b.i]; }); S.msg = "Stopped: Sage was too slow to save anything in two tries in a row. Nothing was changed for the remaining items — open Push prices again in a few minutes."; halt = true; }
+        else if(requeue.length){ queue.unshift.apply(queue, requeue); S.waiting = "Sage is slow — carrying on with the next batch…"; sagePushDraw_(); await new Promise(r=> setTimeout(r, 1500)); S.waiting = ""; }
+      }else if(d.stopped){ S.msg = "Stopped: "+(d.stopReason || "the server stopped the run")+"."; halt = true; }
     }catch(e){
       if(e && e.unknown){
         batch.forEach(b=>{ S.results[b.i] = {code:b.code, status:"unknown", note:"The answer for this batch was lost — Sage may or may not hold the new price."}; });
@@ -5187,7 +5200,6 @@ function sagePushDraw_(){
       ${S.phase==="preview" ? `<div class="helptext" style="margin-bottom:8px;">Read from Sage at ${esc(P.readAt ? String(P.readAt).replace("T"," ").slice(0,16) : "just now")}. Nothing has been changed yet. Prices can rise by any amount. A price that <b>drops</b> more than ${esc(String(P.maxJumpPct))}% or ends up below Sage's average cost is <b>blocked</b> unless you tick the box below.</div>` : ""}
       ${prog}
       ${S.msg ? `<div class="banner ${S.phase==="done"&&/^Stopped by you/.test(S.msg)?"warn":"critical"}">${esc(S.msg)}</div>` : ""}
-      ${S.phase==="done" ? `<div class="banner ${groups.problem?"warn":"info"}"><span>${esc(S.recorded)} The average cost is <b>not</b> pushed (Sage ignores it) — still import the cost file. Then press "Re-read both companies" on the Check Sage card to confirm.</span></div>` : ""}
       <div class="sptiles">${tiles}</div>
       ${S.phase==="preview" && groups.blocked ? `<label class="spchk"><input type="checkbox" data-sp="risky" ${S.risky?"checked":""}> Also push the ${groups.blocked} blocked price${groups.blocked===1?"":"s"} (big drop or below Sage's cost) — I have checked ${groups.blocked===1?"it":"them"}</label>` : ""}
       <div class="tablewrap" style="max-height:46vh;overflow:auto;"><table><thead><tr><th>Code</th><th>Product</th><th class="num">Sage now (excl)</th><th class="num">New (excl)</th><th class="num">Change</th><th>Result</th></tr></thead><tbody>${rowsHtml || `<tr><td colspan="6" class="empty">Nothing in this group.</td></tr>`}</tbody></table></div>
