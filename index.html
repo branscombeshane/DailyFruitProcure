@@ -575,6 +575,7 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
 // VERSION HISTORY (newest first). The menu shows only APP_VERSION; quote it when asking for a change so the exact build is known.
+//  v2026.11.02a  — Weekend cover: on Friday and Saturday the holding target is raised where needed so stock lasts until Monday's delivery (that weekday's own recent demand through Monday, plus Monday's variation); a "Monday at risk" tile (Shopping List and Operations Dashboard) and a "Monday short" tag list what will still be short after today's buying; "Have enough stock till tomorrow" on a Friday/Saturday is refused unless the count really lasts until Monday (owner can override).
 //  v2026.10.30n  — Merged: (1) Item Sales: a day is waiting (dashed amber), not missing, until Sage is due to deliver it (2 days back; Friday/Saturday/Sunday on the Tuesday), with a status card — matches the daily pull in SageSalesPull.gs. (2) Market Statements: the Pallets card starts collapsed. (3) Market vs Receiving: the "Show" filter opens on Everything.
 //  v2026.10.30m  — Push to Sage: 5 prices per batch (a batch of 10 could outrun the 60 s limit on a slow Sage day and lose its answer).
 //  v2026.10.30l  — Push to Sage: if the Packing app is busy with another job (e.g. an order import) a batch waits and retries itself instead of stopping the run.
@@ -596,7 +597,7 @@ function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 //  v2026.10.26b  — Market Product Mapping: pack size calculator (works out Pack size + Receiving pack)
 //  v2026.10.26a  — footer shows only the version number (this list replaces the long on-screen text)
 //  Everything below was the on-screen build text up to 2026-10-23, newest first: Market vs Receiving audit + optional Receiving pack in the mapping | Price Export: only changed costs flag a day as outdated, not margin/min-price changes | GP Watch table: Short of target column + sticky product name | Phone menu button | Product GP Watch (from the Item Sales reports) | Made-to-order items can be removed from the stock take | Received-date grouping, changed-since-download check, queued download saves, lighter saves, stock take completeness checks, tick-box page access
-const APP_VERSION = "v2026.10.30n";
+const APP_VERSION = "v2026.11.02a";
 const APP_BUILD = APP_VERSION; // kept as an alias in case anything else reads it
 
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
@@ -618,6 +619,7 @@ let stockArchiveDateFilter = "";
 let shoppingCategoryFilter = "";
 let shoppingStatusFilter = "";
 let shoppingSearch = ""; // filters the Base products table by base product — same free-text search convention as Receiving/Shopping List Archive, ANDs with the status/category filters and the "Bought today" tile below
+let shoppingMonRiskOnly = false; // toggled by the "Monday at risk" tile (Friday/Saturday only)
 let shoppingBoughtTodayOnly = false; // toggled by the "Bought today" summary tile — ANDs with the status/category filters above, since it's a separate dimension (has anything been logged today), not another status
 let shoppingBuyEditing = new Map(); // baseProduct -> id of the purchase line being edited, or "new" when adding another line, for whichever rows are currently showing the inline buy-entry inputs
 let shoppingIssueEditing = new Set(); // baseProducts currently showing the inline "unable to purchase" reason input on the Shopping List
@@ -1249,6 +1251,62 @@ function criticalPctFor(dateStr){
   return peak>0 ? peak : base;
 }
 
+// ---------- Weekend cover (Friday and Saturday lists) ----------
+// Nobody buys on Sunday, Saturday's buying is thin, and Monday is the biggest sales day (about 1.6x an average day, against about 0.4x on
+// Saturday and 0.25x on Sunday) — while what is bought on Monday itself mostly arrives after midday. So on a Friday or Saturday the stock
+// has to be enough to get through to Monday's delivery, which the flat holding target (a 30-day average x cover) does not know about.
+// On those two days the holding target becomes the larger of the normal target and the expected demand for each day from the list day
+// through Monday (that weekday's own average over its last 6 occurrences) plus one standard deviation of Monday's sales. Capped by the
+// product's shelf-life ceiling like any target. Mirrored in Code.gs (weekendCoverDays_ / shoppingListComputed_) — keep in step.
+function weekendCoverDays_(dateStr){
+  const wd = new Date(String(dateStr).slice(0,10)+"T00:00:00Z").getUTCDay(); // 0 Sun .. 5 Fri, 6 Sat
+  return wd===5 ? [5,6,0,1] : (wd===6 ? [6,0,1] : null);
+}
+function weekdayDemandMap_(beforeDate){
+  const m = {};
+  (DATA.salesHistory||[]).filter(h=> h.demand && h.date < beforeDate).sort((a,b)=> a.date<b.date?-1:(a.date>b.date?1:0)).forEach(h=>{
+    const dow = new Date(String(h.date).slice(0,10)+"T00:00:00Z").getUTCDay();
+    Object.keys(h.demand).forEach(bp=>{
+      const o = m[bp] || (m[bp] = {});
+      (o[dow] = o[dow] || []).push(Number(h.demand[bp])||0);
+    });
+  });
+  Object.keys(m).forEach(bp=> Object.keys(m[bp]).forEach(d=>{ m[bp][d] = m[bp][d].slice(-6); }));
+  return m;
+}
+function weekendNeedFor_(wmap, baseProduct, days){
+  const p = wmap[baseProduct]; if(!p) return null;
+  let need = 0, any = false;
+  days.forEach(d=>{ const v = p[d]; if(v && v.length){ need += v.reduce((a,b)=>a+b,0)/v.length; any = true; } });
+  const mon = p[1];
+  if(mon && mon.length>1){ const mean = mon.reduce((a,b)=>a+b,0)/mon.length; need += Math.sqrt(mon.reduce((a,v)=> a+Math.pow(v-mean,2),0)/(mon.length-1)); }
+  return any ? need : null;
+}
+// what is already coming in today for a product: received quantity where booked in, otherwise the ordered quantity, nothing for a line marked not received
+function plannedInToday_(baseProduct, date){
+  return purchaseEntriesForDate(baseProduct, date).reduce((s,p)=>{
+    if(p.notReceivedReason) return s;
+    return s + (p.receivedDate ? (Number(p.receivedQty)||0) : (Number(p.qty)||0));
+  }, 0);
+}
+// "Have enough stock till tomorrow" on a Friday or Saturday only holds if the count really does last until Monday's delivery.
+function enoughStockBlock_(baseProduct, today){
+  if(!weekendCoverDays_(today)) return null;
+  const r = shoppingListComputed(today).find(x=> x.baseProduct===baseProduct);
+  if(!r || r.weekendNeed===null || r.weekendNeed===undefined || r.currentStock===null) return null;
+  if(r.currentStock >= r.weekendNeed) return null;
+  return {have:r.currentStock, need:r.weekendNeed};
+}
+function allowEnoughStock_(baseProduct){
+  const today = new Date().toISOString().slice(0,10);
+  const blk = enoughStockBlock_(baseProduct, today);
+  if(!blk) return true;
+  const msg = baseProduct + ": the last count is " + fmtNum(blk.have) + " but about " + fmtNum(blk.need) + " is needed to last until Monday's delivery arrives (nobody buys on Sunday, and Monday is the biggest day).";
+  if(currentUser && currentUser.role==="owner") return confirm(msg + "\n\nLog \"enough stock\" anyway?");
+  alert(msg + "\n\nBuy some, or log \"Unable to purchase\" with the reason. The owner can override this.");
+  return false;
+}
+
 function shoppingListComputed(referenceDate){
   // compares each base product's most recent (pre-referenceDate) stock take against its Calculated
   // Holdings target — referenceDate defaults to today, since every live caller (Shopping List, Quick
@@ -1259,11 +1317,22 @@ function shoppingListComputed(referenceDate){
   const critPct = criticalPctFor(today); // higher on peak days (Tue/Fri/Sat by default)
   const overPct = Number(DATA.shoppingList.overstockPct)||1.5;
   const buyPct = Number(DATA.shoppingList.buyPct)||1; // ratio below which stock still counts as "Buy" (Consider Buying); at/above it, and below the overstock threshold, it's OK — defaults to 100% (old hardcoded behavior)
+  const cover = weekendCoverDays_(today), wmap = cover ? weekdayDemandMap_(today) : null; // Friday/Saturday only — see Weekend cover above
   const rows = plan.map(row=>{
     const stockEntry = stockMap[row.baseProduct] || null;
     const currentStock = stockEntry ? stockEntry.amount : null;
     const stockDate = stockEntry ? stockEntry.date : null;
-    const recommended = row.recommended;
+    let recommended = row.recommended;
+    let weekendNeed = null, weekendRaised = false;
+    if(cover && recommended!==null && recommended>0){
+      const need = weekendNeedFor_(wmap, row.baseProduct, cover);
+      if(need!==null){
+        let n = Math.ceil(need*(1+(Number(row.bufferUsed)||0)));
+        if(row.ceiling!==null && row.ceiling!==undefined && n>row.ceiling) n = row.ceiling;
+        weekendNeed = n;
+        if(n>recommended){ recommended = n; weekendRaised = true; }
+      }
+    }
     let status, toBuy = null, ratio = null;
     if(recommended === null){
       status = "Missing setup"; // no computable holding target yet (e.g. missing conversion factor)
@@ -1279,7 +1348,13 @@ function shoppingListComputed(referenceDate){
       else status = "OK";
       toBuy = Math.max(0, Math.ceil(recommended - currentStock));
     }
-    return Object.assign({}, row, {currentStock, stockDate, status, toBuy, ratio});
+    // Monday at risk (Friday/Saturday): what is counted plus what is already coming in today still falls short of the weekend need
+    let atRisk = false, mondayGap = null;
+    if(weekendNeed!==null && weekendNeed>0 && currentStock!==null){
+      mondayGap = Math.ceil(weekendNeed - currentStock - plannedInToday_(row.baseProduct, today));
+      atRisk = mondayGap > 0;
+    }
+    return Object.assign({}, row, {recommended, baseRecommended: row.recommended, weekendNeed, weekendRaised, atRisk, mondayGap, currentStock, stockDate, status, toBuy, ratio});
   });
   // Sorted by % of stock ascending — lowest stock (0%) at the top, fullest (100%+) at the bottom — so
   // the most urgent restocking is always what you see first. A row with no computable % at all (no
@@ -3120,6 +3195,12 @@ function statBlock(label, statusValue, count, color, small){
 // today, across any supplier. A separate dimension from status/category (a product can be Critical
 // AND already bought today, e.g. a top-up is still on the way), so this ANDs with those filters
 // instead of replacing them the way the status tiles replace each other.
+function monRiskBlock(count){
+  const active = shoppingMonRiskOnly;
+  return `<div class="stat clickable${active?" active":""}" data-stat-monrisk="1" title="Products that will probably be short before Monday's delivery arrives, counting what is already coming in today${active?" (click again to clear)":""}">
+    <div class="label">Monday at risk</div><div class="value" style="color:${count?'var(--critical)':'var(--good)'}">${count}</div>
+  </div>`;
+}
 function boughtTodayBlock(count){
   const active = shoppingBoughtTodayOnly;
   return `<div class="stat clickable${active?" active":""}" data-stat-boughttoday="1" title="Show only products with a purchase logged today${active?" (click again to clear)":""}">
@@ -3134,6 +3215,8 @@ function renderShoppingList(){
   const counts = {"Critical":0, "Buy":0, "OK":0, "Overstocked":0, "No stock take":0, "Missing setup":0};
   all.forEach(r=> counts[r.status] = (counts[r.status]||0) + 1);
   const boughtTodayCount = all.filter(r=> purchaseEntriesForDate(r.baseProduct, today).length > 0).length;
+  const weekendMode = !!weekendCoverDays_(today);
+  const monRiskCount = all.filter(r=> r.atRisk).length;
 
   const categories = Array.from(new Set(all.map(r=> r.category || "Uncategorized"))).sort();
   const categoryOptions = `<option value="">All categories</option>` +
@@ -3148,6 +3231,7 @@ function renderShoppingList(){
   if(shoppingCategoryFilter) rows = rows.filter(r=> (r.category||"Uncategorized")===shoppingCategoryFilter);
   if(shoppingStatusFilter) rows = rows.filter(r=> r.status===shoppingStatusFilter);
   if(shoppingBoughtTodayOnly) rows = rows.filter(r=> purchaseEntriesForDate(r.baseProduct, today).length > 0);
+  if(weekendMode && shoppingMonRiskOnly) rows = rows.filter(r=> r.atRisk);
   if(search) rows = rows.filter(r=> r.baseProduct.toLowerCase().includes(search));
 
   const noStockTakesYet = DATA.stockTakes.length === 0;
@@ -3163,11 +3247,11 @@ function renderShoppingList(){
       <td>${shoppingStatusChip(r.status)} ${stockPctBadge(r)}</td>
       <td class="num">${r.currentStock!==null ? fmtNum(r.currentStock) : "—"}</td>
       <td class="helptext">${esc(r.stockDate||"—")}</td>
-      <td class="num">${r.recommended!==null ? fmtNum(r.recommended,0) : "—"}</td>
+      <td class="num">${r.recommended!==null ? fmtNum(r.recommended,0) : "—"}${r.weekendRaised ? ` <span class="helptext" title="Raised for the weekend: enough to last until Monday's delivery (normal target ${fmtNum(r.baseRecommended,0)})">🗓</span>` : ""}</td>
       <td class="num" style="font-weight:${r.toBuy?'600':'400'};">${r.toBuy!==null ? fmtNum(r.toBuy,0) : "—"}</td>
       <td>${esc(r.procUnit||"—")}</td>
       <td>${renderBuyCell(r, today)}</td>
-      <td>${flags.join(" ") || ""}</td>
+      <td>${flags.concat(weekendMode && r.atRisk ? [chip("Monday short "+fmtNum(r.mondayGap,0),"critical")] : []).join(" ") || ""}</td>
     </tr>`;
   }).join("");
 
@@ -3176,12 +3260,14 @@ function renderShoppingList(){
       <div><h2>Shopping List</h2><p>Compares your most recent stock take against your Calculated Holdings target for every base product, so you can see at a glance what's critically low, what's worth buying, and what's overstocked.${isPeakDay(new Date().toISOString().slice(0,10)) ? ` <strong>Peak stock-up day:</strong> Critical is flagged at or below ${round2(criticalPctFor(new Date().toISOString().slice(0,10))*100)}% of target today (usually ${round2((Number(DATA.shoppingList.criticalPct)||0.25)*100)}%).` : ""}</p></div>
     </div>
     ${(()=>{ const sc = stockCountCoverage_(); return sc.complete ? "" : `<div class="banner critical">⚠ Last night's stock take (${esc(shortDayLabel(sc.since))}) is incomplete — ${sc.missing.length} of ${sc.total} items were not counted: ${sc.missing.slice(0,10).map(m=>esc(m.baseProduct)).join(", ")}${sc.missing.length>10?" and "+(sc.missing.length-10)+" more":""}. They show an OLDER count, so their status and suggested buy may be wrong. <button class="btn small" data-goto-tab="stocktake">Open Stock Take →</button></div>`; })()}
+    ${weekendMode ? `<div class="banner info"><div style="flex:1;min-width:240px;">🗓 <b>Weekend cover is on.</b> Today's holding targets are raised where needed so the stock lasts until Monday's delivery arrives — nobody buys on Sunday and Monday is the biggest sales day. The 🗓 marks a raised target; <b>Monday at risk</b> counts products that will still be short after what is already coming in today.</div></div>` : ""}
     ${noStockTakesYet ? `<div class="banner warn">No stock takes recorded yet — log today's counts in Stock Take, then this list will show what needs buying.</div>` : ""}
     <div class="cardrow">
       ${statBlock("Critical","Critical",counts["Critical"],"var(--critical)")}
       ${statBlock("Consider Buying","Buy",counts["Buy"],"var(--warn)")}
       ${statBlock("OK","OK",counts["OK"],"var(--good)")}
       ${statBlock("Overstocked","Overstocked",counts["Overstocked"],"var(--muted)")}
+      ${weekendMode ? monRiskBlock(monRiskCount) : ""}
       ${boughtTodayBlock(boughtTodayCount)}
     </div>
     <div class="card">
@@ -3809,8 +3895,8 @@ function renderReceiving(){
 // already use (shoppingListComputed, procurementPlanComputed, isReceived/receivingDiscrepancy,
 // distinctBaseProducts) — never recomputed independently — so this can never quietly drift out of sync
 // with what those pages themselves show.
-function navStat(label, count, color, tabId){
-  return `<div class="stat clickable" data-goto-tab="${esc(tabId)}" title="Go to ${esc(label)}">
+function navStat(label, count, color, tabId, action){
+  return `<div class="stat clickable" data-goto-tab="${esc(tabId)}"${action ? ` data-goto-action="${esc(action)}"` : ""} title="Go to ${esc(label)}">
     <div class="label">${esc(label)}</div><div class="value" style="color:${color}">${count}</div>
   </div>`;
 }
@@ -3933,6 +4019,7 @@ function renderHomeDashboard(){
     <div class="cardrow">
       ${navStat("Critical stock", criticalCount, criticalCount?'var(--critical)':'var(--good)', "shoppinglist")}
       ${navStat("Needs action today", needsActionRows.length, needsActionRows.length?'var(--warn)':'var(--good)', "shoppinglist")}
+      ${weekendCoverDays_(today) ? navStat("Monday at risk", shoppingRows.filter(r=> r.atRisk).length, shoppingRows.some(r=> r.atRisk)?'var(--critical)':'var(--good)', "shoppinglist", "mon-risk") : ""}
       ${navStat("Pending deliveries", pending.length, pending.length?'var(--warn)':'var(--good)', "receiving")}
       ${navStat("Overdue orders", overduePending.length, overduePending.length?'var(--critical)':'var(--good)', "receiving")}
     </div>
@@ -4035,6 +4122,7 @@ function applyGotoAction_(a){
   if(!a) return;
   if(a==="ma-short" || a==="ma-unmapped"){ maPeriod = "14"; maStatus = "short"; maSearch = ""; maShowUnmapped = (a==="ma-unmapped"); }
   else if(a==="gp-neg" || a==="gp-low" || a==="gp-flag"){ gpStatus = a.slice(3); gpCompany = "all"; gpSearch = ""; }
+  else if(a==="mon-risk"){ shoppingMonRiskOnly = true; shoppingStatusFilter = ""; shoppingCategoryFilter = ""; shoppingSearch = ""; shoppingBoughtTodayOnly = false; }
 }
 function gpPeriodLabel_(){ return gpPeriod==="month" ? "this month" : (gpPeriod==="latest" ? "latest day" : "last "+(Number(gpPeriod)||7)+" days"); }
 function renderFinancialDashboard(){
@@ -6687,6 +6775,8 @@ function wireTabEvents(){
         render();
       });
     });
+    const monRiskTile = document.querySelector("[data-stat-monrisk]");
+    if(monRiskTile) monRiskTile.addEventListener("click", ()=>{ shoppingMonRiskOnly = !shoppingMonRiskOnly; render(); });
     const boughtTodayTile = document.querySelector("[data-stat-boughttoday]");
     if(boughtTodayTile) boughtTodayTile.addEventListener("click", ()=>{
       shoppingBoughtTodayOnly = !shoppingBoughtTodayOnly;
@@ -6859,6 +6949,7 @@ function wireTabEvents(){
     document.querySelectorAll("[data-sufficient-addnew]").forEach(btn=>{
       btn.addEventListener("click", ()=>{
         const bp = btn.dataset.sufficientAddnew;
+        if(!allowEnoughStock_(bp)) return; // Friday/Saturday: only if the count really lasts until Monday
         const today = new Date().toISOString().slice(0,10);
         DATA.purchaseIssues = DATA.purchaseIssues.filter(p=> !(p.baseProduct===bp && p.date===today));
         DATA.purchaseCosts = DATA.purchaseCosts.filter(p=> !(p.baseProduct===bp && p.date===today));
@@ -7021,6 +7112,7 @@ function wireTabEvents(){
         sufficientBtn.addEventListener("click", ()=>{
           const today = new Date().toISOString().slice(0,10);
           const bp = quickBuySelected;
+          if(!allowEnoughStock_(bp)) return; // Friday/Saturday: only if the count really lasts until Monday
           DATA.purchaseIssues = DATA.purchaseIssues.filter(p=> !(p.baseProduct===bp && p.date===today));
           // can't be "enough stock" for something you already bought (from any supplier) today
           DATA.purchaseCosts = DATA.purchaseCosts.filter(p=> !(p.baseProduct===bp && p.date===today));
