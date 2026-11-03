@@ -575,6 +575,7 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
 // VERSION HISTORY (newest first). The menu shows only APP_VERSION; quote it when asking for a change so the exact build is known.
+//  v2026.11.03a  — Market Statements > lines: the market's own text (e.g. "BEANS,4KG BOX,*,1,*,*,*") now shows under the Base Product name, smaller and in the lighter colour.
 //  v2026.11.02d  — Download history: a price push to Sage no longer shows "part 2 of 2" (that is the 150-row file split, meaningless for a push); it shows which items it covered, e.g. "items 151–185".
 //  v2026.11.02c  — Push prices to Sage: when the Packing app cuts a batch short because Sage is slow ("time budget"), the skipped items are sent again in the next batch automatically instead of stopping the whole push (stops only if two batches in a row save nothing).
 //  v2026.11.02b  — Push prices to Sage: removed the orange "recorded as sent / average cost not pushed" banner after a push (the result tiles and rows already show what happened).
@@ -600,7 +601,7 @@ function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 //  v2026.10.26b  — Market Product Mapping: pack size calculator (works out Pack size + Receiving pack)
 //  v2026.10.26a  — footer shows only the version number (this list replaces the long on-screen text)
 //  Everything below was the on-screen build text up to 2026-10-23, newest first: Market vs Receiving audit + optional Receiving pack in the mapping | Price Export: only changed costs flag a day as outdated, not margin/min-price changes | GP Watch table: Short of target column + sticky product name | Phone menu button | Product GP Watch (from the Item Sales reports) | Made-to-order items can be removed from the stock take | Received-date grouping, changed-since-download check, queued download saves, lighter saves, stock take completeness checks, tick-box page access
-const APP_VERSION = "v2026.11.02d";
+const APP_VERSION = "v2026.11.03a";
 const APP_BUILD = APP_VERSION; // kept as an alias in case anything else reads it
 
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
@@ -5797,6 +5798,8 @@ function renderMarketStatements(){
     else if(!baseProduct) productCell = `<span class="helptext">${esc(r.commodity)}</span> ${chip("unmapped","warn")}`;
     else if(!packSize) productCell = `${esc(baseProduct)} ${chip("no pack size","warn")}`;
     else productCell = esc(baseProduct);
+    // the market's own wording (as printed on the statement) sits under the Base Product name — smaller and in the lighter text colour
+    if(baseProduct && !ignoredLine && r.commodity) productCell += `<div class="helptext" style="font-size:11px;line-height:1.25;margin-top:1px;">${esc(r.commodity)}</div>`;
     const searchText = [baseProduct, r.commodity, r.agent, r.invoice, r.market].filter(Boolean).join(" ").toLowerCase();
     return `
     <tr data-msq="${esc(searchText)}">
