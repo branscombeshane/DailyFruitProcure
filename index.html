@@ -272,6 +272,10 @@
   #sagePushModal .spbody{padding:14px 18px; overflow:auto; flex:1;}
   #sagePushModal .spnote{padding:12px 18px; border-top:1px solid var(--line); display:flex; gap:8px; justify-content:flex-end; flex-wrap:wrap;}
   #sagePushModal .sptiles{display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px;}
+  #sagePushModal .sptabs{display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px;}
+  #sagePushModal .sptab{display:flex; flex-direction:column; align-items:flex-start; gap:2px; min-width:200px; padding:9px 14px; border:1px solid var(--line); border-radius:9px; background:var(--surface-2); color:var(--ink); cursor:pointer; font:inherit; text-align:left;}
+  #sagePushModal .sptab span{font-size:12px; color:var(--muted);}
+  #sagePushModal .sptab.on{border-color:var(--accent); box-shadow:0 0 0 2px var(--accent-soft);}
   #sagePushModal .sptile{display:flex; flex-direction:column; align-items:flex-start; gap:2px; min-width:110px; padding:8px 12px; border:1px solid var(--line); border-radius:9px; background:var(--surface-2); color:var(--ink); cursor:pointer; font:inherit;}
   #sagePushModal .sptile b{font-size:20px; line-height:1.1;}
   #sagePushModal .sptile span{font-size:12px; color:var(--muted);}
@@ -575,6 +579,7 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
 // VERSION HISTORY (newest first). The menu shows only APP_VERSION; quote it when asking for a change so the exact build is known.
+//  v2026.11.05b  — Price Export: ONE "Push to Daily Fruit – Veg + Pyroca 79" button instead of one per company (a second button was a step someone could forget). Both companies are previewed together, each on its own tab with its own details, and one Push sends the prices to both, one after the other.
 //  v2026.11.05a  — Market vs Receiving: an owner can allocate a ticket that was logged late (e.g. Friday's stock booked in on Monday) to the statement day the stock really arrived on, so the line balances. Open a short row, pick the ticket, "Allocate to <day>" (Undo available). Needs the new Code.gs.
 //  v2026.11.03a  — Market Statements > lines: the market's own text (e.g. "BEANS,4KG BOX,*,1,*,*,*") now shows under the Base Product name, smaller and in the lighter colour.
 //  v2026.11.02d  — Download history: a price push to Sage no longer shows "part 2 of 2" (that is the 150-row file split, meaningless for a push); it shows which items it covered, e.g. "items 151–185".
@@ -602,7 +607,7 @@ function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 //  v2026.10.26b  — Market Product Mapping: pack size calculator (works out Pack size + Receiving pack)
 //  v2026.10.26a  — footer shows only the version number (this list replaces the long on-screen text)
 //  Everything below was the on-screen build text up to 2026-10-23, newest first: Market vs Receiving audit + optional Receiving pack in the mapping | Price Export: only changed costs flag a day as outdated, not margin/min-price changes | GP Watch table: Short of target column + sticky product name | Phone menu button | Product GP Watch (from the Item Sales reports) | Made-to-order items can be removed from the stock take | Received-date grouping, changed-since-download check, queued download saves, lighter saves, stock take completeness checks, tick-box page access
-const APP_VERSION = "v2026.11.05a";
+const APP_VERSION = "v2026.11.05b";
 const APP_BUILD = APP_VERSION; // kept as an alias in case anything else reads it
 
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
@@ -5044,21 +5049,21 @@ function partSig_(slice){
 // and whether the new price is below Sage's cost, re-reads every item before saving, and logs every attempt in the Packing app.
 // State is kept by ROW POSITION (not code) so a repeated or blank code can never mix two rows up.
 const SAGE_PUSH_BATCH = 5; // a batch has to finish inside one 60 s request (Procurement -> Packing -> Sage); 10 was too many on a slow Sage day. The Packing app accepts up to 10.
-let sagePush = null;
+let sagePush = null; // ONE push for BOTH companies together: {date, rows, phase, cos:[per-company state], active, risky, stop, done, total, msg, waiting, ...}
 const SAGE_PUSH_PROBLEM = ["rejected","mismatch","sideeffect","unverified","error","unknown"];
 const SAGE_PUSH_LABEL = {change:"will change", same:"already correct", blocked:"blocked", notfound:"not in Sage", inactive:"inactive in Sage", noratio:"no usable Sage price", badprice:"bad price", duplicate:"repeated code", updated:"✓ updated", rejected:"Sage refused it", mismatch:"saved differently", sideeffect:"stopped — other field changed", unverified:"could not confirm", error:"error", unknown:"unknown — check Sage", skipped:"not attempted"};
-function sagePushEff_(i){ const S = sagePush, r = S.results[i]; return r ? r.status : (S.preview && S.preview.rows[i] ? S.preview.rows[i].status : ""); }
-function sagePushGroup_(i){
-  const e = sagePushEff_(i);
+// C = one company's part of the push: {co, coName, phase:"loading"|"preview"|"error"|"running"|"done", preview, results, filter, msg}
+function sagePushEff_(C, i){ const r = C.results[i]; return r ? r.status : (C.preview && C.preview.rows[i] ? C.preview.rows[i].status : ""); }
+function sagePushGroup_(C, i){
+  const e = sagePushEff_(C, i);
   if(e==="change"||e==="updated"||e==="same"||e==="blocked") return e;
   if(SAGE_PUSH_PROBLEM.indexOf(e)!==-1) return "problem";
   return "other";
 }
-async function sagePushCall_(action, extra){
-  const S = sagePush;
+async function sagePushCall_(coKey, action, extra){
   const u = (DATA.users||[]).find(x=> currentUser && String(x.name).toLowerCase()===String(currentUser.name).toLowerCase());
   if(!u || u.pin===undefined || u.pin===null || u.pin==="") throw new Error("Your PIN isn't available in this browser — log out and back in.");
-  const body = Object.assign({action:action, name:currentUser.name, pin:u.pin, company:S.co}, extra);
+  const body = Object.assign({action:action, name:currentUser.name, pin:u.pin, company:coKey}, extra);
   let r;
   try{
     const res = await fetch(API_URL, {method:"POST", headers:{"Content-Type":"text/plain;charset=utf-8"}, body:JSON.stringify(body)});
@@ -5067,53 +5072,88 @@ async function sagePushCall_(action, extra){
   if(!r || !r.ok || !r.data){ const err = new Error((r && r.error) || "No usable answer from the server."); err.unknown = !r || r.ok!==false || r.unknown===true; throw err; }
   return r.data;
 }
-async function sagePushOpen_(key){
+// One button, both companies (Nov 2026): a separate button per company was one more step somebody could forget. Both companies are read
+// and previewed together, the details of each are shown on their own tab, and one Push sends the same prices to both, one after the other.
+async function sagePushOpen_(){
   if(!canPushSage_()){ toast("Only an owner or procurement user can push prices to Sage"); return; }
-  const co = SAGE_COMPANIES[key];
-  if(!co){ toast("Choose the Sage company first"); return; }
   if(costCsvTooEarly(sellingCsvDate)){ toast("A day's prices can only be pushed from the next morning"); return; }
   if(DATA.purchaseCosts.some(p=> p.baseProduct && p.receivedDate===sellingCsvDate && needsPriceConfirm(p))){ toast("Can't push — some received deliveries still need a confirmed price (Confirm Prices tab)."); return; }
   const rows = sellingPricesMovedOn(sellingCsvDate);
   if(!rows.length){ toast("No items moved on this date — nothing to push"); return; }
   if(rows.some(r=> r.cost===0 || r.cost===null)){ toast("Can't push — one or more items would show R0 / no cost. Fix the price first."); return; }
   if(rows.length>800){ toast("Too many prices for one push ("+rows.length+", limit 800)"); return; }
-  sagePush = {co:co.key, coName:co.name, date:sellingCsvDate, rows:rows, phase:"loading", preview:null, results:{}, filter:"change", risky:false, stop:false, done:0, total:0, msg:"", recorded:""};
+  const S = sagePush = {date:sellingCsvDate, rows:rows, phase:"loading", reading:"", active:0, risky:false, stop:false, done:0, total:0, msg:"", waiting:"", recorded:"",
+    cos:Object.values(SAGE_COMPANIES).map(c=>({co:c.key, coName:c.name, phase:"loading", preview:null, results:{}, filter:"change", msg:""}))};
   sagePushDraw_();
   setSyncBusy(true);
   try{
-    const d = await sagePushCall_("previewSagePricePush", {rows: rows.map(r=>({code:r.itemCode, price:r.price}))});
-    if(!sagePush || !d || !Array.isArray(d.rows) || d.rows.length!==rows.length) throw new Error("The preview didn't match what was asked for — nothing was changed.");
-    sagePush.preview = d; sagePush.phase = "preview";
-    sagePush.filter = d.counts.change ? "change" : (d.counts.blocked ? "blocked" : (d.counts.same ? "same" : "other"));
-  }catch(e){
-    if(sagePush){ sagePush.phase = "error"; sagePush.msg = String(e && e.message || e); }
+    for(const C of S.cos){
+      if(sagePush!==S) return; // closed while reading
+      S.reading = C.coName; sagePushDraw_();
+      try{
+        const d = await sagePushCall_(C.co, "previewSagePricePush", {rows: rows.map(r=>({code:r.itemCode, price:r.price}))});
+        if(sagePush!==S) return;
+        if(!d || !Array.isArray(d.rows) || d.rows.length!==rows.length) throw new Error("The preview didn't match what was asked for — nothing was changed.");
+        C.preview = d; C.phase = "preview";
+        C.filter = d.counts.change ? "change" : (d.counts.blocked ? "blocked" : (d.counts.same ? "same" : "other"));
+      }catch(e){
+        if(sagePush!==S) return;
+        C.phase = "error"; C.msg = String(e && e.message || e);
+      }
+    }
   }finally{ setSyncBusy(false); }
+  if(sagePush!==S) return;
+  S.phase = "preview"; S.reading = "";
+  const firstTodo = S.cos.findIndex(C=> C.phase==="preview" && sagePushTodo_(S,C).length);
+  S.active = firstTodo>=0 ? firstTodo : Math.max(0, S.cos.findIndex(C=> C.phase==="error"));
   sagePushDraw_();
 }
 function sagePushClose_(){
   if(sagePush && sagePush.phase==="running") return;
   sagePush = null; sagePushDraw_(); render();
 }
-function sagePushTodo_(){
-  const S = sagePush, out = [];
-  S.preview.rows.forEach((p,i)=>{
-    const e = sagePushEff_(i);
+function sagePushTodo_(S, C){
+  const out = [];
+  if(!C.preview) return out;
+  C.preview.rows.forEach((p,i)=>{
+    const e = sagePushEff_(C, i);
     if(e==="change" || (S.risky && e==="blocked")) out.push({i:i, code:S.rows[i].itemCode, price:S.rows[i].price});
   });
   return out;
 }
+function sagePushReady_(S){ return S.phase==="preview" && S.cos.every(C=> C.phase==="preview" && C.preview); }
 async function sagePushRun_(){
-  const S = sagePush; if(!S || S.phase!=="preview" || !S.preview) return;
-  if(!S.preview.enabled){ toast("Pushing is switched off in the Packing app"); return; }
-  const todo = sagePushTodo_();
-  if(!todo.length){ toast("Nothing to push"); return; }
-  if(!confirm("Push "+todo.length+" selling price"+(todo.length===1?"":"s")+" into "+S.coName.toUpperCase()+" in Sage now?\n\nThis changes the LIVE default selling price (and its VAT pair) of each item. Other price lists, costs and VAT settings are not touched. Every change is logged in the Packing app.\n\nIt runs "+SAGE_PUSH_BATCH+" at a time and can be stopped between batches.")) return;
-  S.phase = "running"; S.stop = false; S.done = 0; S.total = todo.length; S.msg = "";
+  const S = sagePush; if(!S || !sagePushReady_(S)){ toast("Both companies must be read from Sage before pushing — see the tab that shows an error"); return; }
+  if(!S.cos.every(C=> C.preview.enabled)){ toast("Pushing is switched off in the Packing app"); return; }
+  const plan = S.cos.map(C=>({C:C, todo:sagePushTodo_(S,C)}));
+  const total = plan.reduce((a,x)=> a + x.todo.length, 0);
+  if(!total){ toast("Nothing to push"); return; }
+  if(!confirm("Push "+total+" selling price"+(total===1?"":"s")+" into Sage now?\n\n"+plan.map(x=> "• "+x.C.coName.toUpperCase()+": "+x.todo.length).join("\n")+"\n\nThis changes the LIVE default selling price (and its VAT pair) of each item, in both companies, one company after the other. Other price lists, costs and VAT settings are not touched. Every change is logged in the Packing app.\n\nIt runs "+SAGE_PUSH_BATCH+" at a time and can be stopped between batches.")) return;
+  S.phase = "running"; S.stop = false; S.done = 0; S.total = total; S.msg = "";
   sagePushDraw_();
+  for(const x of plan){
+    if(S.stop) break;
+    if(!x.todo.length) continue;
+    x.C.phase = "running"; S.reading = x.C.coName; S.active = S.cos.indexOf(x.C); sagePushDraw_();
+    const halted = await sagePushRunCompany_(S, x.C, x.todo);
+    x.C.phase = "done";
+    if(halted) break;
+  }
+  S.reading = "";
+  if(S.stop && !S.msg) S.msg = "Stopped by you after "+S.done+" of "+S.total+".";
+  S.phase = "done";
+  sagePushRecord_(S);
+  S.cos.forEach(C=>{ C.filter = S.rows.some((r,i)=> sagePushGroup_(C,i)==="problem") ? "problem" : "updated"; });
+  const firstProblem = S.cos.findIndex(C=> S.rows.some((r,i)=> sagePushGroup_(C,i)==="problem"));
+  if(firstProblem>=0) S.active = firstProblem;
+  sagePushDraw_();
+}
+// Pushes one company's list in batches. Returns true when the whole run must stop (an error), false when it finished or was stopped by the user.
+async function sagePushRunCompany_(S, C, todo){
   // A batch the server cuts short because Sage was slow ("the time budget for this batch was used") has NOT touched the items it skipped,
   // so those go back to the front of the queue and are sent again in the next batch. Two cut-offs in a row with nothing done = stop.
   const queue = todo.slice();
-  let stalls = 0;
+  let stalls = 0, halted = false;
   while(queue.length && !S.stop){
     const batch = queue.splice(0, SAGE_PUSH_BATCH);
     setSyncBusy(true);
@@ -5124,7 +5164,7 @@ async function sagePushRun_(){
       let d = null;
       for(let attempt=1; ; attempt++){
         try{
-          d = await sagePushCall_("runSagePricePush", {rows: batch.map(b=>({code:b.code, price:b.price})), allowRisky: S.risky});
+          d = await sagePushCall_(C.co, "runSagePricePush", {rows: batch.map(b=>({code:b.code, price:b.price})), allowRisky: S.risky});
           break;
         }catch(err){
           if(!(err && !err.unknown && /busy with another job/.test(String(err.message))) || attempt>=6 || S.stop) throw err;
@@ -5141,38 +5181,33 @@ async function sagePushRun_(){
       batch.forEach((b,j)=>{
         const rec = res[j], match = rec && String(rec.code||"")===String(b.code||"");
         if(timeStop && match && rec.status==="skipped"){ requeue.push(b); return; }
-        S.results[b.i] = match ? rec : {code:b.code, status:"unknown", note:"No result came back for this item — check Sage."};
+        C.results[b.i] = match ? rec : {code:b.code, status:"unknown", note:"No result came back for this item — check Sage."};
       });
       S.done += batch.length - requeue.length;
       if(timeStop){
         stalls = (requeue.length===batch.length) ? stalls+1 : 0;
-        if(stalls>=2){ requeue.forEach(b=>{ delete S.results[b.i]; }); S.msg = "Stopped: Sage was too slow to save anything in two tries in a row. Nothing was changed for the remaining items — open Push prices again in a few minutes."; halt = true; }
+        if(stalls>=2){ requeue.forEach(b=>{ delete C.results[b.i]; }); S.msg = C.coName+": Stopped — Sage was too slow to save anything in two tries in a row. Nothing was changed for the remaining items — open Push prices again in a few minutes."; halt = true; }
         else if(requeue.length){ queue.unshift.apply(queue, requeue); S.waiting = "Sage is slow — carrying on with the next batch…"; sagePushDraw_(); await new Promise(r=> setTimeout(r, 1500)); S.waiting = ""; }
-      }else if(d.stopped){ S.msg = "Stopped: "+(d.stopReason || "the server stopped the run")+"."; halt = true; }
+      }else if(d.stopped){ S.msg = C.coName+": Stopped — "+(d.stopReason || "the server stopped the run")+"."; halt = true; }
     }catch(e){
       if(e && e.unknown){
-        batch.forEach(b=>{ S.results[b.i] = {code:b.code, status:"unknown", note:"The answer for this batch was lost — Sage may or may not hold the new price."}; });
-        S.msg = "Lost the answer for a batch. Stopped. Those items show 'unknown' — use 'Check both companies now' to see what Sage holds.";
+        batch.forEach(b=>{ C.results[b.i] = {code:b.code, status:"unknown", note:"The answer for this batch was lost — Sage may or may not hold the new price."}; });
+        S.msg = C.coName+": Lost the answer for a batch. Stopped. Those items show 'unknown' — use 'Check both companies now' to see what Sage holds.";
       }else{
-        S.msg = "Stopped: "+String(e && e.message || e);
+        S.msg = C.coName+": Stopped — "+String(e && e.message || e);
       }
       halt = true;
     }finally{ setSyncBusy(false); }
     sagePushDraw_();
-    if(halt) break;
+    if(halt){ halted = true; break; }
   }
-  if(S.stop && !S.msg) S.msg = "Stopped by you after "+S.done+" of "+S.total+".";
-  S.phase = "done";
-  sagePushRecord_();
-  S.filter = S.rows.some((r,i)=> sagePushGroup_(i)==="problem") ? "problem" : "updated";
-  sagePushDraw_();
+  return halted;
 }
 // Prices Sage now holds count as "sent": they get PriceQuotes (so the next export / the Check Sage card compare against them) and a
-// download-log entry for every 150-row part where EVERY item ended up correct in Sage — exactly what the manual download records.
-function sagePushRecord_(){
-  const S = sagePush;
-  const okIdx = new Set();
-  S.rows.forEach((r,i)=>{ const e = sagePushEff_(i); if(e==="updated"||e==="same") okIdx.add(i); });
+// download-log entry for every 150-row part where EVERY item ended up correct in that company's Sage — exactly what the manual download records.
+function sagePushRecord_(S){
+  const okSets = S.cos.map(C=>{ const ok = new Set(); S.rows.forEach((r,i)=>{ const e = sagePushEff_(C, i); if(e==="updated"||e==="same") ok.add(i); }); return ok; });
+  const okIdx = new Set(); okSets.forEach(st=> st.forEach(i=> okIdx.add(i)));
   if(!okIdx.size){ S.recorded = "Nothing was recorded as sent."; return; }
   const now = new Date(), who = currentUser ? currentUser.name : "";
   const okRows = S.rows.filter((r,i)=> okIdx.has(i));
@@ -5182,19 +5217,22 @@ function sagePushRecord_(){
   const parts = Math.ceil(S.rows.length / SAGE_MAX_IMPORT_LINES);
   let logged = 0;
   DATA.costCsvDownloads = DATA.costCsvDownloads || [];
-  for(let p=0; p<parts; p++){
-    const from = p*SAGE_MAX_IMPORT_LINES, slice = S.rows.slice(from, from+SAGE_MAX_IMPORT_LINES);
-    let all = slice.length>0; for(let i=from; i<from+slice.length; i++) if(!okIdx.has(i)){ all = false; break; }
-    if(!all) continue;
-    const entry = {id:newId(), exportDate:S.date, downloadedBy: who+" (pushed to Sage)", rows:slice.length, company:S.co, sig:partSig_(slice), fileType:"selling", part: parts>1 ? (p+1)+" of "+parts : ""};
-    DATA.costCsvDownloads.push(Object.assign({}, entry, {downloadedDate: now.toISOString().slice(0,10), downloadedTime: now.toTimeString().slice(0,8)}));
-    dlSaveChain = dlSaveChain.then(()=> persistPurchaseAction({action:"logCostCsvDownload", entry:entry}, "Push to Sage recorded")).catch(()=>{});
-    logged++;
-  }
+  S.cos.forEach((C, k)=>{
+    const ok = okSets[k];
+    for(let p=0; p<parts; p++){
+      const from = p*SAGE_MAX_IMPORT_LINES, slice = S.rows.slice(from, from+SAGE_MAX_IMPORT_LINES);
+      let all = slice.length>0; for(let i=from; i<from+slice.length; i++) if(!ok.has(i)){ all = false; break; }
+      if(!all) continue;
+      const entry = {id:newId(), exportDate:S.date, downloadedBy: who+" (pushed to Sage)", rows:slice.length, company:C.co, sig:partSig_(slice), fileType:"selling", part: parts>1 ? (p+1)+" of "+parts : ""};
+      DATA.costCsvDownloads.push(Object.assign({}, entry, {downloadedDate: now.toISOString().slice(0,10), downloadedTime: now.toTimeString().slice(0,8)}));
+      dlSaveChain = dlSaveChain.then(()=> persistPurchaseAction({action:"logCostCsvDownload", entry:entry}, "Push to Sage recorded")).catch(()=>{});
+      logged++;
+    }
+    // the live read held for this company is now out of date for the items just changed — bring it in line with what the server verified
+    const live = sageLiveByCo[C.co];
+    if(live && live.byCode) S.rows.forEach((r,i)=>{ const rec = C.results[i], v = live.byCode[r.itemCode]; if(rec && rec.status==="updated" && v && rec.newExcl!==null && rec.newExcl!==undefined){ v.__defEx = rec.newExcl; v.__defIn = rec.newIncl; } });
+  });
   dlSaveChain = dlSaveChain.then(()=> persist("Prices recorded as sent", ["priceQuotes"])).catch(()=>{});
-  // the live read held for this company is now out of date for the items just changed — bring it in line with what the server verified
-  const live = sageLiveByCo[S.co];
-  if(live && live.byCode) S.rows.forEach((r,i)=>{ const rec = S.results[i], v = live.byCode[r.itemCode]; if(rec && rec.status==="updated" && v && rec.newExcl!==null && rec.newExcl!==undefined){ v.__defEx = rec.newExcl; v.__defIn = rec.newIncl; } });
   S.recorded = okRows.length+" price"+(okRows.length===1?"":"s")+" recorded as sent"+(logged ? ", "+logged+" file part"+(logged===1?"":"s")+" marked as exported" : (parts ? " (no file part is fully done yet)" : ""))+".";
 }
 function sagePushDraw_(){
@@ -5204,46 +5242,65 @@ function sagePushDraw_(){
   if(!S){ el.innerHTML = ""; el.style.display = "none"; return; }
   el.style.display = "block";
   const running = S.phase==="running";
+  const names = S.cos.map(C=> C.coName).join(" and ");
+  const groupsOf = C=>{ const g = {change:0, updated:0, same:0, blocked:0, problem:0, other:0}; if(C.preview) S.rows.forEach((r,i)=>{ g[sagePushGroup_(C,i)]++; }); return g; };
   let inner = "";
   if(S.phase==="loading"){
-    inner = `<div class="spbody"><div class="empty" style="padding:30px;display:flex;gap:10px;align-items:center;justify-content:center;"><span class="sync-spinner"></span> Reading ${esc(S.coName)} from Sage and comparing… (nothing is changed yet)</div></div>`;
-  }else if(S.phase==="error"){
-    inner = `<div class="spbody"><div class="banner critical">⚠ ${esc(S.msg)}</div></div>`;
+    inner = `<div class="spbody"><div class="empty" style="padding:30px;display:flex;gap:10px;align-items:center;justify-content:center;"><span class="sync-spinner"></span> Reading ${esc(S.reading || S.cos[0].coName)} from Sage and comparing… (nothing is changed yet; both companies are read, one after the other)</div></div>`;
   }else{
-    const P = S.preview, groups = {change:0, updated:0, same:0, blocked:0, problem:0, other:0};
-    S.rows.forEach((r,i)=>{ groups[sagePushGroup_(i)]++; });
-    const tiles = [["change","To change","var(--accent)"],["updated","Updated","var(--good)"],["same","Already correct","var(--muted)"],["blocked","Blocked","var(--warn)"],["problem","Problems","var(--critical)"],["other","Can't push","var(--muted)"]]
-      .filter(t=> groups[t[0]]>0 || t[0]==="change")
-      .map(t=> `<button type="button" class="sptile${S.filter===t[0]?" on":""}" data-sp-filter="${t[0]}" title="Show these rows"><b style="color:${t[2]};">${groups[t[0]]}</b><span>${t[1]}</span></button>`).join("");
-    const shown = S.rows.map((r,i)=>({r:r,i:i})).filter(x=> sagePushGroup_(x.i)===S.filter);
-    const rowsHtml = shown.map(x=>{
-      const p = P.rows[x.i], rec = S.results[x.i], e = sagePushEff_(x.i), g = sagePushGroup_(x.i);
-      const oldEx = rec && rec.oldExcl!==null && rec.oldExcl!==undefined ? rec.oldExcl : p.oldExcl, newEx = rec && rec.newExcl!==null && rec.newExcl!==undefined ? rec.newExcl : p.newExcl;
-      const pct = (oldEx>0 && newEx!==null && newEx!==undefined) ? Math.round((newEx-oldEx)/oldEx*1000)/10 : null;
-      const note = (rec && rec.note) || p.reason || "";
-      const kind = g==="updated"||g==="same" ? "good" : (g==="problem" ? "critical" : (g==="blocked" ? "warn" : (g==="change" ? "neutral" : "neutral")));
-      return `<tr><td>${esc(x.r.itemCode||"—")}</td><td>${esc(x.r.item)}${p.desc && p.desc!==x.r.item ? `<div class="helptext">Sage: ${esc(p.desc)}</div>` : ""}</td><td class="num">${oldEx!==null&&oldEx!==undefined ? money(oldEx) : "—"}</td><td class="num" style="font-weight:600;">${newEx!==null&&newEx!==undefined ? money(newEx) : money(x.r.price)}</td><td class="num">${pct===null ? "—" : (pct>0?"+":"")+fmtNum(pct,1)+"%"}</td><td>${chip(SAGE_PUSH_LABEL[e]||e, kind)}${note ? `<div class="helptext">${esc(note)}</div>` : ""}</td></tr>`;
+    const C = S.cos[S.active] || S.cos[0];
+    const allGroups = S.cos.map(groupsOf);
+    const totalBlocked = allGroups.reduce((a,g)=> a + g.blocked, 0);
+    const tabs = S.cos.map((c,k)=>{
+      const g = allGroups[k];
+      const sub = c.phase==="error" ? "could not read" : (S.phase==="preview" ? sagePushTodo_(S,c).length+" to change" : (g.updated+" updated"+(g.problem ? " · "+g.problem+" problem"+(g.problem===1?"":"s") : (g.change ? " · "+g.change+" not done" : ""))));
+      return `<button type="button" class="sptab${k===S.active?" on":""}" data-sp-co="${k}"><b>${esc(c.coName)}</b><span style="${c.phase==="error"||g.problem ? "color:var(--critical);" : ""}">${esc(sub)}</span></button>`;
     }).join("");
-    const todoN = S.phase==="preview" ? sagePushTodo_().length : 0;
-    const prog = running ? `<div class="banner info" style="display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap;"><span><span class="sync-spinner" style="vertical-align:middle;"></span> Pushing ${esc(String(Math.min(S.done,S.total)))} of ${esc(String(S.total))} done… please keep this window open.${S.waiting ? `<br><b>${esc(S.waiting)}</b>` : ""}</span><button class="btn small" data-sp="stop"${S.stop?" disabled":""}>${S.stop?"Stopping after this batch…":"Stop after this batch"}</button></div>` : "";
+    let body = "";
+    if(C.phase==="error"){
+      body = `<div class="banner critical">⚠ ${esc(C.coName)}: ${esc(C.msg)} — nothing was changed in either company. Close this window and try again.</div>`;
+    }else{
+      const P = C.preview, groups = allGroups[S.cos.indexOf(C)];
+      const tiles = [["change","To change","var(--accent)"],["updated","Updated","var(--good)"],["same","Already correct","var(--muted)"],["blocked","Blocked","var(--warn)"],["problem","Problems","var(--critical)"],["other","Can't push","var(--muted)"]]
+        .filter(t=> groups[t[0]]>0 || t[0]==="change")
+        .map(t=> `<button type="button" class="sptile${C.filter===t[0]?" on":""}" data-sp-filter="${t[0]}" title="Show these rows"><b style="color:${t[2]};">${groups[t[0]]}</b><span>${t[1]}</span></button>`).join("");
+      const shown = S.rows.map((r,i)=>({r:r,i:i})).filter(x=> sagePushGroup_(C,x.i)===C.filter);
+      const rowsHtml = shown.map(x=>{
+        const p = P.rows[x.i], rec = C.results[x.i], e = sagePushEff_(C,x.i), g = sagePushGroup_(C,x.i);
+        const oldEx = rec && rec.oldExcl!==null && rec.oldExcl!==undefined ? rec.oldExcl : p.oldExcl, newEx = rec && rec.newExcl!==null && rec.newExcl!==undefined ? rec.newExcl : p.newExcl;
+        const pct = (oldEx>0 && newEx!==null && newEx!==undefined) ? Math.round((newEx-oldEx)/oldEx*1000)/10 : null;
+        const note = (rec && rec.note) || p.reason || "";
+        const kind = g==="updated"||g==="same" ? "good" : (g==="problem" ? "critical" : (g==="blocked" ? "warn" : "neutral"));
+        return `<tr><td>${esc(x.r.itemCode||"—")}</td><td>${esc(x.r.item)}${p.desc && p.desc!==x.r.item ? `<div class="helptext">Sage: ${esc(p.desc)}</div>` : ""}</td><td class="num">${oldEx!==null&&oldEx!==undefined ? money(oldEx) : "—"}</td><td class="num" style="font-weight:600;">${newEx!==null&&newEx!==undefined ? money(newEx) : money(x.r.price)}</td><td class="num">${pct===null ? "—" : (pct>0?"+":"")+fmtNum(pct,1)+"%"}</td><td>${chip(SAGE_PUSH_LABEL[e]||e, kind)}${note ? `<div class="helptext">${esc(note)}</div>` : ""}</td></tr>`;
+      }).join("");
+      body = `${S.phase==="preview" && !P.enabled ? `<div class="banner warn">Pushing is switched off in the Packing app (Script Property <b>SAGE_PRICE_PUSH_ENABLED</b> is not "true"). You can look at the preview, but not push.</div>` : ""}
+        <div class="sptiles">${tiles}</div>
+        <div class="tablewrap" style="max-height:40vh;overflow:auto;"><table><thead><tr><th>Code</th><th>Product</th><th class="num">${esc(C.coName)} now (excl)</th><th class="num">New (excl)</th><th class="num">Change</th><th>Result</th></tr></thead><tbody>${rowsHtml || `<tr><td colspan="6" class="empty">Nothing in this group.</td></tr>`}</tbody></table></div>`;
+    }
+    const readAt = (S.cos.find(c=> c.preview && c.preview.readAt)||{preview:{}}).preview.readAt;
+    const maxJump = (S.cos.find(c=> c.preview)||{preview:{}}).preview.maxJumpPct;
+    const prog = running ? `<div class="banner info" style="display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap;"><span><span class="sync-spinner" style="vertical-align:middle;"></span> Pushing ${esc(String(Math.min(S.done,S.total)))} of ${esc(String(S.total))} done${S.reading ? " — now "+esc(S.reading) : ""}… please keep this window open.${S.waiting ? `<br><b>${esc(S.waiting)}</b>` : ""}</span><button class="btn small" data-sp="stop"${S.stop?" disabled":""}>${S.stop?"Stopping after this batch…":"Stop after this batch"}</button></div>` : "";
     inner = `<div class="spbody">
-      ${S.phase==="preview" && !P.enabled ? `<div class="banner warn">Pushing is switched off in the Packing app (Script Property <b>SAGE_PRICE_PUSH_ENABLED</b> is not "true"). You can look at the preview, but not push.</div>` : ""}
-      ${S.phase==="preview" ? `<div class="helptext" style="margin-bottom:8px;">Read from Sage at ${esc(P.readAt ? String(P.readAt).replace("T"," ").slice(0,16) : "just now")}. Nothing has been changed yet. Prices can rise by any amount. A price that <b>drops</b> more than ${esc(String(P.maxJumpPct))}% or ends up below Sage's average cost is <b>blocked</b> unless you tick the box below.</div>` : ""}
+      ${S.phase==="preview" ? `<div class="helptext" style="margin-bottom:8px;">Both companies read from Sage at ${esc(readAt ? String(readAt).replace("T"," ").slice(0,16) : "just now")}. Nothing has been changed yet. One Push sends the same prices to ${esc(names)}. Prices can rise by any amount. A price that <b>drops</b> more than ${esc(String(maxJump||50))}% or ends up below Sage's average cost is <b>blocked</b> unless you tick the box below.</div>` : ""}
+      ${S.phase==="preview" && S.cos.some(c=> c.phase==="error") ? `<div class="banner critical">⚠ ${esc(S.cos.filter(c=> c.phase==="error").map(c=> c.coName).join(" and "))} could not be read from Sage, so nothing can be pushed — the two companies are always pushed together. Click that company's tab to see why, then Cancel and try again.</div>` : ""}
       ${prog}
       ${S.msg ? `<div class="banner ${S.phase==="done"&&/^Stopped by you/.test(S.msg)?"warn":"critical"}">${esc(S.msg)}</div>` : ""}
-      <div class="sptiles">${tiles}</div>
-      ${S.phase==="preview" && groups.blocked ? `<label class="spchk"><input type="checkbox" data-sp="risky" ${S.risky?"checked":""}> Also push the ${groups.blocked} blocked price${groups.blocked===1?"":"s"} (big drop or below Sage's cost) — I have checked ${groups.blocked===1?"it":"them"}</label>` : ""}
-      <div class="tablewrap" style="max-height:46vh;overflow:auto;"><table><thead><tr><th>Code</th><th>Product</th><th class="num">Sage now (excl)</th><th class="num">New (excl)</th><th class="num">Change</th><th>Result</th></tr></thead><tbody>${rowsHtml || `<tr><td colspan="6" class="empty">Nothing in this group.</td></tr>`}</tbody></table></div>
+      <div class="sptabs">${tabs}</div>
+      ${S.phase==="preview" && totalBlocked ? `<label class="spchk"><input type="checkbox" data-sp="risky" ${S.risky?"checked":""}> Also push the ${totalBlocked} blocked price${totalBlocked===1?"":"s"} (${S.cos.map((c,k)=> allGroups[k].blocked ? esc(c.coName)+" "+allGroups[k].blocked : "").filter(Boolean).join(", ")}) — big drop or below Sage's cost — I have checked ${totalBlocked===1?"it":"them"}</label>` : ""}
+      ${body}
     </div>`;
   }
-  const foot = S.phase==="preview" ? `<button class="btn primary" data-sp="run" ${(!S.preview.enabled || !sagePushTodo_().length)?"disabled":""}>Push ${sagePushTodo_().length} price${sagePushTodo_().length===1?"":"s"} to ${esc(S.coName)}</button><button class="btn" data-sp="close">Cancel</button>`
-    : running ? "" : `<button class="btn ${S.phase==="done"?"primary":""}" data-sp="close">Close</button>`;
-  el.innerHTML = `<div class="spback"><div class="spbox" role="dialog" aria-label="Push prices to Sage"><div class="sphead"><div><h3>Push prices to ${esc(S.coName)}</h3><div class="desc">Selling prices for items received on ${esc(S.date)} · ${S.rows.length} item${S.rows.length===1?"":"s"}</div></div></div>${inner}<div class="spnote">${foot}</div></div></div>`;
+  const todoTotal = S.phase==="preview" ? S.cos.reduce((a,c)=> a + sagePushTodo_(S,c).length, 0) : 0;
+  const canRun = sagePushReady_(S) && S.cos.every(c=> c.preview && c.preview.enabled) && todoTotal>0;
+  const foot = S.phase==="preview" ? `<button class="btn primary" data-sp="run" ${canRun?"":"disabled"}>Push ${S.cos.map(c=> sagePushTodo_(S,c).length).join(" + ")} price${todoTotal===1?"":"s"} to both companies</button><button class="btn" data-sp="close">Cancel</button>`
+    : (running || S.phase==="loading") ? (S.phase==="loading" ? `<button class="btn" data-sp="close">Cancel</button>` : "") : `<button class="btn ${S.phase==="done"?"primary":""}" data-sp="close">Close</button>`;
+  el.innerHTML = `<div class="spback"><div class="spbox" role="dialog" aria-label="Push prices to Sage"><div class="sphead"><div><h3>Push prices to Sage — ${esc(names)}</h3><div class="desc">Selling prices for items received on ${esc(S.date)} · ${S.rows.length} item${S.rows.length===1?"":"s"} · both companies in one push</div></div></div>${inner}<div class="spnote">${foot}</div></div></div>`;
   if(!el._wired){
     el._wired = true;
     el.addEventListener("click", (ev)=>{
-      const t = ev.target.closest("[data-sp],[data-sp-filter]"); if(!t || !sagePush) return;
-      if(t.dataset.spFilter){ sagePush.filter = t.dataset.spFilter; setSyncBusy(true); setTimeout(()=>{ try{ sagePushDraw_(); } finally{ setSyncBusy(false); } }, 20); return; }
+      const t = ev.target.closest("[data-sp],[data-sp-filter],[data-sp-co]"); if(!t || !sagePush) return;
+      if(t.dataset.spCo!==undefined){ sagePush.active = Number(t.dataset.spCo)||0; sagePushDraw_(); return; }
+      if(t.dataset.spFilter){ const Cc = sagePush.cos[sagePush.active]; if(Cc) Cc.filter = t.dataset.spFilter; setSyncBusy(true); setTimeout(()=>{ try{ sagePushDraw_(); } finally{ setSyncBusy(false); } }, 20); return; }
       const a = t.dataset.sp;
       if(a==="close") sagePushClose_();
       else if(a==="run") sagePushRun_();
@@ -6125,7 +6182,7 @@ function renderSellingPrices(){
       <div class="actions">
         <div style="display:flex;flex-direction:column;align-items:flex-end;gap:8px;">
           <div class="field" style="min-width:170px;"><label>Received date</label><input type="date" id="sellingCsvDate" value="${esc(sellingCsvDate)}"></div>
-          ${canPushSage_() ? `<div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;"><span class="helptext" style="align-self:center;">1. Selling prices:</span>${Object.values(SAGE_COMPANIES).map(c=>`<button class="btn primary" data-sagepush="${c.key}" ${canCostDownload?"":`disabled title="${esc(costTitle)}"`}>Push to ${esc(c.name)}…</button>`).join("")}</div>` : `<div class="helptext" style="max-width:420px;text-align:right;">Pushing selling prices straight into Sage isn't available for your login — use "Manual price file" below.</div>`}
+          ${canPushSage_() ? `<div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;"><span class="helptext" style="align-self:center;">1. Selling prices:</span><button class="btn primary" data-sagepush="both" ${canCostDownload?"":`disabled title="${esc(costTitle)}"`}>Push to ${Object.values(SAGE_COMPANIES).map(c=>esc(c.name)).join(" + ")}…</button></div>` : `<div class="helptext" style="max-width:420px;text-align:right;">Pushing selling prices straight into Sage isn't available for your login — use "Manual price file" below.</div>`}
           <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;"><span class="helptext" style="align-self:center;">${canPushSage_() ? "2. " : ""}Average cost:</span>${costButtons}</div>
           <div class="helptext" style="max-width:440px;text-align:right;">Selling prices go into Sage after a preview. Sage won't accept an average cost from outside, so the cost file is still imported with Sage's Average Cost import.</div>
         </div>
@@ -8032,7 +8089,7 @@ function wireTabEvents(){
         loadSageItemsFile(e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]);
       });
     }
-    document.querySelectorAll("[data-sagepush]").forEach(pb=> pb.addEventListener("click", ()=>{ sagePushOpen_(pb.dataset.sagepush); }));
+    document.querySelectorAll("[data-sagepush]").forEach(pb=> pb.addEventListener("click", ()=>{ sagePushOpen_(); }));
     const liveBtn = document.getElementById("sageLiveRead");
     if(liveBtn) liveBtn.addEventListener("click", async ()=>{
       const co = sageCheckCoKey_();
