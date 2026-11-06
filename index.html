@@ -575,6 +575,7 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
 // VERSION HISTORY (newest first). The menu shows only APP_VERSION; quote it when asking for a change so the exact build is known.
+//  v2026.11.06f  — "Changed since download" fixes itself: an item sent on an earlier day (last 14 days) whose cost has since been corrected, or that was in a day's file but never reached Sage (e.g. held back by the 50% block), is added to the next day's export at its current cost and price (marked "correcting <day>"). An old day's warning also clears once a later day has sent the item. Pushing / downloading that day puts Sage right and clears the earlier day's warning.
 //  v2026.11.06e  — Margin protection: the cost used (sent to Sage and priced from) is now the HIGHER of the latest delivery cost and the 7-day average. A cost rise goes straight into the price; a fall comes through gradually. Price Export shows Last cost, 7-day avg and which one is used.
 //  v2026.11.06d  — Confirm Prices: the "Confirm all with a price" button is gone — each price is confirmed on its own row, so every one gets checked. Costs now use the 7-DAY AVERAGE of confirmed delivery prices (weighted by quantity) instead of the latest delivery: the cost sent to Sage, the selling prices worked out from it, Product Mixes and GP Watch. A product with no delivery in the last 7 days keeps its last known cost. The latest delivery cost is still shown beside it on Price Export ("Last cost" / "This day's delivery"). Which items go in a day's export is unchanged (those delivered that day).
 //  v2026.11.06c  — A save the server refuses because the page isn't ticked for that person now says so plainly ("You don't have access to …") instead of "check your connection". Goes with the Auth.gs that checks page access on every save (works with the old Auth.gs too).
@@ -608,7 +609,7 @@ function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 //  v2026.10.26b  — Market Product Mapping: pack size calculator (works out Pack size + Receiving pack)
 //  v2026.10.26a  — footer shows only the version number (this list replaces the long on-screen text)
 //  Everything below was the on-screen build text up to 2026-10-23, newest first: Market vs Receiving audit + optional Receiving pack in the mapping | Price Export: only changed costs flag a day as outdated, not margin/min-price changes | GP Watch table: Short of target column + sticky product name | Phone menu button | Product GP Watch (from the Item Sales reports) | Made-to-order items can be removed from the stock take | Received-date grouping, changed-since-download check, queued download saves, lighter saves, stock take completeness checks, tick-box page access
-const APP_VERSION = "v2026.11.06e";
+const APP_VERSION = "v2026.11.06f";
 const APP_BUILD = APP_VERSION; // kept as an alias in case anything else reads it
 
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
@@ -2293,7 +2294,81 @@ function formulaPriceForCost_(cost, r){
   const raw = roundToRetailPrice(cost/(1-m));
   return (r.minPrice!==null && r.minPrice!==undefined && raw < r.minPrice) ? Number(r.minPrice) : raw;
 }
+// A day's export = the items delivered that day (sellingPricesMovedOnBase_) PLUS catch-up rows (exportCatchUpRows_), so the next
+// download/push also corrects anything sent on an earlier day that has gone out of date since ("changed since download").
 function sellingPricesMovedOn(dateStr, suggestionRows){
+  const base = sellingPricesMovedOnBase_(dateStr);
+  const catchUp = exportCatchUpRows_(dateStr, base);
+  return catchUp.length ? base.concat(catchUp).sort((a,b)=> a.item.localeCompare(b.item)) : base;
+}
+// CATCH-UP (Shane, 6 Nov 2026): when a delivery's price is corrected AFTER its day was exported, that day shows "changed since
+// download" and Sage keeps the wrong figure until someone re-imports that old day. Instead, the NEXT export carries the fix: any
+// item last sent on an earlier day (within EXPORT_CATCHUP_DAYS) whose cost as of that day is no longer what was sent goes into this
+// day's file again, at its current cost and price. Once this day is pushed / downloaded, the item has a newer price on record, which
+// already clears the earlier day's flag (see priceExportStatus_). Only a cost difference counts — the same rule as the flag itself, so
+// a settings change (margin, min price, wastage) is not a reason to resend. Worked out only from what was sent BEFORE this day, so the
+// day's file stays the same after it has been pushed. Also picked up: items that were in a recent day's file but never reached Sage
+// at all (no price sent that day or since — e.g. held back by the 50% big-drop block on the push).
+const EXPORT_CATCHUP_DAYS = 14;
+const EXPORT_CATCHUP_FROM = "2026-11-06"; // first export day that carries catch-up rows
+const EXPORT_CATCHUP_FROM_UNSENT = "2026-11-01"; // earliest exported day whose never-sent items are picked up (older days were handled by hand)
+function itemCostAsOf_(item, date){
+  const k = "basisBuf|"+date;
+  if(!psAsOfCache_[k]) psAsOfCache_[k] = applyCostBuffers_(costBasisMap(date));
+  return itemCostPerUnit(item, psAsOfCache_[k]);
+}
+function exportCatchUpRows_(dateStr, baseRows){
+  if(!dateStr || dateStr < EXPORT_CATCHUP_FROM) return [];
+  const k = "catchup|"+dateStr;
+  if(psAsOfCache_[k]) return psAsOfCache_[k];
+  const fromD = new Date(dateStr+"T00:00:00Z"); fromD.setUTCDate(fromD.getUTCDate()-EXPORT_CATCHUP_DAYS);
+  const from = fromD.toISOString().slice(0,10);
+  const inBase = new Set(baseRows.map(r=> r.item));
+  const lastBefore = {}; // item -> its most recent quote sent BEFORE this day (and within the window)
+  (DATA.priceQuotes||[]).forEach(q=>{
+    if(!q.item || !q.date || q.date>=dateStr || q.date<from) return;
+    const cur = lastBefore[q.item];
+    if(!cur || q.date>cur.date || (q.date===cur.date && String(q.time||"")>String(cur.time||""))) lastBefore[q.item] = q;
+  });
+  const rows = pricingSuggestionsAsOf_(dateStr), rowByItem = {};
+  rows.forEach(r=>{ rowByItem[r.item] = r; });
+  const out = [], seen = new Set();
+  // (b) items in an earlier day's file (a day that was exported) that never reached Sage — no price sent that day or any day since
+  // up to this one, e.g. held back by the 50% big-drop block on the push. Sent here at today's figures.
+  const unsent = {}; // item -> the earliest such day
+  for(let i=EXPORT_CATCHUP_DAYS; i>=1; i--){
+    const dd = new Date(dateStr+"T00:00:00Z"); dd.setUTCDate(dd.getUTCDate()-i);
+    const e = dd.toISOString().slice(0,10);
+    if(e < EXPORT_CATCHUP_FROM_UNSENT || !costCsvDownloadsFor(e).length) continue;
+    sellingPricesMovedOnBase_(e).forEach(r=>{
+      const lq = lastBefore[r.item];
+      if(!(lq && lq.date >= e) && !unsent[r.item]) unsent[r.item] = e;
+    });
+  }
+  const add = (item, fromDay, prevPrice)=>{
+    if(inBase.has(item) || seen.has(item)) return; // already in today's file at today's figures
+    const r = rowByItem[item]; if(!r) return;
+    const cost = itemCostAsOf_(item, dateStr); // sent at today's figures
+    const price = formulaPriceForCost_(cost, r);
+    if(cost===null || price===null) return;
+    const jumpPct = (prevPrice!==null && prevPrice>0) ? (price-prevPrice)/prevPrice : null;
+    seen.add(item);
+    out.push({item, itemCode: r.itemCode, description: r.description, vatable: !!r.vatable,
+      price, prevPrice, cost, dayCost: null, costFromLatest: false, marginPct: r.marginPct, catchUpFrom: fromDay,
+      jumpPct, jumpFlag: jumpPct!==null && Math.abs(jumpPct) > PRICE_JUMP_WARN_PCT});
+  };
+  // (a) sent on an earlier day, but that day's cost has been corrected since
+  Object.keys(lastBefore).forEach(item=>{
+    const q = lastBefore[item];
+    const should = itemCostAsOf_(item, q.date); // what that day's file would carry now
+    if(should===null || Math.abs((Number(q.cost)||0) - should) < 0.005) return; // still as sent (or no longer priceable)
+    add(item, q.date, Number(q.price));
+  });
+  Object.keys(unsent).forEach(item=>{ const q = lastBefore[item]; add(item, unsent[item], q ? Number(q.price) : null); });
+  psAsOfCache_[k] = out;
+  return out;
+}
+function sellingPricesMovedOnBase_(dateStr){
   const rows = pricingSuggestionsAsOf_(dateStr); // as of that day (suggestionRows, the live table's rows, is deliberately not used)
   const rowByItem = {};
   rows.forEach(r=>{ rowByItem[r.item] = r; });
@@ -5555,7 +5630,7 @@ function priceExportStatus_(date, suggestionRows){
   const sentQuote = {}; (DATA.priceQuotes||[]).forEach(q=>{ if(q.date===date) sentQuote[q.item] = q; });
   // the newest day each item has been priced for (a later day's file supersedes an earlier one for that item)
   const lastQuoteDate = {}; (DATA.priceQuotes||[]).forEach(q=>{ if(q.item && (!lastQuoteDate[q.item] || q.date>lastQuoteDate[q.item])) lastQuoteDate[q.item] = q.date; });
-  const changedRows = all.length ? moved.filter(r=>{ const q = sentQuote[r.item]; return !q || (Math.abs((Number(q.cost)||0)-(r.cost||0))>=0.005 && !(lastQuoteDate[r.item] > date)); }) : [];
+  const changedRows = all.length ? moved.filter(r=>{ const q = sentQuote[r.item]; return (!q || Math.abs((Number(q.cost)||0)-(r.cost||0))>=0.005) && !(lastQuoteDate[r.item] > date); }) : [];
   const changedItems = changedRows.map(r=>r.item);
   // What Sage was sent vs what the app would send now, so "changed since download" can be traced to the exact item and figure.
   const changedDetail = changedRows.map(r=>{ const q = sentQuote[r.item]; return {item:r.item, oldPrice:q?Number(q.price):null, newPrice:r.price, oldCost:q?(Number(q.cost)||0):null, newCost:r.cost}; });
@@ -5571,7 +5646,7 @@ function priceExportStatus_(date, suggestionRows){
   const partCostOk = [], priceDrift = new Set();
   for(let i=0;i<parts;i++){
     const slice = moved.slice(i*SAGE_MAX_IMPORT_LINES, (i+1)*SAGE_MAX_IMPORT_LINES);
-    partCostOk.push(slice.length>0 && slice.every(r=>{ const q = sentQuote[r.item]; return q && (Math.abs((Number(q.cost)||0)-(r.cost||0))<0.005 || lastQuoteDate[r.item] > date); }));
+    partCostOk.push(slice.length>0 && slice.every(r=>{ const q = sentQuote[r.item]; return (q && Math.abs((Number(q.cost)||0)-(r.cost||0))<0.005) || lastQuoteDate[r.item] > date; })); // a later day re-sent it (even one held back here, e.g. by the 50% block)
     slice.forEach(r=>{ const q = sentQuote[r.item]; if(q && Math.abs((Number(q.cost)||0)-(r.cost||0))<0.005 && Math.abs(Number(q.price)-r.price)>=0.005) priceDrift.add(r.item); });
   }
   const companies0 = Object.values(SAGE_COMPANIES).map(c=>{
@@ -6143,7 +6218,7 @@ function renderSellingPrices(){
       <td class="num" style="font-weight:600;">${money(r.price)}</td>
       <td>${r.prevPrice===null ? chip("new","neutral") : (r.price===r.prevPrice ? chip("unchanged","neutral") : (r.price>r.prevPrice ? chip("▲ "+money(round2(r.price-r.prevPrice))+" ("+fmtNum(Math.abs(r.jumpPct)*100,0)+"%)","warn") : chip("▼ "+money(round2(r.prevPrice-r.price))+" ("+fmtNum(Math.abs(r.jumpPct)*100,0)+"%)","good")))}${r.jumpFlag ? ` ${chip("check cost","critical")}` : ""}</td>
       <td class="num" style="${r.cost===0?'color:var(--critical);':''}">${r.cost!==null ? money(r.cost) : "—"}${r.cost===null ? ` ${chip("no cost known","warn")}` : (r.cost===0 ? ` ${chip("R0 — no price logged","critical")}` : (r.costFromLatest ? ` ${chip("some ingredients not bought this day","neutral")}` : ""))}</td>
-      <td class="num helptext">${r.dayCost!==null && r.dayCost!==undefined ? money(r.dayCost) : "—"}</td>
+      <td class="num helptext">${r.catchUpFrom ? chip("correcting "+shortDayLabel(r.catchUpFrom),"warn") : (r.dayCost!==null && r.dayCost!==undefined ? money(r.dayCost) : "—")}</td>
     </tr>`).join("");
   // Sorted by the purchase date each file was for, newest first (then by when it was downloaded).
   const dlHistory = (DATA.costCsvDownloads||[]).slice().sort((a,b)=> String(b.exportDate||"").localeCompare(String(a.exportDate||"")) || (String(b.downloadedDate)+String(b.downloadedTime)).localeCompare(String(a.downloadedDate)+String(a.downloadedTime)));
@@ -6278,7 +6353,7 @@ function renderSellingPrices(){
     </details>
     ${renderSageCheckCard_(exportDate)}
     <div class="card">
-      <div class="cardhead"><div><h3>Export for ${esc(exportDate||"—")}</h3><div class="desc">${movedRows.length} row${movedRows.length===1?"":"s"} — exactly what the download contains. Price = the formula price worked out from the Cost in this file (buffered cost + target margin, rounded up to 50c, never below the item's Min price); Cost = the higher of the latest delivery cost and the ${COST_AVG_DAYS}-day average of confirmed delivery prices (up to and including this day), plus the wastage buffer — a rise is passed on at once, a fall comes through gradually; this day's own delivery cost is shown beside it for reference. Previous price = what was last sent to Sage.</div></div></div>
+      <div class="cardhead"><div><h3>Export for ${esc(exportDate||"—")}</h3><div class="desc">${movedRows.length} row${movedRows.length===1?"":"s"} — exactly what the download contains. Price = the formula price worked out from the Cost in this file (buffered cost + target margin, rounded up to 50c, never below the item's Min price); Cost = the higher of the latest delivery cost and the ${COST_AVG_DAYS}-day average of confirmed delivery prices (up to and including this day), plus the wastage buffer — a rise is passed on at once, a fall comes through gradually; this day's own delivery cost is shown beside it for reference. Rows marked "correcting …" were sent on an earlier day whose cost has since been corrected — they ride along here so this file puts Sage right. Previous price = what was last sent to Sage.</div></div></div>
       <div class="cardbody" style="padding:0;">
         <div class="tablewrap" style="border:none;border-radius:0;max-height:420px;overflow-y:auto;">
           <table>
