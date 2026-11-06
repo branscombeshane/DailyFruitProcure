@@ -16,7 +16,7 @@ Notes for Claude sessions working on this repo. Read before making changes.
 
 - `index.html` is the whole front end in one file (~650 KB): HTML, CSS and JS, with no build step. It's served by GitHub Pages at `procure.dailyfruit.co.za` (see `CNAME`) from the `main` branch.
 - `manifest.json` and `icons/` provide the home-screen app icon and standalone launch. Icon URLs carry a `?v=` cache-buster.
-- The Apps Script back end is **not in this repo**, because this repo is public. The master copies are in the private repo `branscombeshane/DFMasterPrivate`, folder `procurement-apps-script/`; ask the owner to add that repo to the session when server code needs changing. That repo's root holds a different app (Financials), so only touch the `procurement-apps-script/` folder. Never commit `.gs` files here.
+- The Apps Script back end is **not in this repo**, because this repo is public. The master copies are in the private repo `branscombeshane/DailyFruitProcurePrivate`, at the top level; ask the owner to add that repo to the session when server code needs changing. Never commit `.gs` files here.
 
 ## How the app fits together
 
