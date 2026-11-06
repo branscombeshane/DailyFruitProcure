@@ -401,7 +401,7 @@ function emptyDataShape(){
     procurementPlan: {coverMultiplier:1, safetyBuffer:0, historyWindow:30},
     purchaseCosts: [], baseProductCategories: {},
     stockTakes: [], shoppingList: {criticalPct:0.25, criticalPctPeak:0.4, peakDays:"Tue,Fri,Sat", overstockPct:1.5, priceAlertPct:0.25, buyPct:1},
-    users: [{name:"Owner", pin:"1234", role:"owner"}],
+    users: [], // filled from the server after login (never with PINs — those are checked on the server only)
     purchaseIssues: [], salesHistory: [],
     procurementSignoffs: [],
     categoryBuffers: {}, productCycles: {}, productCeilings: {}, stockTakeExempt: {}, contractWatch: {}, itemGp: [],
@@ -455,11 +455,7 @@ function applyDataDefaults(d){
   if(!d.stockTakeExempt) d.stockTakeExempt = {}; // backward-compatible default: base products NOT stock counted (made to order) — left out of Stock Take, the completeness checks and the Shopping List
   if(!d.productCeilings) d.productCeilings = {}; // backward-compatible default: per-product shelf-life hold ceilings (no cap when unset)
   if(!d.categories) d.categories = []; // backward-compatible default for backups predating explicit category management (name + hidden flag)
-  if(!d.users || !d.users.length){
-    // backward-compatible default for backups predating login — logs in as name "Owner", PIN 1234.
-    // Change this immediately from the Users tab once logged in.
-    d.users = [{name:"Owner", pin:"1234", role:"owner"}];
-  }
+  if(!d.users) d.users = []; // PINs never come to the browser; login is checked on the server (Auth.gs)
   if(d.syncVersion===undefined) d.syncVersion = null; // backward-compatible default for backups/backends predating the two-tabs-open safety net
   if(d.dataVersion===undefined) d.dataVersion = null; // backward-compatible default for backups/backends predating the stale-tab refresh check
   // backward-compatible defaults for backups predating Selling Prices — see pricingSuggestionsComputed.
@@ -579,6 +575,7 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
 // VERSION HISTORY (newest first). The menu shows only APP_VERSION; quote it when asking for a change so the exact build is known.
+//  v2026.11.06b  — Security: login is now checked on the server. PINs are no longer sent to the browser, and every read and save needs a logged-in session (it ends when you log out, after 2 hours unused, or when the owner disables you or changes your role). 5 wrong PINs locks that name for 15 minutes. Users page: PINs are no longer shown — type a new one to change it. Needs the new Code.gs + Auth.gs + SageSalesPull.gs.
 //  v2026.11.06a  — Shopping List Archive: Critical / Consider Buying / OK / Overstocked tiles at the top for the picked day; click one to filter the day's table to that status (click again to clear).
 //  v2026.11.05b  — Price Export: ONE "Push to Daily Fruit – Veg + Pyroca 79" button instead of one per company (a second button was a step someone could forget). Both companies are previewed together, each on its own tab with its own details, and one Push sends the prices to both, one after the other.
 //  v2026.11.05a  — Market vs Receiving: an owner can allocate a ticket that was logged late (e.g. Friday's stock booked in on Monday) to the statement day the stock really arrived on, so the line balances. Open a short row, pick the ticket, "Allocate to <day>" (Undo available). Needs the new Code.gs.
@@ -608,7 +605,7 @@ function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 //  v2026.10.26b  — Market Product Mapping: pack size calculator (works out Pack size + Receiving pack)
 //  v2026.10.26a  — footer shows only the version number (this list replaces the long on-screen text)
 //  Everything below was the on-screen build text up to 2026-10-23, newest first: Market vs Receiving audit + optional Receiving pack in the mapping | Price Export: only changed costs flag a day as outdated, not margin/min-price changes | GP Watch table: Short of target column + sticky product name | Phone menu button | Product GP Watch (from the Item Sales reports) | Made-to-order items can be removed from the stock take | Received-date grouping, changed-since-download check, queued download saves, lighter saves, stock take completeness checks, tick-box page access
-const APP_VERSION = "v2026.11.06a";
+const APP_VERSION = "v2026.11.06b";
 const APP_BUILD = APP_VERSION; // kept as an alias in case anything else reads it
 
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
@@ -973,7 +970,7 @@ function canManageReceiving(){
 // Deleting a confirmed "Recently received" line outright (as opposed to correcting its qty/cost, which
 // any receiving-capable role can already do) is a step further than a routine count correction — Shane's
 // call: only Owner should be able to remove one entirely. See renderReceiving()'s receivedRows.
-function canPushSage_(){ return !!currentUser && (currentUser.role==="owner" || currentUser.role==="procurement"); } // owner + procurement may push selling prices to Sage (server re-checks name, PIN and role)
+function canPushSage_(){ return !!currentUser && (currentUser.role==="owner" || currentUser.role==="procurement"); } // owner + procurement may push selling prices to Sage (the server re-checks the logged-in user's role)
 function isOwner(){
   return !!currentUser && currentUser.role==="owner";
 }
@@ -2344,22 +2341,57 @@ function pricingSuggestionsComputed(asOf){
 }
 
 // ---------- persistence ----------
-// Fetches the full shared state from the backend. Uses text/plain-free plain GET (no custom
-// headers) so this never triggers a CORS preflight against the Apps Script endpoint.
+// Every call to the server goes through here (Nov 2026 security fix). The web-app URL is public, so the server no longer
+// trusts it alone: login (name + PIN) is checked on the server (Auth.gs), which hands back a session token, and every read
+// and save carries that token. If the server says the session has ended (logged out, 2 hours unused, user disabled or
+// role changed) this drops back to the login screen instead of failing quietly. Content-Type text/plain keeps each call a
+// CORS "simple request" (Apps Script can't answer the preflight a JSON content type would trigger); the server parses the
+// body as JSON regardless.
+async function apiPost_(body){
+  const payload = Object.assign({}, body);
+  if(currentUser && currentUser.token) payload.token = currentUser.token;
+  const res = await fetch(API_URL, {method:"POST", headers:{"Content-Type":"text/plain;charset=utf-8"}, body:JSON.stringify(payload)});
+  let result = null;
+  try{ result = await res.json(); }catch(e){ result = null; }
+  if(result && result.authError) sessionEnded_(result.error);
+  return {res, result};
+}
+// The session is over: forget the user and the data this browser holds, and show the login screen with the reason.
+function sessionEnded_(msg){
+  if(!currentUser) return;
+  currentUser = null;
+  try{ sessionStorage.removeItem("dailyFruitUser"); }catch(e){}
+  DATA = emptyDataShape();
+  dataLoaded = false;
+  dataLoadError = null;
+  loginError = msg || "Your session has ended — log in again.";
+  render();
+}
+// Logout: end the session on the server too (fire-and-forget — the token is read before anything is cleared), then locally.
+function logout_(msg){
+  if(currentUser && currentUser.token) apiPost_({action:"logout"}).catch(()=>{});
+  currentUser = null;
+  try{ sessionStorage.removeItem("dailyFruitUser"); }catch(e){}
+  DATA = emptyDataShape();
+  dataLoaded = false;
+  dataLoadError = null;
+  render();
+  if(msg) toast(msg);
+}
+// Fetches the full shared state from the backend (needs a logged-in session; never includes anyone's PIN).
 async function loadData(){
   if(!API_URL || API_URL.indexOf("__")===0){
     throw new Error("This copy of the app has no data source configured yet.");
   }
-  const res = await fetch(API_URL, {cache: "no-store"});
+  const {res, result} = await apiPost_({action:"getData"});
   if(!res.ok) throw new Error("Server returned " + res.status);
-  const fresh = await res.json();
+  const fresh = result;
   // The backend answers HTTP 200 with {ok:false,error} when it trips over something — never treat that as "empty data"
   if(!fresh || fresh.ok===false || !Array.isArray(fresh.users)) throw new Error((fresh && fresh.error) ? String(fresh.error) : "The server answered, but sent no user list");
   return applyDataDefaults(fresh);
 }
 
-// Fetches one day's archived Shopping List snapshot on demand (see Code.gs's doGet handling of
-// ?action=shoppingListSnapshot) — not part of the main data load, since snapshot history can grow to a
+// Fetches one day's archived Shopping List snapshot on demand (see the getShoppingListSnapshot action in Auth.gs) — not part of the main data load, since snapshot history can grow to a
 // lot of rows over many days and most sessions never open the Archive tab at all. No synchronous
 // render() call anywhere in this function on purpose: it's invoked from inside wireTabEvents (which
 // runs at the end of every render()), and calling render() again before the first await would re-enter
@@ -2367,10 +2399,9 @@ async function loadData(){
 // so the eventual render() is always a fresh call, never a nested one.
 async function loadShoppingArchive(date){
   try{
-    const res = await fetch(API_URL + "?action=shoppingListSnapshot&date=" + encodeURIComponent(date), {cache: "no-store"});
+    const {res, result} = await apiPost_({action:"getShoppingListSnapshot", date});
     if(!res.ok) throw new Error("Server returned " + res.status);
-    const result = await res.json();
-    if(!result.ok) throw new Error(result.error || "Could not load that day's list");
+    if(!result || !result.ok) throw new Error(result.error || "Could not load that day's list");
     if(date === shoppingArchiveDate){ shoppingArchiveRows = result.rows || []; shoppingArchiveError = ""; }
   }catch(e){
     if(date === shoppingArchiveDate){ shoppingArchiveError = "Could not load that day's Shopping List — check your connection and try again."; shoppingArchiveRows = []; }
@@ -2417,16 +2448,8 @@ async function persist(successMsg, changedKeys){
       if(keys.some(k=> k==="procurementPlan" || k==="shoppingList" || k==="pricingPlan")) ["procurementPlan","shoppingList","pricingPlan"].forEach(k=>{ if(!keys.includes(k)) keys.push(k); });
       keys.forEach(k=>{ payload[k] = DATA[k]; });
     }
-    // Content-Type: text/plain keeps this a CORS "simple request" — Apps Script Web Apps don't
-    // handle the OPTIONS preflight a real "application/json" content-type would trigger. The
-    // backend parses the body as JSON regardless of the header (see Code.gs's doPost).
-    const res = await fetch(API_URL, {
-      method: "POST",
-      headers: {"Content-Type": "text/plain;charset=utf-8"},
-      body: JSON.stringify(payload),
-    });
-    let result = null;
-    try{ result = await res.json(); }catch(e){ /* fall through to the failure toast below */ }
+    // apiPost_ adds the session token and handles an ended session (see its comment).
+    const {res, result} = await apiPost_(payload);
     if(res.ok && result && result.ok){
       saveConflict = null;
       if(result.syncVersion) DATA.syncVersion = result.syncVersion; // so this tab's NEXT save compares against its own last write, not the stale one it loaded with
@@ -2454,18 +2477,7 @@ async function persist(successMsg, changedKeys){
 // handlePurchaseAction_), so two people logging purchases around the same time — e.g. two buyers at
 // the market — never overwrite each other and never need to reload. No version check applies here;
 // there's nothing for it to conflict with.
-// Quietly stamps "last logged in" for a user on the server (see handleRecordLogin_ in Code.gs). Fire-and-forget: no toast, no
-// render, and a failure (old Code.gs, offline) is simply ignored — it must never get in the way of logging in.
-async function recordLogin_(name){
-  try{
-    const res = await fetch(API_URL, {method:"POST", headers:{"Content-Type":"text/plain;charset=utf-8"}, body:JSON.stringify({action:"recordLogin", name})});
-    const r = await res.json();
-    if(r && r.ok && r.lastLogin){
-      const u = (DATA.users||[]).find(x=> String(x.name).toLowerCase()===String(name).toLowerCase());
-      if(u) u.lastLogin = r.lastLogin;
-    }
-  }catch(e){ /* ignore */ }
-}
+// ("Last logged in" is stamped by the server at login now — see handleLogin_ in Auth.gs.)
 // A disabled user keeps their row (so they can be switched back on) but cannot log in and is ignored by the daily sign-off.
 function isUserDisabled_(u){ return !!u && (u.disabled===true || String(u.disabled||"").toLowerCase()==="yes"); }
 // After DATA is swapped for a fresh copy: a user who has been removed or disabled elsewhere must not stay logged in.
@@ -2491,13 +2503,7 @@ async function persistPurchaseAction(payload, successMsg, onSuccess){
   setSyncBusy(true);
   let ok = false;
   try{
-    const res = await fetch(API_URL, {
-      method: "POST",
-      headers: {"Content-Type": "text/plain;charset=utf-8"},
-      body: JSON.stringify(payload),
-    });
-    let result = null;
-    try{ result = await res.json(); }catch(e){ /* fall through to the failure toast below */ }
+    const {res, result} = await apiPost_(payload);
     if(res.ok && result && result.ok){
       // same reasoning as persist() above — this tab's own purchase log is data changing too, so absorb
       // its new version rather than have the next poll flag this tab's own write back at itself
@@ -2586,9 +2592,7 @@ function renderNav(){
       const btn = document.getElementById("logoutBtn");
       if(btn) btn.addEventListener("click", ()=>{
         mobileMenuOpen = false;
-        currentUser = null;
-        try{ sessionStorage.removeItem("dailyFruitUser"); }catch(e){}
-        render();
+        logout_();
       });
     } else {
       footArea.innerHTML = `<span class="synctag"><span class="pulse"></span> <span id="syncstate">Synced</span></span>`;
@@ -2599,6 +2603,8 @@ function renderNav(){
 function wireLoginEvents(){
   const nameEl = document.getElementById("loginName");
   if(nameEl) nameEl.addEventListener("input", (e)=>{ loginNameInput = e.target.value; });
+  // Name + PIN are checked on the SERVER (handleLogin_ in Auth.gs) — this browser never sees anyone's PIN. A good login returns
+  // a session token; the data is then loaded with it, so every login always starts from the latest data.
   const doLogin = async ()=>{
     if(loginBusy) return;
     const name = (document.getElementById("loginName")||{}).value || "";
@@ -2606,37 +2612,40 @@ function wireLoginEvents(){
     loginNameInput = name;
     const trimmedName = name.trim();
     if(!trimmedName){ loginError = "Enter your name"; render(); return; }
-    // A cheap version check first (the same single-Properties-read endpoint checkForUpdates() polls) —
-    // this tab may have been sitting on the login screen a good while (a shared kitchen device left open
-    // overnight, say) with nobody logged in to trigger the usual background poll. Refetches full data
-    // only when something's actually changed, so logging in right after opening the app — the common
-    // case, already current — stays effectively instant.
+    if(!pin){ loginError = "Enter your PIN"; render(); return; }
     loginBusy = true; loginError = ""; render();
-    try{
-      const res = await fetch(API_URL + "?action=version", {cache:"no-store"});
-      const result = res.ok ? await res.json() : null;
-      const serverVersion = (result && result.ok) ? (result.dataVersion || null) : undefined;
-      if(serverVersion !== undefined && serverVersion !== (DATA.dataVersion || null)){
-        DATA = await loadData();
-        lastKnownDataVersion = DATA.dataVersion || null;
-      }
-    }catch(e){ /* offline / a blip — fall back to whatever's already loaded rather than blocking login */ }
-    loginBusy = false;
-    const u = (DATA.users||[]).find(x=> String(x.name).toLowerCase() === trimmedName.toLowerCase());
-    if(!u){ loginError = (DATA.users||[]).length ? "Name not recognized" : "No users came back from the server — reload the page. If it persists, check the Users tab in the Google Sheet."; render(); return; }
-    if(String(u.pin) !== String(pin)){ loginError = "Incorrect PIN"; render(); return; }
-    if(isUserDisabled_(u)){ loginError = "This account has been switched off — ask the owner."; render(); return; }
-    currentUser = {name:u.name, role:u.role};
+    let r = null;
+    try{ r = (await apiPost_({action:"login", name:trimmedName, pin})).result; }catch(e){ r = null; }
+    if(!r || !r.ok || !r.token || !r.user){
+      loginBusy = false;
+      loginError = (r && r.error) ? String(r.error) : "Couldn't reach the server — check your connection and try again.";
+      render();
+      return;
+    }
+    currentUser = {name:r.user.name, role:r.user.role, token:r.token};
     try{ sessionStorage.setItem("dailyFruitUser", JSON.stringify(currentUser)); }catch(e){}
-    recordLogin_(u.name);
+    lastActivityAt = Date.now();
+    loginNameInput = "";
+    loginError = "";
+    DATA = emptyDataShape(); dataLoaded = false; dataLoadError = null;
+    render(); // the loading screen while the data comes in
+    try{
+      DATA = await loadData();
+      dataLoaded = true;
+      lastKnownDataVersion = DATA.dataVersion || null;
+      staleDataAvailable = false;
+    }catch(e){
+      dataLoadError = (e && e.message) ? e.message : "Unknown error";
+    }
+    loginBusy = false;
     // Land on the Dashboard every time Owner/Procurement logs in, regardless of whatever tab this
     // browser had open last time — that's the whole point of it being the landing page. Stock Taker and
     // Receiving don't have a "home" tab at all (see ROLE_TABS), so they're left on whatever they had
     // open before, same as always.
-    if(userCanAccessTab(u, "home")) setCurrentTab("home");
-    else if(userCanAccessTab(u, "findash")) setCurrentTab("findash");
-    loginNameInput = "";
-    loginError = "";
+    if(currentUser && dataLoaded){
+      if(userCanAccessTab(currentUser, "home")) setCurrentTab("home");
+      else if(userCanAccessTab(currentUser, "findash")) setCurrentTab("findash");
+    }
     render();
   };
   const submitBtn = document.getElementById("loginSubmit");
@@ -2676,7 +2685,7 @@ function render(){
   const wrapScrollTops = Array.from(document.querySelectorAll(".tablewrap")).map(el=> el.scrollTop);
 
   const sidebar = document.querySelector(".sidebar");
-  if(!dataLoaded){
+  if(currentUser && !dataLoaded){
     if(sidebar) sidebar.style.display = "none";
     renderNav();
     const main = document.getElementById("main");
@@ -2742,11 +2751,7 @@ function render(){
     if(staleReloadBtn) staleReloadBtn.addEventListener("click", ()=> location.reload());
     if(kiosk){
       const kioskLogoutBtn = document.getElementById("kioskLogoutBtn");
-      if(kioskLogoutBtn) kioskLogoutBtn.addEventListener("click", ()=>{
-        currentUser = null;
-        try{ sessionStorage.removeItem("dailyFruitUser"); }catch(e){}
-        render();
-      });
+      if(kioskLogoutBtn) kioskLogoutBtn.addEventListener("click", ()=> logout_());
     }
   }
 
@@ -2824,17 +2829,6 @@ function renderStaleDataBanner(){
 // form instead — plain typing, no autocomplete/suggestions. Wrong name and wrong PIN get their own
 // distinct error messages rather than one generic "incorrect" message.
 function renderLogin(){
-  const users = DATA.users || [];
-  if(!users.length){
-    return `
-      <div class="loginwrap">
-        <div class="loginbox">
-          <div class="loginmark">DF</div>
-          <h2>Daily Fruit - Procurement</h2>
-          <p class="helptext">No users set up yet — ask the owner to add one.</p>
-        </div>
-      </div>`;
-  }
   return `
     <div class="loginwrap">
       <div class="loginbox">
@@ -2845,7 +2839,7 @@ function renderLogin(){
           value="${esc(loginNameInput)}">
         <input type="password" inputmode="numeric" pattern="[0-9]*" id="loginPin" class="login-pin" placeholder="PIN" ${loginBusy?"disabled":""}>
         ${loginError ? `<div class="helptext" style="color:var(--critical);margin-top:8px;">${esc(loginError)}</div>` : ""}
-        <button class="btn primary" id="loginSubmit" ${loginBusy?"disabled":""} style="width:100%;margin-top:14px;padding:13px;font-size:15px;">${loginBusy?"Checking for updates…":"Log in"}</button>
+        <button class="btn primary" id="loginSubmit" ${loginBusy?"disabled":""} style="width:100%;margin-top:14px;padding:13px;font-size:15px;">${loginBusy?"Logging in…":"Log in"}</button>
       </div>
     </div>`;
 }
@@ -5075,13 +5069,12 @@ function sagePushGroup_(C, i){
   return "other";
 }
 async function sagePushCall_(coKey, action, extra){
-  const u = (DATA.users||[]).find(x=> currentUser && String(x.name).toLowerCase()===String(currentUser.name).toLowerCase());
-  if(!u || u.pin===undefined || u.pin===null || u.pin==="") throw new Error("Your PIN isn't available in this browser — log out and back in.");
-  const body = Object.assign({action:action, name:currentUser.name, pin:u.pin, company:coKey}, extra);
+  if(!currentUser || !currentUser.token) throw new Error("You're not logged in — log in again.");
+  // Who is pushing comes from the session on the server (it checks the role there) — no PIN is sent any more.
+  const body = Object.assign({action:action, company:coKey}, extra);
   let r;
   try{
-    const res = await fetch(API_URL, {method:"POST", headers:{"Content-Type":"text/plain;charset=utf-8"}, body:JSON.stringify(body)});
-    r = await res.json();
+    r = (await apiPost_(body)).result;
   }catch(e){ const err = new Error("No usable answer from the server."); err.unknown = true; throw err; }
   if(!r || !r.ok || !r.data){ const err = new Error((r && r.error) || "No usable answer from the server."); err.unknown = !r || r.ok!==false || r.unknown===true; throw err; }
   return r.data;
@@ -6587,7 +6580,7 @@ function renderUsers(){
       <td>${(()=>{ const li = lastLoginInfo_(u.lastLogin); if(!li) return `<span class="helptext">No login recorded yet</span>`; return esc(li.text) + (li.rel ? ` <span class="helptext">(${esc(li.rel)})</span>` : "") + (li.days!==null && li.days>=30 ? " " + chip("inactive","warn") : ""); })()}</td>
       <td><select class="rowinput" data-idx="${i}" data-field="role" data-pristine="${esc(u.role)}">${roleOptionsFor(u.role)}</select></td>
       <td><button class="btn small" data-acc-toggle="${i}" title="Tick which pages this person can see">Pages (${userTabCount_(u)}) ${usersAccessOpen.has(u.name)?"▾":"▸"}</button></td>
-      <td><input class="rowinput num" data-idx="${i}" data-field="pin" value="${esc(u.pin)}" data-pristine="${esc(u.pin)}" style="max-width:110px;"></td>
+      <td><input class="rowinput num" type="password" inputmode="numeric" autocomplete="new-password" data-idx="${i}" data-field="pin" value="" data-pristine="" placeholder="unchanged" title="Leave blank to keep this person's PIN; type a new one to change it" style="max-width:110px;"></td>
       <td>${isSelf ? `<span class="helptext">—</span>` : `<button class="btn small" data-toggle-user="${i}" title="${off?"Let this user log in again":"Stop this user logging in (can be switched back on)"}">${off?"Enable":"Disable"}</button>`}</td>
       <td><button class="delbtn" data-del-user="${i}" title="Remove user">✕</button></td>
     </tr>
@@ -6599,7 +6592,7 @@ function renderUsers(){
 
   return `
     <div class="pagehead">
-      <div><h2>Users</h2><p>Who can log in, and what they can see. This is a simple access gate for your team, not encrypted security — PINs are stored in this page's own data.</p></div>
+      <div><h2>Users</h2><p>Who can log in, and what they can see. PINs are checked on the server and are never shown here — to change someone's PIN, type a new one in their row and save.</p></div>
     </div>
     <div class="card">
       <div class="cardhead"><div><h3>Add a user</h3></div></div>
@@ -6616,12 +6609,12 @@ function renderUsers(){
     </div>
     <div class="card">
       <div class="cardhead">
-        <div><h3>Existing users</h3><div class="desc">${users.length} user(s). Edit role or PIN below, then save. <b>Disable</b> stops a user logging in (and logs them out within about 20 seconds) without deleting them — click Enable to bring them back. "Last logged in" only started recording when this update went live, so "No login recorded yet" means they haven't logged in since — check again in a week or two before removing anyone.</div></div>
+        <div><h3>Existing users</h3><div class="desc">${users.length} user(s). Edit a role, or type a new PIN (blank = keep the current one), then save. <b>Disable</b> stops a user logging in (and logs them out within about 20 seconds) without deleting them — click Enable to bring them back. "Last logged in" only started recording when this update went live, so "No login recorded yet" means they haven't logged in since — check again in a week or two before removing anyone.</div></div>
         <button class="btn primary" id="saveUsersBtn">Save changes</button>
       </div>
       <div class="cardbody" style="padding:0;">
         <div class="tablewrap" style="border:none;border-radius:0;"><table>
-          <thead><tr><th>Name</th><th>Last logged in</th><th>Role</th><th>Pages</th><th class="num">PIN</th><th>Access</th><th></th></tr></thead>
+          <thead><tr><th>Name</th><th>Last logged in</th><th>Role</th><th>Pages</th><th class="num">New PIN</th><th>Access</th><th></th></tr></thead>
           <tbody>${rows || `<tr><td colspan="7" class="empty">No users yet.</td></tr>`}</tbody>
         </table></div>
       </div>
@@ -6629,9 +6622,9 @@ function renderUsers(){
     <div class="card">
       <div class="cardhead"><div><h3>How access works</h3></div></div>
       <div class="cardbody helptext">
-        Each person sees only the pages ticked for them (click <strong>Pages</strong> on their row). The <strong>role</strong> is just a starting point: choosing one ticks its usual pages, which you can then change. Owners always see every page.<br>
+        Each person sees only the pages ticked for them (click <strong>Pages</strong> on their row). The <strong>role</strong> is just a starting point: choosing one ticks its usual pages, which you can then change. Owners always see every page. Changing someone's role, or disabling them, logs them out straight away.<br>
         The role also decides two things the ticks don't: a <strong>Receiving</strong> person with only the Receiving page ticked gets the full-screen tablet layout, and a few actions stay <strong>owner-only</strong> (deleting a received delivery, resetting the pallet tally).<br>
-        People who haven't been given their own ticks yet keep the usual pages for their role, so nothing changes until you edit them. Remember to press <strong>Save changes</strong>. <em>This controls what people see in the app; it is a simple gate, not encrypted security.</em>
+        People who haven't been given their own ticks yet keep the usual pages for their role, so nothing changes until you edit them. Remember to press <strong>Save changes</strong>. <em>Logins and saves are checked on the server; 5 wrong PINs for one name locks it for 15 minutes.</em>
       </div>
     </div>`;
 }
@@ -8120,8 +8113,7 @@ function wireTabEvents(){
         // Both companies are read (this one first) — they supply from the same stock, so their costs are compared in the check.
         for(const k of [co].concat(Object.keys(SAGE_COMPANIES).filter(x=>x!==co))){
           try{
-            const res = await fetch(API_URL, {method:"POST", headers:{"Content-Type":"text/plain;charset=utf-8"}, body:JSON.stringify({action:"getSageItemsLive", company:k})});
-            const r = await res.json();
+            const r = (await apiPost_({action:"getSageItemsLive", company:k})).result;
             if(!r || !r.ok || !r.data || !r.data.byCode) throw new Error((r && r.error) || "No usable answer from Sage");
             const n = new Date();
             sageLiveByCo[k] = {name:"Live from Sage", company:k, loadedAt:n.toISOString().slice(0,10)+" "+n.toTimeString().slice(0,5), byCode:r.data.byCode, rowCount:r.data.rowCount};
@@ -8411,7 +8403,14 @@ function wireTabEvents(){
       document.querySelectorAll("#main [data-idx]").forEach(inp=>{
         const idx = Number(inp.dataset.idx);
         const field = inp.dataset.field;
-        if(DATA.users[idx]) DATA.users[idx][field] = inp.value;
+        if(!DATA.users[idx]) return;
+        if(field==="pin"){
+          // blank = keep the current PIN (the server keeps it; this browser never has it)
+          const v = inp.value.trim();
+          if(v) DATA.users[idx].pin = v; else delete DATA.users[idx].pin;
+          return;
+        }
+        DATA.users[idx][field] = inp.value;
       });
       // the ticked pages for every user (blank = just the role's usual pages)
       DATA.users.forEach((u,idx)=>{
@@ -8714,10 +8713,7 @@ const IDLE_LOGOUT_MS = 30 * 60 * 1000;
 function checkIdleLogout(){
   if(!currentUser) return;
   if(Date.now() - lastActivityAt < IDLE_LOGOUT_MS) return;
-  currentUser = null;
-  try{ sessionStorage.removeItem("dailyFruitUser"); }catch(e){}
-  render();
-  toast("Logged out after 30 minutes of inactivity");
+  logout_("Logged out after 30 minutes of inactivity");
 }
 function wireActivityTracking(){
   ["mousedown","keydown","touchstart","wheel","scroll"].forEach(evt=>{
@@ -8735,10 +8731,8 @@ async function checkForUpdates(){
   if(!dataLoaded || !currentUser || dataRefreshInFlight) return;
   let serverVersion;
   try{
-    const res = await fetch(API_URL + "?action=version", {cache: "no-store"});
-    if(!res.ok) return;
-    const result = await res.json();
-    if(!result || !result.ok) return;
+    const {res, result} = await apiPost_({action:"version"});
+    if(!res.ok || !result || !result.ok) return; // an ended session is handled inside apiPost_
     serverVersion = result.dataVersion || null;
   }catch(e){ return; } // offline / a blip — just try again on the next poll, no need to alarm anyone over one failed check
 
@@ -8810,9 +8804,15 @@ function showStaleDataBanner(){
 }
 
 async function boot(){
+  // Nothing is loaded before login any more (the data, and who may see it, come from the server only once a session exists).
+  // A session restored from this tab (page reload) is used straight away; one saved by the older app has no token and is dropped.
+  if(!currentUser || !currentUser.token){
+    if(currentUser){ currentUser = null; try{ sessionStorage.removeItem("dailyFruitUser"); }catch(e){} }
+    render();
+    return;
+  }
   // paint the loading screen right away — without this, #main stays completely blank for however
-  // long the fetch takes (Apps Script's first request after a while can take a few seconds), since
-  // otherwise render() isn't called at all until the fetch below has already resolved or failed
+  // long the fetch takes (Apps Script's first request after a while can take a few seconds)
   render();
   try{
     DATA = await loadData();
@@ -8820,17 +8820,7 @@ async function boot(){
     dataLoadError = null;
     lastKnownDataVersion = DATA.dataVersion || null;
     staleDataAvailable = false; // a fresh load is by definition current, even if it was triggered by the "Reload now" button on a stale-data banner
-    // now that real data is in, re-validate the tentatively-restored session: a user removed
-    // (or whose role changed) elsewhere since this session logged in shouldn't keep stale access
-    if(currentUser && !DATA.users.some(u=>u.name===currentUser.name && u.role===currentUser.role && !isUserDisabled_(u))){
-      currentUser = null;
-      try{ sessionStorage.removeItem("dailyFruitUser"); }catch(e){}
-    } else if(currentUser){
-      // a restored session (page reloaded, same tab) counts as use too — but only re-stamp if the last stamp is a few hours old
-      const me = DATA.users.find(u=> u.name===currentUser.name);
-      const t = me && me.lastLogin ? new Date(String(me.lastLogin).replace(" ","T")).getTime() : 0;
-      if(!t || Date.now()-t > 4*3600000) recordLogin_(currentUser.name);
-    }
+    dropSessionIfNoAccess_();
   }catch(e){
     dataLoadError = (e && e.message) ? e.message : "Unknown error";
   }
