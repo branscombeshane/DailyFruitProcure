@@ -579,6 +579,7 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
 // VERSION HISTORY (newest first). The menu shows only APP_VERSION; quote it when asking for a change so the exact build is known.
+//  v2026.11.06a  — Shopping List Archive: Critical / Consider Buying / OK / Overstocked tiles at the top for the picked day; click one to filter the day's table to that status (click again to clear).
 //  v2026.11.05b  — Price Export: ONE "Push to Daily Fruit – Veg + Pyroca 79" button instead of one per company (a second button was a step someone could forget). Both companies are previewed together, each on its own tab with its own details, and one Push sends the prices to both, one after the other.
 //  v2026.11.05a  — Market vs Receiving: an owner can allocate a ticket that was logged late (e.g. Friday's stock booked in on Monday) to the statement day the stock really arrived on, so the line balances. Open a short row, pick the ticket, "Allocate to <day>" (Undo available). Needs the new Code.gs.
 //  v2026.11.03a  — Market Statements > lines: the market's own text (e.g. "BEANS,4KG BOX,*,1,*,*,*") now shows under the Base Product name, smaller and in the lighter colour.
@@ -607,7 +608,7 @@ function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 //  v2026.10.26b  — Market Product Mapping: pack size calculator (works out Pack size + Receiving pack)
 //  v2026.10.26a  — footer shows only the version number (this list replaces the long on-screen text)
 //  Everything below was the on-screen build text up to 2026-10-23, newest first: Market vs Receiving audit + optional Receiving pack in the mapping | Price Export: only changed costs flag a day as outdated, not margin/min-price changes | GP Watch table: Short of target column + sticky product name | Phone menu button | Product GP Watch (from the Item Sales reports) | Made-to-order items can be removed from the stock take | Received-date grouping, changed-since-download check, queued download saves, lighter saves, stock take completeness checks, tick-box page access
-const APP_VERSION = "v2026.11.05b";
+const APP_VERSION = "v2026.11.06a";
 const APP_BUILD = APP_VERSION; // kept as an alias in case anything else reads it
 
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
@@ -641,6 +642,7 @@ let shoppingArchiveDate = "";
 let shoppingArchiveRows = null;
 let shoppingArchiveError = "";
 let shoppingArchivePending = null; // date currently being fetched, if any — guards against firing the same fetch twice
+let shoppingArchiveStatus = ""; // Critical / Buy / OK / Overstocked tile filter on the Archive (same toggle convention as the live Shopping List tiles)
 let shoppingArchiveSearch = ""; // filters the picked date's table by base product — see renderShoppingArchive()
 let quickBuySearch = "";
 let quickBuyCategoryFilter = "";
@@ -3558,7 +3560,18 @@ function renderShoppingArchive(){
   } else {
     const hasNum = v=> v!==undefined && v!==null && v!=="";
     const search = shoppingArchiveSearch.trim().toLowerCase();
-    const shownRows = search ? shoppingArchiveRows.filter(r=> (r.baseProduct||"").toLowerCase().includes(search)) : shoppingArchiveRows;
+    // Tiles count the WHOLE day (not just what the search shows); a clicked tile filters the table to that status, and it ANDs with the search box.
+    const archCounts = {"Critical":0, "Buy":0, "OK":0, "Overstocked":0};
+    shoppingArchiveRows.forEach(r=>{ if(archCounts[r.status]!==undefined) archCounts[r.status]++; });
+    const archTile = (label, status, color)=>{
+      const on = shoppingArchiveStatus===status;
+      return `<div class="stat clickable${on?" active":""}" data-arch-stat="${esc(status)}" title="Show only ${esc(label)} on ${esc(shoppingArchiveDate)}${on?" (click again to clear)":""}"><div class="label">${esc(label)}</div><div class="value" style="color:${color}">${archCounts[status]}</div></div>`;
+    };
+    const tilesHtml = `<div class="cardrow">${archTile("Critical","Critical","var(--critical)")}${archTile("Consider Buying","Buy","var(--warn)")}${archTile("OK","OK","var(--good)")}${archTile("Overstocked","Overstocked","var(--muted)")}</div>`;
+    let shownRows = shoppingArchiveRows;
+    if(shoppingArchiveStatus) shownRows = shownRows.filter(r=> r.status===shoppingArchiveStatus);
+    if(search) shownRows = shownRows.filter(r=> (r.baseProduct||"").toLowerCase().includes(search));
+    const filtered = !!(search || shoppingArchiveStatus);
     const tableRows = shownRows.map(r=>{
       const purchases = purchaseEntriesForDate(r.baseProduct, shoppingArchiveDate);
       const issue = unableEntryForDate(r.baseProduct, shoppingArchiveDate);
@@ -3601,12 +3614,13 @@ function renderShoppingArchive(){
       </div>
     </div>` : "";
     bodyHtml = `
+    ${tilesHtml}
     <div class="card">
-      <div class="cardhead"><div><h3>${esc(shoppingArchiveDate)}</h3><div class="desc">${search ? `${shownRows.length} of ${shoppingArchiveRows.length}` : shoppingArchiveRows.length} product(s) — exactly as the Shopping List stood that evening, not recalculated with today's settings.</div></div></div>
+      <div class="cardhead"><div><h3>${esc(shoppingArchiveDate)}</h3><div class="desc">${filtered ? `${shownRows.length} of ${shoppingArchiveRows.length}` : shoppingArchiveRows.length} product(s)${shoppingArchiveStatus ? ` (${esc(shoppingStatusLabel(shoppingArchiveStatus))} only)` : ""} — exactly as the Shopping List stood that evening, not recalculated with today's settings.</div></div></div>
       <div class="cardbody" style="padding:0;">
         <div class="tablewrap" style="border:none;border-radius:0;max-height:640px;overflow-y:auto;"><table>
           <thead><tr><th>Base product</th><th>Category</th><th>Status</th><th class="num">Stock that day</th><th>Counted on</th><th class="num">Holding target</th><th class="num">Suggested buy</th><th>Unit</th><th>Purchases that day</th></tr></thead>
-          <tbody>${tableRows || `<tr><td colspan="9" class="empty">${search ? `No products match "${esc(shoppingArchiveSearch)}".` : "No products recorded for this date."}</td></tr>`}</tbody>
+          <tbody>${tableRows || `<tr><td colspan="9" class="empty">${filtered ? "Nothing matches this filter." : "No products recorded for this date."}</td></tr>`}</tbody>
         </table></div>
       </div>
     </div>
@@ -7281,6 +7295,13 @@ function wireTabEvents(){
         render();
       });
     }
+    document.querySelectorAll("[data-arch-stat]").forEach(el=>{
+      el.addEventListener("click", ()=>{
+        const st = el.dataset.archStat;
+        shoppingArchiveStatus = (shoppingArchiveStatus === st) ? "" : st;
+        render();
+      });
+    });
     const dateSel = document.getElementById("shoppingArchiveDateSel");
     if(dateSel) dateSel.addEventListener("change", (e)=>{
       shoppingArchiveDate = e.target.value;
