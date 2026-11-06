@@ -575,6 +575,7 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
 // VERSION HISTORY (newest first). The menu shows only APP_VERSION; quote it when asking for a change so the exact build is known.
+//  v2026.11.06d  — Confirm Prices: the "Confirm all with a price" button is gone — each price is confirmed on its own row, so every one gets checked. Costs now use the 7-DAY AVERAGE of confirmed delivery prices (weighted by quantity) instead of the latest delivery: the cost sent to Sage, the selling prices worked out from it, Product Mixes and GP Watch. A product with no delivery in the last 7 days keeps its last known cost. The latest delivery cost is still shown beside it on Price Export ("Last cost" / "This day's delivery"). Which items go in a day's export is unchanged (those delivered that day).
 //  v2026.11.06c  — A save the server refuses because the page isn't ticked for that person now says so plainly ("You don't have access to …") instead of "check your connection". Goes with the Auth.gs that checks page access on every save (works with the old Auth.gs too).
 //  v2026.11.06b  — Security: login is now checked on the server. PINs are no longer sent to the browser, and every read and save needs a logged-in session (it ends when you log out, after 2 hours unused, or when the owner disables you or changes your role). 5 wrong PINs locks that name for 15 minutes. Users page: PINs are no longer shown — type a new one to change it. Needs the new Code.gs + Auth.gs + SageSalesPull.gs.
 //  v2026.11.06a  — Shopping List Archive: Critical / Consider Buying / OK / Overstocked tiles at the top for the picked day; click one to filter the day's table to that status (click again to clear).
@@ -606,7 +607,7 @@ function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 //  v2026.10.26b  — Market Product Mapping: pack size calculator (works out Pack size + Receiving pack)
 //  v2026.10.26a  — footer shows only the version number (this list replaces the long on-screen text)
 //  Everything below was the on-screen build text up to 2026-10-23, newest first: Market vs Receiving audit + optional Receiving pack in the mapping | Price Export: only changed costs flag a day as outdated, not margin/min-price changes | GP Watch table: Short of target column + sticky product name | Phone menu button | Product GP Watch (from the Item Sales reports) | Made-to-order items can be removed from the stock take | Received-date grouping, changed-since-download check, queued download saves, lighter saves, stock take completeness checks, tick-box page access
-const APP_VERSION = "v2026.11.06c";
+const APP_VERSION = "v2026.11.06d";
 const APP_BUILD = APP_VERSION; // kept as an alias in case anything else reads it
 
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
@@ -1443,7 +1444,7 @@ function gpPeriodDates_(allDates){
   return dates.filter(d=> d==="latest" || d>=f);
 }
 function gpTodayCosts_(){
-  const pm = applyCostBuffers_(latestPurchaseCostMap());
+  const pm = applyCostBuffers_(avgCostMap()); // the same 7-day average cost the Price Export sends to Sage
   const m = {};
   DATA.itemSetup.forEach(it=>{ const c = itemCostPerUnit(it.item, pm); if(c!==null && c>0) m[it.item] = c; });
   return m;
@@ -2020,6 +2021,35 @@ function latestPurchaseCostMap(asOf){
   return weightedCostMap_(entries);
 }
 
+// 7-DAY AVERAGE COST (Shane, 6 Nov 2026). Fresh produce costs swing a lot day to day — e.g. citrus going out of season, when local
+// stock at R48 a bag and imported stock at R133 a bag get bought in the same week. Pricing straight off the latest delivery made
+// selling prices whipsaw (R62 -> R205 -> R74 ...), and the 50% big-drop block on the Sage push then left prices stranded. So the
+// cost used everywhere — the cost sent to Sage, the selling price worked out from it, Product Mixes and GP Watch — is the
+// quantity-weighted average of CONFIRMED prices on deliveries RECEIVED in the COST_AVG_DAYS days up to and including `asOf`
+// (default today). A base product with no confirmed delivery in that window falls back to its last known cost (so nothing
+// suddenly has no cost). The latest delivery's own cost (latestPurchaseCostMap) is still shown next to it for reference.
+// Worked out as of a day, so a day's Price Export stays the same tomorrow; note a price correction on any delivery now also
+// moves the exports of the following 6 days (they average it in).
+const COST_AVG_DAYS = 7;
+// Exports for days BEFORE this were sent on the old latest-delivery cost and are left exactly as sent — recalculating them would
+// flag every finished day as "changed since download". The average applies from this export date on.
+const COST_AVG_FROM = "2026-11-06";
+// The cost a day's export / price is worked out from: the 7-day average from COST_AVG_FROM, the old latest-delivery cost before it.
+function costBasisMap(asOf){
+  const d = asOf || todaySA();
+  return d >= COST_AVG_FROM ? avgCostMap(d) : latestPurchaseCostMap(d);
+}
+function avgCostMap(asOf){
+  const end = asOf || todaySA();
+  const start = new Date(end+"T00:00:00Z"); start.setUTCDate(start.getUTCDate()-(COST_AVG_DAYS-1));
+  const from = start.toISOString().slice(0,10);
+  const inWindow = DATA.purchaseCosts.filter(p=> p.baseProduct && hasConfirmedPrice(p) && !isNotReceived(p) && (p.receivedDate||"") >= from && (p.receivedDate||"") <= end);
+  const out = Object.assign({}, latestPurchaseCostMap(end)); // fallback: last known cost for anything not delivered in the window
+  const avg = weightedCostMap_(inWindow);
+  Object.keys(avg).forEach(bp=>{ out[bp] = avg[bp]; });
+  return out;
+}
+
 // ---------- Price History / price-movement alerts ----------
 // One point per day this product was actually received (weighted-average cost across every received
 // line that day, same math as weightedCostMap_ — a line with no cost logged yet can't be plotted, so it's
@@ -2143,15 +2173,17 @@ function applyCostBuffers_(pm){
 
 function sageImportComputed(date){
   const derived = itemSetupDerived();
-  const pm = applyCostBuffers_(receivedCostMap(date));
-  // Fallback for a Product Mix's ingredients only (see itemCostPerUnit above) — a plain, non-mix item
-  // is unaffected and still needs a same-day purchase cost to price at all.
-  const latestPm = applyCostBuffers_(latestPurchaseCostMap(date)); // as of that day — later deliveries must not move an earlier day's mix costs
+  // WHICH items go in a day's file is unchanged: those with a delivery received that day (a Product Mix counts when any of its
+  // ingredients was, its other ingredients filling in from the average). WHAT cost they carry is the 7-day average (avgCostMap).
+  const dayPm = applyCostBuffers_(receivedCostMap(date));
+  const avgPm = applyCostBuffers_(costBasisMap(date)); // as of that day — later deliveries must not move an earlier day's costs
+  const useAvg = date >= COST_AVG_FROM; // days exported before the switch keep the cost they were sent with
   return derived.map(it=>{
     const usedFallback = {value:false};
-    const newCost = itemCostPerUnit(it.item, pm, undefined, {latestPm, usedFallback});
+    const dayCost = itemCostPerUnit(it.item, dayPm, undefined, {latestPm: avgPm, usedFallback}); // this day's own delivery cost (for reference)
+    const newCost = dayCost !== null ? (useAvg ? itemCostPerUnit(it.item, avgPm) : dayCost) : null;
     return {
-      itemCode: it.itemCode, averageCost: newCost,
+      itemCode: it.itemCode, averageCost: newCost, dayCost,
       quantityOnHand: 0,
       item: it.item, baseProduct: it.baseProduct, purchasedOnDate: newCost !== null,
       // true only for a Product Mix priced via at least one ingredient's latest-known cost rather than
@@ -2166,7 +2198,7 @@ function sageImportComputed(date){
 // the latest known cost of each ingredient, not scoped to any one day — plus a breakdown so it's clear
 // exactly which ingredient prices it's built from, and a flag when an ingredient has no cost yet.
 function compositeMixCosts(){
-  const pm = latestPurchaseCostMap();
+  const pm = avgCostMap(); // 7-day average ingredient costs, same as the Price Export
   const names = Array.from(new Set(DATA.recipes.map(r=>r.compositeItem).filter(Boolean)));
   return names.map(compositeItem=>{
     const lines = DATA.recipes.filter(r=> r.compositeItem===compositeItem && r.ingredientItem);
@@ -2264,7 +2296,8 @@ function sellingPricesMovedOn(dateStr, suggestionRows){
     if(!dc.purchasedOnDate) return; // cost moved on D
     const r = rowByItem[dc.item];
     if(!r) return;
-    const cost = (dc.averageCost!==null && dc.averageCost!==undefined) ? dc.averageCost : null;
+    const cost = (dc.averageCost!==null && dc.averageCost!==undefined) ? dc.averageCost : null; // 7-day average (buffered) — what is sent
+    const dayCost = (dc.dayCost!==null && dc.dayCost!==undefined) ? dc.dayCost : null; // that day's delivery (buffered) — reference
     const price = formulaPriceForCost_(cost, r);
     if(price===null) return;
     const before = (quotesByItem[dc.item]||[]).filter(q=> String(q.date||"") < dateStr).sort(order);
@@ -2272,7 +2305,7 @@ function sellingPricesMovedOn(dateStr, suggestionRows){
     const prevPrice = prev ? Number(prev.price) : null;
     const jumpPct = (prevPrice!==null && prevPrice>0) ? (price-prevPrice)/prevPrice : null;
     out.push({item: dc.item, itemCode: r.itemCode, description: r.description, vatable: !!r.vatable,
-      price, prevPrice, cost, costFromLatest: !!dc.costFromLatest, marginPct: r.marginPct,
+      price, prevPrice, cost, dayCost, costFromLatest: !!dc.costFromLatest, marginPct: r.marginPct,
       jumpPct, jumpFlag: jumpPct!==null && Math.abs(jumpPct) > PRICE_JUMP_WARN_PCT});
   });
   return out.sort((a,b)=> a.item.localeCompare(b.item));
@@ -2292,9 +2325,10 @@ function pricingSuggestionsComputed(asOf){
   const windowDays = Number(plan.trendWindowDays)>0 ? Math.round(Number(plan.trendWindowDays)) : 21;
   const goodDealThreshold = Number(plan.goodDealThresholdPct)||0;
   const goodDealBonus = Number(plan.goodDealBonusPct)||0;
-  const latestPm = latestPurchaseCostMap(asOf);
+  const avgPm = costBasisMap(asOf); // 7-day average cost — what the price is worked out from (latest cost for days before the switch)
+  const lastPm = latestPurchaseCostMap(asOf); // the latest delivery's cost — shown for reference only
   // Same buffered cost map the Price Export uses, so a suggested price is worked out from exactly the Cost that goes to Sage.
-  const bufferedLatestPm = applyCostBuffers_(latestPm);
+  const bufferedAvgPm = applyCostBuffers_(avgPm);
   const trailingPm = trailingPurchaseCostMap(windowDays, asOf);
   const latestQuoteByItem = {};
   (DATA.priceQuotes||[]).forEach(q=>{
@@ -2303,10 +2337,12 @@ function pricingSuggestionsComputed(asOf){
   });
   return DATA.itemSetup.map(it=>{
     const category = effectiveCategoryFor(it);
-    const latestCost = itemCostPerUnit(it.item, latestPm); // actual cost, no wastage buffer
-    const bufferedCost = itemCostPerUnit(it.item, bufferedLatestPm); // actual cost + category wastage buffer (what exports as Cost)
+    const avgCost = itemCostPerUnit(it.item, avgPm); // 7-day average cost, no wastage buffer
+    const lastCost = itemCostPerUnit(it.item, lastPm); // latest delivery's cost, no wastage buffer (reference only)
+    const bufferedCost = itemCostPerUnit(it.item, bufferedAvgPm); // 7-day average + category wastage buffer (what exports as Cost)
     const trailingCost = itemCostPerUnit(it.item, trailingPm);
-    const costChangePct = (latestCost!==null && trailingCost!==null && trailingCost>0) ? (latestCost-trailingCost)/trailingCost : null;
+    // "good deal": the 7-day average running notably below the longer trend window
+    const costChangePct = (avgCost!==null && trailingCost!==null && trailingCost>0) ? (avgCost-trailingCost)/trailingCost : null;
     const isGoodDeal = goodDealThreshold>0 && costChangePct!==null && costChangePct <= -goodDealThreshold;
     const marginInfo = marginFor(it.item, category);
     const marginPct = Math.max(0, Math.min(0.9, marginInfo.value + (isGoodDeal ? goodDealBonus : 0)));
@@ -2332,7 +2368,7 @@ function pricingSuggestionsComputed(asOf){
     return {
       item: it.item, itemCode: it.itemCode, description: sageItemDescription(it), baseProduct: it.baseProduct, category: category || "Uncategorized",
       vatable: !!it.vatable,
-      latestCost, bufferedCost, suggestedGpPct, currentGpPct, trailingCost, costChangePct, isGoodDeal,
+      avgCost, lastCost, bufferedCost, suggestedGpPct, currentGpPct, trailingCost, costChangePct, isGoodDeal,
       marginPct, marginSource: marginInfo.source,
       minPrice, priceFloored,
       suggestedPrice, currentPrice, currentPriceDate: quote?quote.date:null, currentPriceBy: quote?quote.setBy:null,
@@ -5682,7 +5718,6 @@ function renderConfirmPrices(){
       <div><h2>Confirm Prices</h2><p>Receiving only counts quantities now. Once a delivery has been received, add or confirm its buying price here — per the unit shown under the price box (the Base Product's procurement unit in Item Setup). If a price was entered when the order was placed it's filled in for you, but nothing counts until you press Confirm. The Price Export can only be downloaded once every received delivery for its date has a confirmed price.</p></div>
       <div class="actions">
         <div class="field" style="min-width:220px;"><label>Search base product</label><input type="text" id="confirmPricesSearchInput" placeholder="e.g. Banana…" value="${esc(confirmPricesSearch)}"></div>
-        ${awaiting.length ? `<button class="btn primary" id="confirmAllPrices" title="Confirms every line shown below that has a price filled in">✓ Confirm all${cpq ? " shown" : ""} with a price</button>` : ""}
         <button class="btn small" data-goto-tab="sellingprices">Go to Price Export →</button>
       </div>
     </div>
@@ -6094,7 +6129,8 @@ function renderSellingPrices(){
       <td class="num">${r.prevPrice!==null ? money(r.prevPrice) : "—"}</td>
       <td class="num" style="font-weight:600;">${money(r.price)}</td>
       <td>${r.prevPrice===null ? chip("new","neutral") : (r.price===r.prevPrice ? chip("unchanged","neutral") : (r.price>r.prevPrice ? chip("▲ "+money(round2(r.price-r.prevPrice))+" ("+fmtNum(Math.abs(r.jumpPct)*100,0)+"%)","warn") : chip("▼ "+money(round2(r.prevPrice-r.price))+" ("+fmtNum(Math.abs(r.jumpPct)*100,0)+"%)","good")))}${r.jumpFlag ? ` ${chip("check cost","critical")}` : ""}</td>
-      <td class="num" style="${r.cost===0?'color:var(--critical);':''}">${r.cost!==null ? money(r.cost) : "—"}${r.cost===null ? ` ${chip("no cost known","warn")}` : (r.cost===0 ? ` ${chip("R0 — no price logged","critical")}` : (r.costFromLatest ? ` ${chip("latest known cost","neutral")}` : ""))}</td>
+      <td class="num" style="${r.cost===0?'color:var(--critical);':''}">${r.cost!==null ? money(r.cost) : "—"}${r.cost===null ? ` ${chip("no cost known","warn")}` : (r.cost===0 ? ` ${chip("R0 — no price logged","critical")}` : (r.costFromLatest ? ` ${chip("some ingredients not bought this day","neutral")}` : ""))}</td>
+      <td class="num helptext">${r.dayCost!==null && r.dayCost!==undefined ? money(r.dayCost) : "—"}</td>
     </tr>`).join("");
   // Sorted by the purchase date each file was for, newest first (then by when it was downloaded).
   const dlHistory = (DATA.costCsvDownloads||[]).slice().sort((a,b)=> String(b.exportDate||"").localeCompare(String(a.exportDate||"")) || (String(b.downloadedDate)+String(b.downloadedTime)).localeCompare(String(a.downloadedDate)+String(a.downloadedTime)));
@@ -6146,8 +6182,9 @@ function renderSellingPrices(){
     <tr>
       <td style="max-width:240px;">${esc(r.item)}</td>
       <td>${esc(r.category)}</td>
-      <td class="num">${r.latestCost!==null?money(r.latestCost):"—"}</td>
-      <td class="num">${r.bufferedCost!==null?money(r.bufferedCost):"—"}${(r.latestCost!==null && r.bufferedCost!==null && r.latestCost>0 && r.bufferedCost!==r.latestCost) ? `<div class="helptext">+${fmtNum((r.bufferedCost/r.latestCost-1)*100,1)}% wastage</div>` : ""}</td>
+      <td class="num helptext">${r.lastCost!==null?money(r.lastCost):"—"}</td>
+      <td class="num">${r.avgCost!==null?money(r.avgCost):"—"}</td>
+      <td class="num">${r.bufferedCost!==null?money(r.bufferedCost):"—"}${(r.avgCost!==null && r.bufferedCost!==null && r.avgCost>0 && r.bufferedCost!==r.avgCost) ? `<div class="helptext">+${fmtNum((r.bufferedCost/r.avgCost-1)*100,1)}% wastage</div>` : ""}</td>
       <td>${trendLabel(r)}</td>
       <td>
         <input class="rowinput num" data-itemmargin-input="${esc(r.item)}" value="${itemMarginVal}" data-pristine="${esc(itemMarginVal)}" placeholder="${fmtNum(r.marginPct*100,0)}" style="max-width:70px;">${marginSourceNote}
@@ -6228,12 +6265,12 @@ function renderSellingPrices(){
     </details>
     ${renderSageCheckCard_(exportDate)}
     <div class="card">
-      <div class="cardhead"><div><h3>Export for ${esc(exportDate||"—")}</h3><div class="desc">${movedRows.length} row${movedRows.length===1?"":"s"} — exactly what the download contains. Price = the formula price worked out from the Cost in this file (buffered cost + target margin, rounded up to 50c, never below the item's Min price); Cost includes the wastage buffer. Previous price = what was last sent to Sage.</div></div></div>
+      <div class="cardhead"><div><h3>Export for ${esc(exportDate||"—")}</h3><div class="desc">${movedRows.length} row${movedRows.length===1?"":"s"} — exactly what the download contains. Price = the formula price worked out from the Cost in this file (buffered cost + target margin, rounded up to 50c, never below the item's Min price); Cost = the ${COST_AVG_DAYS}-day average of confirmed delivery prices (up to and including this day), plus the wastage buffer; this day's own delivery cost is shown beside it for reference. Previous price = what was last sent to Sage.</div></div></div>
       <div class="cardbody" style="padding:0;">
         <div class="tablewrap" style="border:none;border-radius:0;max-height:420px;overflow-y:auto;">
           <table>
-            <thead><tr><th>Item code</th><th>Item</th><th class="num">Previous price</th><th class="num">New price</th><th>Change</th><th class="num">Cost</th></tr></thead>
-            <tbody>${movedTableRows || `<tr><td colspan="6" class="empty">Nothing moved on this date.</td></tr>`}</tbody>
+            <thead><tr><th>Item code</th><th>Item</th><th class="num">Previous price</th><th class="num">New price</th><th>Change</th><th class="num" title="What is sent to Sage: the ${COST_AVG_DAYS}-day average of confirmed delivery prices, plus the wastage buffer">Cost (${COST_AVG_DAYS}-day avg)</th><th class="num" title="This day's own delivery cost (plus wastage buffer) — for reference only, not sent">This day's delivery</th></tr></thead>
+            <tbody>${movedTableRows || `<tr><td colspan="7" class="empty">Nothing moved on this date.</td></tr>`}</tbody>
           </table>
         </div>
       </div>
@@ -6287,8 +6324,8 @@ function renderSellingPrices(){
       <div class="cardbody" style="padding:0;">
         <div class="tablewrap" style="border:none;border-radius:0;">
           <table>
-            <thead><tr><th>Item</th><th>Category</th><th class="num">Actual cost</th><th class="num">Buffered cost</th><th>Trend (${Number(plan.trendWindowDays)||21}d)</th><th>Margin</th><th>Min price</th><th class="num">Suggested price</th><th class="num">GP %</th><th>Last sent to Sage</th></tr></thead>
-            <tbody>${tableRows || `<tr><td colspan="10" class="empty">No items match.</td></tr>`}</tbody>
+            <thead><tr><th>Item</th><th>Category</th><th class="num" title="The latest delivery's confirmed price — for reference only">Last cost</th><th class="num" title="Average of confirmed delivery prices over the last ${COST_AVG_DAYS} days, weighted by quantity — what prices are worked out from">${COST_AVG_DAYS}-day avg cost</th><th class="num">Buffered cost</th><th>Trend (${Number(plan.trendWindowDays)||21}d)</th><th>Margin</th><th>Min price</th><th class="num">Suggested price</th><th class="num">GP %</th><th>Last sent to Sage</th></tr></thead>
+            <tbody>${tableRows || `<tr><td colspan="11" class="empty">No items match.</td></tr>`}</tbody>
           </table>
         </div>
       </div>
@@ -7987,13 +8024,8 @@ function wireTabEvents(){
       box.querySelectorAll("input").forEach(inp=> inp.addEventListener("input", ()=> pkRecalc(box)));
       pkRecalc(box);
     });
-    const confirmAll = document.getElementById("confirmAllPrices");
-    if(confirmAll) confirmAll.addEventListener("click", ()=>{
-      // only the rows currently shown (the search filter applies) — same scoping as Selling Prices' "Update all shown"
-      // lines with nothing filled in are skipped (as before); a pack box that is open but incomplete counts as "nothing filled in"
-      const ids = Array.from(document.querySelectorAll("tr[data-price-row]")).map(tr=> tr.dataset.priceRow).filter(id=> document.querySelector('.confirm-price[data-confirm-id="'+id+'"]') && awaitingPriceLines().some(p=>p.id===id));
-      submitPrices(ids);
-    });
+    // (Nov 2026) No "Confirm all with a price" button any more — Shane wants the procurement manager to check and confirm each
+    // price on its own row (data-price-confirm above), not wave a whole list through in one click.
     const cpSearch = document.getElementById("confirmPricesSearchInput");
     if(cpSearch) cpSearch.addEventListener("input", (e)=>{ confirmPricesSearch = e.target.value; render(); });
     document.querySelectorAll("[data-price-edit]").forEach(btn=>{
