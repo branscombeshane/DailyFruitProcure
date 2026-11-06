@@ -575,6 +575,7 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
 // VERSION HISTORY (newest first). The menu shows only APP_VERSION; quote it when asking for a change so the exact build is known.
+//  v2026.11.06c  — A save the server refuses because the page isn't ticked for that person now says so plainly ("You don't have access to …") instead of "check your connection". Goes with the Auth.gs that checks page access on every save (works with the old Auth.gs too).
 //  v2026.11.06b  — Security: login is now checked on the server. PINs are no longer sent to the browser, and every read and save needs a logged-in session (it ends when you log out, after 2 hours unused, or when the owner disables you or changes your role). 5 wrong PINs locks that name for 15 minutes. Users page: PINs are no longer shown — type a new one to change it. Needs the new Code.gs + Auth.gs + SageSalesPull.gs.
 //  v2026.11.06a  — Shopping List Archive: Critical / Consider Buying / OK / Overstocked tiles at the top for the picked day; click one to filter the day's table to that status (click again to clear).
 //  v2026.11.05b  — Price Export: ONE "Push to Daily Fruit – Veg + Pyroca 79" button instead of one per company (a second button was a step someone could forget). Both companies are previewed together, each on its own tab with its own details, and one Push sends the prices to both, one after the other.
@@ -605,7 +606,7 @@ function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 //  v2026.10.26b  — Market Product Mapping: pack size calculator (works out Pack size + Receiving pack)
 //  v2026.10.26a  — footer shows only the version number (this list replaces the long on-screen text)
 //  Everything below was the on-screen build text up to 2026-10-23, newest first: Market vs Receiving audit + optional Receiving pack in the mapping | Price Export: only changed costs flag a day as outdated, not margin/min-price changes | GP Watch table: Short of target column + sticky product name | Phone menu button | Product GP Watch (from the Item Sales reports) | Made-to-order items can be removed from the stock take | Received-date grouping, changed-since-download check, queued download saves, lighter saves, stock take completeness checks, tick-box page access
-const APP_VERSION = "v2026.11.06b";
+const APP_VERSION = "v2026.11.06c";
 const APP_BUILD = APP_VERSION; // kept as an alias in case anything else reads it
 
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
@@ -2462,7 +2463,7 @@ async function persist(successMsg, changedKeys){
       saveConflict = result.error || "This data changed elsewhere since you loaded it — reload before saving again.";
       toast("Not saved — someone else's changes would be overwritten");
     } else {
-      toast("Could not save" + (result && result.error ? (": " + result.error) : "") + " — check your connection and try again");
+      toast(result && result.denied ? String(result.error) : ("Could not save" + (result && result.error ? (": " + result.error) : "") + " — check your connection and try again")); // denied = the server says this page isn't ticked for you
     }
   }catch(e){
     toast("Could not save — check your connection and try again");
@@ -2512,7 +2513,7 @@ async function persistPurchaseAction(payload, successMsg, onSuccess){
       if(keep!==false) toast(successMsg || "Saved");
       ok = keep!==false;
     } else {
-      toast("Could not save" + (result && result.error ? (": " + result.error) : "") + " — check your connection and try again");
+      toast(result && result.denied ? String(result.error) : ("Could not save" + (result && result.error ? (": " + result.error) : "") + " — check your connection and try again")); // denied = the server says this page isn't ticked for you
     }
   }catch(e){
     toast("Could not save — check your connection and try again");
