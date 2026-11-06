@@ -575,6 +575,7 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
 // VERSION HISTORY (newest first). The menu shows only APP_VERSION; quote it when asking for a change so the exact build is known.
+//  v2026.11.06e  — Margin protection: the cost used (sent to Sage and priced from) is now the HIGHER of the latest delivery cost and the 7-day average. A cost rise goes straight into the price; a fall comes through gradually. Price Export shows Last cost, 7-day avg and which one is used.
 //  v2026.11.06d  — Confirm Prices: the "Confirm all with a price" button is gone — each price is confirmed on its own row, so every one gets checked. Costs now use the 7-DAY AVERAGE of confirmed delivery prices (weighted by quantity) instead of the latest delivery: the cost sent to Sage, the selling prices worked out from it, Product Mixes and GP Watch. A product with no delivery in the last 7 days keeps its last known cost. The latest delivery cost is still shown beside it on Price Export ("Last cost" / "This day's delivery"). Which items go in a day's export is unchanged (those delivered that day).
 //  v2026.11.06c  — A save the server refuses because the page isn't ticked for that person now says so plainly ("You don't have access to …") instead of "check your connection". Goes with the Auth.gs that checks page access on every save (works with the old Auth.gs too).
 //  v2026.11.06b  — Security: login is now checked on the server. PINs are no longer sent to the browser, and every read and save needs a logged-in session (it ends when you log out, after 2 hours unused, or when the owner disables you or changes your role). 5 wrong PINs locks that name for 15 minutes. Users page: PINs are no longer shown — type a new one to change it. Needs the new Code.gs + Auth.gs + SageSalesPull.gs.
@@ -607,7 +608,7 @@ function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 //  v2026.10.26b  — Market Product Mapping: pack size calculator (works out Pack size + Receiving pack)
 //  v2026.10.26a  — footer shows only the version number (this list replaces the long on-screen text)
 //  Everything below was the on-screen build text up to 2026-10-23, newest first: Market vs Receiving audit + optional Receiving pack in the mapping | Price Export: only changed costs flag a day as outdated, not margin/min-price changes | GP Watch table: Short of target column + sticky product name | Phone menu button | Product GP Watch (from the Item Sales reports) | Made-to-order items can be removed from the stock take | Received-date grouping, changed-since-download check, queued download saves, lighter saves, stock take completeness checks, tick-box page access
-const APP_VERSION = "v2026.11.06d";
+const APP_VERSION = "v2026.11.06e";
 const APP_BUILD = APP_VERSION; // kept as an alias in case anything else reads it
 
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
@@ -1444,7 +1445,7 @@ function gpPeriodDates_(allDates){
   return dates.filter(d=> d==="latest" || d>=f);
 }
 function gpTodayCosts_(){
-  const pm = applyCostBuffers_(avgCostMap()); // the same 7-day average cost the Price Export sends to Sage
+  const pm = applyCostBuffers_(costBasisMap()); // the same cost the Price Export sends to Sage (higher of latest and 7-day average)
   const m = {};
   DATA.itemSetup.forEach(it=>{ const c = itemCostPerUnit(it.item, pm); if(c!==null && c>0) m[it.item] = c; });
   return m;
@@ -2027,17 +2028,25 @@ function latestPurchaseCostMap(asOf){
 // cost used everywhere — the cost sent to Sage, the selling price worked out from it, Product Mixes and GP Watch — is the
 // quantity-weighted average of CONFIRMED prices on deliveries RECEIVED in the COST_AVG_DAYS days up to and including `asOf`
 // (default today). A base product with no confirmed delivery in that window falls back to its last known cost (so nothing
-// suddenly has no cost). The latest delivery's own cost (latestPurchaseCostMap) is still shown next to it for reference.
+// suddenly has no cost). The cost actually USED is the higher of this and the latest delivery's cost — see costBasisMap.
 // Worked out as of a day, so a day's Price Export stays the same tomorrow; note a price correction on any delivery now also
 // moves the exports of the following 6 days (they average it in).
 const COST_AVG_DAYS = 7;
 // Exports for days BEFORE this were sent on the old latest-delivery cost and are left exactly as sent — recalculating them would
 // flag every finished day as "changed since download". The average applies from this export date on.
 const COST_AVG_FROM = "2026-11-06";
-// The cost a day's export / price is worked out from: the 7-day average from COST_AVG_FROM, the old latest-delivery cost before it.
+// The cost a day's export / price is worked out from (MARGIN PROTECTION, Shane 6 Nov 2026): the HIGHER of the latest delivery's
+// cost and the 7-day average. A cost rise goes straight into the price (never selling new, dearer stock on an old cheaper
+// average); a cost fall comes through gradually via the average (no whipsaw down). Days before COST_AVG_FROM keep the old
+// latest-delivery cost they were exported with.
 function costBasisMap(asOf){
   const d = asOf || todaySA();
-  return d >= COST_AVG_FROM ? avgCostMap(d) : latestPurchaseCostMap(d);
+  const last = latestPurchaseCostMap(d);
+  if(d < COST_AVG_FROM) return last;
+  const avg = avgCostMap(d), out = {};
+  Object.keys(avg).forEach(bp=>{ out[bp] = (last[bp]!==undefined && last[bp] > avg[bp]) ? last[bp] : avg[bp]; });
+  Object.keys(last).forEach(bp=>{ if(out[bp]===undefined) out[bp] = last[bp]; });
+  return out;
 }
 function avgCostMap(asOf){
   const end = asOf || todaySA();
@@ -2198,7 +2207,7 @@ function sageImportComputed(date){
 // the latest known cost of each ingredient, not scoped to any one day — plus a breakdown so it's clear
 // exactly which ingredient prices it's built from, and a flag when an ingredient has no cost yet.
 function compositeMixCosts(){
-  const pm = avgCostMap(); // 7-day average ingredient costs, same as the Price Export
+  const pm = costBasisMap(); // ingredient costs as the Price Export uses them (higher of latest and 7-day average)
   const names = Array.from(new Set(DATA.recipes.map(r=>r.compositeItem).filter(Boolean)));
   return names.map(compositeItem=>{
     const lines = DATA.recipes.filter(r=> r.compositeItem===compositeItem && r.ingredientItem);
@@ -2325,10 +2334,12 @@ function pricingSuggestionsComputed(asOf){
   const windowDays = Number(plan.trendWindowDays)>0 ? Math.round(Number(plan.trendWindowDays)) : 21;
   const goodDealThreshold = Number(plan.goodDealThresholdPct)||0;
   const goodDealBonus = Number(plan.goodDealBonusPct)||0;
-  const avgPm = costBasisMap(asOf); // 7-day average cost — what the price is worked out from (latest cost for days before the switch)
-  const lastPm = latestPurchaseCostMap(asOf); // the latest delivery's cost — shown for reference only
+  const useAvg = (asOf || todaySA()) >= COST_AVG_FROM;
+  const lastPm = latestPurchaseCostMap(asOf); // the latest delivery's cost
+  const avgPm = useAvg ? avgCostMap(asOf) : lastPm; // the 7-day average (shown for reference)
+  const basisPm = costBasisMap(asOf); // what the price is worked out from: the higher of the two
   // Same buffered cost map the Price Export uses, so a suggested price is worked out from exactly the Cost that goes to Sage.
-  const bufferedAvgPm = applyCostBuffers_(avgPm);
+  const bufferedBasisPm = applyCostBuffers_(basisPm);
   const trailingPm = trailingPurchaseCostMap(windowDays, asOf);
   const latestQuoteByItem = {};
   (DATA.priceQuotes||[]).forEach(q=>{
@@ -2338,11 +2349,13 @@ function pricingSuggestionsComputed(asOf){
   return DATA.itemSetup.map(it=>{
     const category = effectiveCategoryFor(it);
     const avgCost = itemCostPerUnit(it.item, avgPm); // 7-day average cost, no wastage buffer
-    const lastCost = itemCostPerUnit(it.item, lastPm); // latest delivery's cost, no wastage buffer (reference only)
-    const bufferedCost = itemCostPerUnit(it.item, bufferedAvgPm); // 7-day average + category wastage buffer (what exports as Cost)
+    const lastCost = itemCostPerUnit(it.item, lastPm); // latest delivery's cost, no wastage buffer
+    const usedCost = itemCostPerUnit(it.item, basisPm); // the higher of the two, no wastage buffer
+    const usesLast = useAvg && usedCost!==null && lastCost!==null && avgCost!==null && lastCost > avgCost;
+    const bufferedCost = itemCostPerUnit(it.item, bufferedBasisPm); // cost used + category wastage buffer (what exports as Cost)
     const trailingCost = itemCostPerUnit(it.item, trailingPm);
-    // "good deal": the 7-day average running notably below the longer trend window
-    const costChangePct = (avgCost!==null && trailingCost!==null && trailingCost>0) ? (avgCost-trailingCost)/trailingCost : null;
+    // "good deal": the cost used (so both the latest and the average) running notably below the longer trend window
+    const costChangePct = (usedCost!==null && trailingCost!==null && trailingCost>0) ? (usedCost-trailingCost)/trailingCost : null;
     const isGoodDeal = goodDealThreshold>0 && costChangePct!==null && costChangePct <= -goodDealThreshold;
     const marginInfo = marginFor(it.item, category);
     const marginPct = Math.max(0, Math.min(0.9, marginInfo.value + (isGoodDeal ? goodDealBonus : 0)));
@@ -2368,7 +2381,7 @@ function pricingSuggestionsComputed(asOf){
     return {
       item: it.item, itemCode: it.itemCode, description: sageItemDescription(it), baseProduct: it.baseProduct, category: category || "Uncategorized",
       vatable: !!it.vatable,
-      avgCost, lastCost, bufferedCost, suggestedGpPct, currentGpPct, trailingCost, costChangePct, isGoodDeal,
+      avgCost, lastCost, usedCost, usesLast, bufferedCost, suggestedGpPct, currentGpPct, trailingCost, costChangePct, isGoodDeal,
       marginPct, marginSource: marginInfo.source,
       minPrice, priceFloored,
       suggestedPrice, currentPrice, currentPriceDate: quote?quote.date:null, currentPriceBy: quote?quote.setBy:null,
@@ -6184,7 +6197,7 @@ function renderSellingPrices(){
       <td>${esc(r.category)}</td>
       <td class="num helptext">${r.lastCost!==null?money(r.lastCost):"—"}</td>
       <td class="num">${r.avgCost!==null?money(r.avgCost):"—"}</td>
-      <td class="num">${r.bufferedCost!==null?money(r.bufferedCost):"—"}${(r.avgCost!==null && r.bufferedCost!==null && r.avgCost>0 && r.bufferedCost!==r.avgCost) ? `<div class="helptext">+${fmtNum((r.bufferedCost/r.avgCost-1)*100,1)}% wastage</div>` : ""}</td>
+      <td class="num">${r.bufferedCost!==null?money(r.bufferedCost):"—"}<div class="helptext">${r.usesLast ? "last cost (higher)" : "7-day avg"}${(r.usedCost!==null && r.bufferedCost!==null && r.usedCost>0 && r.bufferedCost!==r.usedCost) ? ` +${fmtNum((r.bufferedCost/r.usedCost-1)*100,1)}% wastage` : ""}</div></td>
       <td>${trendLabel(r)}</td>
       <td>
         <input class="rowinput num" data-itemmargin-input="${esc(r.item)}" value="${itemMarginVal}" data-pristine="${esc(itemMarginVal)}" placeholder="${fmtNum(r.marginPct*100,0)}" style="max-width:70px;">${marginSourceNote}
@@ -6265,11 +6278,11 @@ function renderSellingPrices(){
     </details>
     ${renderSageCheckCard_(exportDate)}
     <div class="card">
-      <div class="cardhead"><div><h3>Export for ${esc(exportDate||"—")}</h3><div class="desc">${movedRows.length} row${movedRows.length===1?"":"s"} — exactly what the download contains. Price = the formula price worked out from the Cost in this file (buffered cost + target margin, rounded up to 50c, never below the item's Min price); Cost = the ${COST_AVG_DAYS}-day average of confirmed delivery prices (up to and including this day), plus the wastage buffer; this day's own delivery cost is shown beside it for reference. Previous price = what was last sent to Sage.</div></div></div>
+      <div class="cardhead"><div><h3>Export for ${esc(exportDate||"—")}</h3><div class="desc">${movedRows.length} row${movedRows.length===1?"":"s"} — exactly what the download contains. Price = the formula price worked out from the Cost in this file (buffered cost + target margin, rounded up to 50c, never below the item's Min price); Cost = the higher of the latest delivery cost and the ${COST_AVG_DAYS}-day average of confirmed delivery prices (up to and including this day), plus the wastage buffer — a rise is passed on at once, a fall comes through gradually; this day's own delivery cost is shown beside it for reference. Previous price = what was last sent to Sage.</div></div></div>
       <div class="cardbody" style="padding:0;">
         <div class="tablewrap" style="border:none;border-radius:0;max-height:420px;overflow-y:auto;">
           <table>
-            <thead><tr><th>Item code</th><th>Item</th><th class="num">Previous price</th><th class="num">New price</th><th>Change</th><th class="num" title="What is sent to Sage: the ${COST_AVG_DAYS}-day average of confirmed delivery prices, plus the wastage buffer">Cost (${COST_AVG_DAYS}-day avg)</th><th class="num" title="This day's own delivery cost (plus wastage buffer) — for reference only, not sent">This day's delivery</th></tr></thead>
+            <thead><tr><th>Item code</th><th>Item</th><th class="num">Previous price</th><th class="num">New price</th><th>Change</th><th class="num" title="What is sent to Sage: the higher of the latest delivery cost and the ${COST_AVG_DAYS}-day average of confirmed delivery prices, plus the wastage buffer">Cost</th><th class="num" title="This day's own delivery cost (plus wastage buffer) — for reference only, not sent">This day's delivery</th></tr></thead>
             <tbody>${movedTableRows || `<tr><td colspan="7" class="empty">Nothing moved on this date.</td></tr>`}</tbody>
           </table>
         </div>
@@ -6324,7 +6337,7 @@ function renderSellingPrices(){
       <div class="cardbody" style="padding:0;">
         <div class="tablewrap" style="border:none;border-radius:0;">
           <table>
-            <thead><tr><th>Item</th><th>Category</th><th class="num" title="The latest delivery's confirmed price — for reference only">Last cost</th><th class="num" title="Average of confirmed delivery prices over the last ${COST_AVG_DAYS} days, weighted by quantity — what prices are worked out from">${COST_AVG_DAYS}-day avg cost</th><th class="num">Buffered cost</th><th>Trend (${Number(plan.trendWindowDays)||21}d)</th><th>Margin</th><th>Min price</th><th class="num">Suggested price</th><th class="num">GP %</th><th>Last sent to Sage</th></tr></thead>
+            <thead><tr><th>Item</th><th>Category</th><th class="num" title="The latest delivery's confirmed price — for reference only">Last cost</th><th class="num" title="Average of confirmed delivery prices over the last ${COST_AVG_DAYS} days, weighted by quantity">${COST_AVG_DAYS}-day avg cost</th><th class="num" title="What the price is worked out from and what goes to Sage: the HIGHER of the last cost and the ${COST_AVG_DAYS}-day average, plus the wastage buffer">Cost used</th><th>Trend (${Number(plan.trendWindowDays)||21}d)</th><th>Margin</th><th>Min price</th><th class="num">Suggested price</th><th class="num">GP %</th><th>Last sent to Sage</th></tr></thead>
             <tbody>${tableRows || `<tr><td colspan="11" class="empty">No items match.</td></tr>`}</tbody>
           </table>
         </div>
