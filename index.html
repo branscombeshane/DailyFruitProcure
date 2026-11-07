@@ -576,6 +576,7 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
 // VERSION HISTORY (newest first). The menu shows only APP_VERSION; quote it when asking for a change so the exact build is known.
+//  v2026.11.07b  — From 08 Nov, Market vs Receiving counts only deliveries whose supplier is JHB MARKET or PTA MARKET (farm and other suppliers are left out). Everything before 08 Nov is left as it was.
 //  v2026.11.07a  — Supplier is now required on every buy (Shopping List, Quick Buy, Receiving "received, no order on file"): pick it from the supplier list, or Other (not listed) and type the name. The list is kept on Purchase Costs > Suppliers, which also suggests names already used on recent buys. Needs the new Code.gs + Auth.gs.
 //  v2026.11.06f  — "Changed since download" fixes itself: an item sent on an earlier day (last 14 days) whose cost has since been corrected, or that was in a day's file but never reached Sage (e.g. held back by the 50% block), is added to the next day's export at its current cost and price (marked "correcting <day>"). An old day's warning also clears once a later day has sent the item. Pushing / downloading that day puts Sage right and clears the earlier day's warning.
 //  v2026.11.06e  — Margin protection: the cost used (sent to Sage and priced from) is now the HIGHER of the latest delivery cost and the 7-day average. A cost rise goes straight into the price; a fall comes through gradually. Price Export shows Last cost, 7-day avg and which one is used.
@@ -611,7 +612,7 @@ function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 //  v2026.10.26b  — Market Product Mapping: pack size calculator (works out Pack size + Receiving pack)
 //  v2026.10.26a  — footer shows only the version number (this list replaces the long on-screen text)
 //  Everything below was the on-screen build text up to 2026-10-23, newest first: Market vs Receiving audit + optional Receiving pack in the mapping | Price Export: only changed costs flag a day as outdated, not margin/min-price changes | GP Watch table: Short of target column + sticky product name | Phone menu button | Product GP Watch (from the Item Sales reports) | Made-to-order items can be removed from the stock take | Received-date grouping, changed-since-download check, queued download saves, lighter saves, stock take completeness checks, tick-box page access
-const APP_VERSION = "v2026.11.07a";
+const APP_VERSION = "v2026.11.07b";
 const APP_BUILD = APP_VERSION; // kept as an alias in case anything else reads it
 
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
@@ -1630,6 +1631,7 @@ function maCompute_(){
   });
   (DATA.purchaseCosts||[]).forEach(p=>{
     if(!p.baseProduct) return;
+    if(!isMarketReceipt_(p)) return; // only stock bought at JHB / PTA market (see marketOfSupplier_) — farm and other deliveries aren't on a statement
     if(isReceived(p)){
       const c = cells[maReceiptDay_(p)+"|"+p.baseProduct]; if(!c) return;
       const q = Number(p.receivedQty)||0; if(!q) return;
@@ -1646,9 +1648,9 @@ function maCompute_(){
     const unitPrice = c.market>0 ? c.total/c.market : 0;
     const shortUnits = diff < -0.005 ? -diff : 0;
     const nd = new Date(c.date+"T00:00:00Z"); nd.setUTCDate(nd.getUTCDate()+1); const nextDay = nd.toISOString().slice(0,10);
-    const nextDayQty = (DATA.purchaseCosts||[]).reduce((a,p)=> a + ((p.baseProduct===c.baseProduct && maReceiptDay_(p)===nextDay) ? (Number(p.receivedQty)||0) : 0), 0);
+    const nextDayQty = (DATA.purchaseCosts||[]).reduce((a,p)=> a + ((p.baseProduct===c.baseProduct && maReceiptDay_(p)===nextDay && isMarketReceipt_(p)) ? (Number(p.receivedQty)||0) : 0), 0);
     // Tickets booked in LATER than this statement day (within 14 days) that nobody has allocated yet — the owner can pull one onto this day.
-    const cands = (status==="short") ? (DATA.purchaseCosts||[]).filter(p=> p.baseProduct===c.baseProduct && p.receivedDate && !p.auditDate && !p.notReceivedDate && (Number(p.receivedQty)||0)>0 && p.receivedDate > c.date && p.receivedDate <= maAddDays_(c.date,14))
+    const cands = (status==="short") ? (DATA.purchaseCosts||[]).filter(p=> p.baseProduct===c.baseProduct && isMarketReceipt_(p) && p.receivedDate && !p.auditDate && !p.notReceivedDate && (Number(p.receivedQty)||0)>0 && p.receivedDate > c.date && p.receivedDate <= maAddDays_(c.date,14))
       .map(p=>({id:p.id, qty:Number(p.receivedQty)||0, ordered:Number(p.qty)||0, orderDate:p.date||"", receivedDate:p.receivedDate, receivedTime:p.receivedTime||"", by:p.receivedBy||"", supplier:p.supplier||"", fits:Math.abs((Number(p.receivedQty)||0)-shortUnits)<0.005, early:!!p.date && p.date<=c.date}))
       .sort((a,b)=> (b.fits-a.fits) || (b.early-a.early) || a.receivedDate.localeCompare(b.receivedDate)) : [];
     return Object.assign(c, {cands, diff, status, kind: status==="short" ? (c.received<=0.005 ? "none" : "partial") : "", nextDayQty, shortUnits, shortPct: c.market>0 ? shortUnits/c.market : 0, shortRand: shortUnits*unitPrice, unitPrice});
@@ -1707,7 +1709,7 @@ function renderMarketAudit(){
   const unmappedCard = (maShowUnmapped && c.unmapped.length) ? `<div class="card"><div class="cardhead"><div><h3>Statement lines that can't be compared</h3><div class="desc">These market lines have no Base Product or no pack size in Market Product Mapping, so there is nothing to compare Receiving against. Fix them there and they join the audit.</div></div><button class="btn small" data-goto-tab="marketmapping">Market Product Mapping →</button></div>
       <div class="cardbody" style="padding:0;"><div class="tablewrap" style="border:none;max-height:360px;overflow-y:auto;"><table><thead><tr><th>Market</th><th>Commodity</th><th>Why</th><th class="num">Lines</th><th class="num">Packs</th><th class="num">Total</th></tr></thead><tbody>${c.unmapped.map(u=>`<tr><td>${esc(u.market||"")}</td><td>${esc(u.commodity)}</td><td>${esc(u.why)}</td><td class="num">${u.lines}</td><td class="num">${fmtNum(u.qty,u.qty%1?2:0)}</td><td class="num">${money(u.total)}</td></tr>`).join("")}</tbody></table></div></div></div>` : "";
   return `
-    <div class="pagehead"><div><h2>Market vs Receiving</h2><p>Checks that the stock bought at the market actually reaches the factory. Each market statement day and product is compared with what Receiving booked in that same day. Surveillance only — nothing here is visible to, or sent to, anyone but owners.</p></div></div>
+    <div class="pagehead"><div><h2>Market vs Receiving</h2><p><b>From ${shortDayLabel(MA_SUPPLIER_RULE_FROM)} only deliveries with supplier JHB MARKET or PTA MARKET count</b>; farm and other suppliers' deliveries are left out. Earlier days are left as they were (every delivery counted). Checks that the stock bought at the market actually reaches the factory. Each market statement day and product is compared with what Receiving booked in that same day. Surveillance only — nothing here is visible to, or sent to, anyone but owners.</p></div></div>
     <div class="card"><div class="cardbody" style="display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap;">
       <div class="field" style="min-width:170px;"><label>Period</label>${sel("maPeriodSel",[["7","Last 7 days"],["14","Last 14 days"],["30","Last 30 days"],["all","Everything imported"]],maPeriod)}</div>
       <span class="helptext">${c.dates.length ? c.dates.length+" statement day"+(c.dates.length===1?"":"s")+" in view ("+esc(c.dates[0])+(c.dates.length>1?" to "+esc(c.dates[c.dates.length-1]):"")+"). " : "No market statements in this period. "}Quantities are statement packs × the pack size in Market Product Mapping (or its optional Receiving pack, when Receiving counts the product differently from how it is priced), compared with all receipts of that product on the statement date.</span></div></div>
@@ -2011,6 +2013,22 @@ function supplierPickerHtml_(current, opts){
     <input type="text" class="sup-other" placeholder="Supplier name*" value="${isOther?esc(cur):""}" style="${st}${isOther?"":"display:none;"}">
   </span>`;
 }
+// Which market a supplier is: "JHB", "PTA" or "" (not market). Only JHB MARKET and PTA MARKET count (any capitals/spacing) — the
+// agents are not suppliers; they show on the market statement itself. Market vs Receiving only counts deliveries from these two
+// (Shane, 7 Nov 2026).
+const SUPPLIER_MARKET_BUILTIN = {jhbmarket:"JHB", ptamarket:"PTA"};
+// Going forward only (Shane): deliveries booked from this day on. Everything before it is left exactly as it was — supplier names
+// then were too unreliable (blank on ~1 in 10 lines, typos, agents' names) to tell market stock apart, so those days keep counting
+// every delivery.
+const MA_SUPPLIER_RULE_FROM = "2026-11-08";
+function marketOfSupplier_(name){
+  return SUPPLIER_MARKET_BUILTIN[supplierKey_(name)] || "";
+}
+function isMarketReceipt_(p){
+  const day = String(p && (p.auditDate || p.receivedDate || p.date) || "");
+  if(day < MA_SUPPLIER_RULE_FROM) return true; // see MA_SUPPLIER_RULE_FROM
+  return !!marketOfSupplier_(p && p.supplier);
+}
 // Reads the picker inside `root`: {value} or {error}.
 function readSupplierPicker_(root){
   const sel = root ? root.querySelector(".sup-select") : null;
@@ -2051,7 +2069,8 @@ function renderSuppliersCard_(){
   const open = suppliersCardOpen===null ? !all.length : suppliersCardOpen;
   const rows = all.map(s=>{
     const off = isSupplierHidden_(s);
-    return `<tr${off?' style="opacity:.55;"':''}><td>${esc(s.name)}${off?" "+chip("hidden","neutral"):""}</td>
+    const mk = marketOfSupplier_(s.name);
+    return `<tr${off?' style="opacity:.55;"':''}><td>${esc(s.name)}${off?" "+chip("hidden","neutral"):""}${mk?` <span class="helptext" title="Counted on Market vs Receiving">· ${mk} market</span>`:""}</td>
       <td><button class="btn small" data-sup-toggle="${esc(s.name)}" title="${off?"Show it in the supplier dropdowns again":"Keep it on file but leave it out of the dropdowns"}">${off?"Show":"Hide"}</button></td>
       <td><button class="delbtn" data-sup-del="${esc(s.name)}" title="Remove from the list (past buys keep their supplier)">✕</button></td></tr>`;
   }).join("");
@@ -2061,7 +2080,7 @@ function renderSuppliersCard_(){
   return `<details class="card" id="suppliersCard" ${open?"open":""}>
     <summary style="cursor:pointer;padding:14px 18px;font-weight:600;">Suppliers <span class="helptext" style="font-weight:400;">— ${supplierList_().length} in the dropdowns${all.length ? "" : " · the list is empty, so buyers can only pick Other until it is set up"}</span></summary>
     <div class="cardbody">
-      <p class="helptext" style="margin-top:0;">Every buy (Shopping List, Quick Buy, and Receiving's "received, no order on file") must pick a supplier from this list, or <b>Other (not listed)</b> and type the name. A typed name that matches one here apart from capitals or spaces is saved under the listed spelling. Hiding a supplier keeps it on file but out of the dropdowns; removing it never changes past buys.</p>
+      <p class="helptext" style="margin-top:0;">Every buy (Shopping List, Quick Buy, and Receiving's "received, no order on file") must pick a supplier from this list, or <b>Other (not listed)</b> and type the name. A typed name that matches one here apart from capitals or spaces is saved under the listed spelling. Hiding a supplier keeps it on file but out of the dropdowns; removing it never changes past buys. Market vs Receiving counts deliveries from <b>JHB MARKET</b> and <b>PTA MARKET</b> only.</p>
       ${supplierListOnServer_ ? "" : `<div class="banner critical">⛔ The server (Code.gs) hasn't been updated for the supplier list yet, so it can't be saved. Deploy the new Code.gs and Auth.gs as a new version, then reload. Until then buyers pick <b>Other</b> and type the supplier.</div>`}
       <div class="formgrid" style="align-items:end;${supplierListOnServer_?"":"opacity:.5;pointer-events:none;"}">
         <div class="field"><label>Add a supplier</label><input type="text" id="newSupplierName" placeholder="e.g. JHB Market" data-pristine=""></div>
