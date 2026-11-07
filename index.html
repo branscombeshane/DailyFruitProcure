@@ -413,7 +413,7 @@ function emptyDataShape(){
     // the cold-start fallback, never something that overwrites a value he's already set.
     pricingPlan: {defaultMarginPct:0.32, goodDealThresholdPct:0.10, goodDealBonusPct:0.05, trendWindowDays:21},
     categoryMarginPct: {"Eggs":0.30, "Herbs":0.35, "Mixes":0.35}, itemMarginPct: {}, itemMinPrice: {}, priceQuotes: [],
-    palletTallyResets: [], palletTallyArchive: [], costCsvDownloads: [],
+    palletTallyResets: [], palletTallyArchive: [], costCsvDownloads: [], suppliers: [],
   };
 }
 
@@ -454,6 +454,7 @@ function applyDataDefaults(d){
   if(!d.contractWatch) d.contractWatch = {}; // backward-compatible default: Contract GP Watch settings (minGp, and "off|company|list" flags for lists not watched)
   if(!d.stockTakeExempt) d.stockTakeExempt = {}; // backward-compatible default: base products NOT stock counted (made to order) — left out of Stock Take, the completeness checks and the Shopping List
   if(!d.productCeilings) d.productCeilings = {}; // backward-compatible default: per-product shelf-life hold ceilings (no cap when unset)
+  if(!d.suppliers) d.suppliers = []; // the maintained supplier list (Nov 2026) — Purchase Costs > Suppliers
   if(!d.categories) d.categories = []; // backward-compatible default for backups predating explicit category management (name + hidden flag)
   if(!d.users) d.users = []; // PINs never come to the browser; login is checked on the server (Auth.gs)
   if(d.syncVersion===undefined) d.syncVersion = null; // backward-compatible default for backups/backends predating the two-tabs-open safety net
@@ -575,6 +576,7 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
 // VERSION HISTORY (newest first). The menu shows only APP_VERSION; quote it when asking for a change so the exact build is known.
+//  v2026.11.07a  — Supplier is now required on every buy (Shopping List, Quick Buy, Receiving "received, no order on file"): pick it from the supplier list, or Other (not listed) and type the name. The list is kept on Purchase Costs > Suppliers, which also suggests names already used on recent buys. Needs the new Code.gs + Auth.gs.
 //  v2026.11.06f  — "Changed since download" fixes itself: an item sent on an earlier day (last 14 days) whose cost has since been corrected, or that was in a day's file but never reached Sage (e.g. held back by the 50% block), is added to the next day's export at its current cost and price (marked "correcting <day>"). An old day's warning also clears once a later day has sent the item. Pushing / downloading that day puts Sage right and clears the earlier day's warning.
 //  v2026.11.06e  — Margin protection: the cost used (sent to Sage and priced from) is now the HIGHER of the latest delivery cost and the 7-day average. A cost rise goes straight into the price; a fall comes through gradually. Price Export shows Last cost, 7-day avg and which one is used.
 //  v2026.11.06d  — Confirm Prices: the "Confirm all with a price" button is gone — each price is confirmed on its own row, so every one gets checked. Costs now use the 7-DAY AVERAGE of confirmed delivery prices (weighted by quantity) instead of the latest delivery: the cost sent to Sage, the selling prices worked out from it, Product Mixes and GP Watch. A product with no delivery in the last 7 days keeps its last known cost. The latest delivery cost is still shown beside it on Price Export ("Last cost" / "This day's delivery"). Which items go in a day's export is unchanged (those delivered that day).
@@ -609,7 +611,7 @@ function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 //  v2026.10.26b  — Market Product Mapping: pack size calculator (works out Pack size + Receiving pack)
 //  v2026.10.26a  — footer shows only the version number (this list replaces the long on-screen text)
 //  Everything below was the on-screen build text up to 2026-10-23, newest first: Market vs Receiving audit + optional Receiving pack in the mapping | Price Export: only changed costs flag a day as outdated, not margin/min-price changes | GP Watch table: Short of target column + sticky product name | Phone menu button | Product GP Watch (from the Item Sales reports) | Made-to-order items can be removed from the stock take | Received-date grouping, changed-since-download check, queued download saves, lighter saves, stock take completeness checks, tick-box page access
-const APP_VERSION = "v2026.11.06f";
+const APP_VERSION = "v2026.11.07a";
 const APP_BUILD = APP_VERSION; // kept as an alias in case anything else reads it
 
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
@@ -894,6 +896,8 @@ const ROLE_TABS = {
 // refresh silently; something IS dirty -> only that tab shows the banner, and it clears itself the very
 // next poll once the edit is saved or reverted, since this is re-evaluated every 20s, not just once.
 function hasUnsavedInlineEdit(){
+  for(const el of document.querySelectorAll(".sup-select")){ if(el.value !== (el.dataset.initial||"")) return true; }
+  for(const el of document.querySelectorAll(".sup-other")){ if(el.style.display!=="none" && el.value.trim()) return true; }
   if(shoppingBuyEditing.size > 0 || shoppingIssueEditing.size > 0 || quickBuySelected !== null) return true;
   if(currentTab==="receiving"){
     if(receivingEditing.size > 0 || receivingNotReceivedEditing.size > 0) return true;
@@ -1968,6 +1972,110 @@ function awaitingPriceLines(){
     .slice().sort((a,b)=> (a.receivedDate||"").localeCompare(b.receivedDate||"") || String(a.receivedTime||"").localeCompare(String(b.receivedTime||"")) || a.baseProduct.localeCompare(b.baseProduct));
 }
 // The unit a price is "per" — the base product's procurement unit from Item Setup (what Receiving counts in).
+// ---- Suppliers (Shane, 7 Nov 2026) ----
+// Every logged buy must name its supplier, picked from a maintained list (Purchase Costs > Suppliers) or, for one not on it,
+// "Other (not listed)…" plus the name typed in. Before this the supplier was free text and often left blank, which gave 228
+// spellings for a few dozen real suppliers (Fineliving Feeds alone ~10 ways). A typed name that matches a listed one apart from
+// capitals/spaces/punctuation snaps to the listed spelling. Shopping List buy row, Quick Buy, and Receiving's "received, no order
+// on file" all use the same picker; the server refuses a logged buy with no supplier (Code.gs, logPurchase).
+const SUPPLIER_OTHER = "__other__";
+function isSupplierHidden_(s){ return !!s && (s.hidden===true || String(s.hidden||"").toLowerCase()==="yes"); }
+function supplierKey_(n){ return String(n||"").toLowerCase().replace(/[^a-z0-9]/g,""); }
+function supplierList_(){
+  return (DATA.suppliers||[]).filter(s=> s && String(s.name||"").trim() && !isSupplierHidden_(s)).map(s=> String(s.name).trim()).sort((a,b)=> a.localeCompare(b));
+}
+// The listed spelling of a typed name (any listed supplier, hidden ones too), or null.
+function matchSupplier_(typed){
+  const k = supplierKey_(typed); if(!k) return null;
+  const hit = (DATA.suppliers||[]).find(s=> s && supplierKey_(s.name)===k);
+  return hit ? String(hit.name).trim() : null;
+}
+// The picker: a dropdown of listed suppliers plus "Other (not listed)…", which opens a text box. `current` pre-selects a line's
+// existing supplier (as Other + its text when it isn't on the list). The show/hide of the text box is one document-level
+// listener (see the bottom of the script), so it survives re-renders.
+function supplierPickerHtml_(current, opts){
+  opts = opts || {};
+  const list = supplierList_();
+  const cur = String(current||"").trim();
+  const listed = cur ? matchSupplier_(cur) : null;
+  const shown = listed && list.includes(listed);
+  const isOther = !!cur && !shown;
+  const sel = shown ? listed : (isOther ? SUPPLIER_OTHER : "");
+  const st = opts.style || "";
+  return `<span class="sup-pick" style="display:${opts.block?"flex;flex-direction:column;gap:6px;":"inline-flex;gap:4px;align-items:center;"}">
+    <select class="sup-select" data-initial="${esc(sel)}" style="${st}" title="Supplier (required)">
+      <option value="" ${sel===""?"selected":""} disabled>Supplier*…</option>
+      ${list.map(n=>`<option value="${esc(n)}" ${n===sel?"selected":""}>${esc(n)}</option>`).join("")}
+      <option value="${SUPPLIER_OTHER}" ${sel===SUPPLIER_OTHER?"selected":""}>Other (not listed)…</option>
+    </select>
+    <input type="text" class="sup-other" placeholder="Supplier name*" value="${isOther?esc(cur):""}" style="${st}${isOther?"":"display:none;"}">
+  </span>`;
+}
+// Reads the picker inside `root`: {value} or {error}.
+function readSupplierPicker_(root){
+  const sel = root ? root.querySelector(".sup-select") : null;
+  if(!sel || !sel.value) return {error:"Choose a supplier (or Other, and type the name)"};
+  if(sel.value===SUPPLIER_OTHER){
+    const box = root.querySelector(".sup-other");
+    const typed = box ? box.value.replace(/\s+/g," ").trim() : "";
+    if(!typed){ if(box) box.focus(); return {error:"You picked Other — type the supplier's name"}; }
+    return {value: matchSupplier_(typed) || typed};
+  }
+  return {value: sel.value};
+}
+// Names used on buys in the last 60 days that aren't on the list (typed as Other, or from before the list existed), grouped so
+// "JHB MARKET" / "jhb market" / "JHB  MARKET" are one suggestion under their most-used spelling.
+function supplierSuggestions_(){
+  const cut = new Date(todaySA()+"T00:00:00Z"); cut.setUTCDate(cut.getUTCDate()-60);
+  const cutoff = cut.toISOString().slice(0,10);
+  const groups = {};
+  (DATA.purchaseCosts||[]).forEach(p=>{
+    const n = String(p.supplier||"").replace(/\s+/g," ").trim();
+    if(!n || /^[\d.]+$/.test(n)) return; // blank, or a stray number
+    if(String(p.date||p.receivedDate||"") < cutoff) return;
+    if(matchSupplier_(n)) return;
+    const k = supplierKey_(n); if(!k) return;
+    const g = groups[k] || (groups[k] = {count:0, spell:{}});
+    g.count++; g.spell[n] = (g.spell[n]||0)+1;
+  });
+  return Object.values(groups).map(g=>{
+    const names = Object.keys(g.spell).sort((a,b)=> g.spell[b]-g.spell[a]);
+    return {name:names[0], count:g.count, variants:names};
+  }).sort((a,b)=> b.count-a.count);
+}
+let suppliersCardOpen = null; // null = open only while the list is empty
+function renderSuppliersCard_(){
+  const all = (DATA.suppliers||[]).filter(s=> s && String(s.name||"").trim()).slice().sort((a,b)=> String(a.name).localeCompare(String(b.name)));
+  const sugg = supplierSuggestions_();
+  const open = suppliersCardOpen===null ? !all.length : suppliersCardOpen;
+  const rows = all.map(s=>{
+    const off = isSupplierHidden_(s);
+    return `<tr${off?' style="opacity:.55;"':''}><td>${esc(s.name)}${off?" "+chip("hidden","neutral"):""}</td>
+      <td><button class="btn small" data-sup-toggle="${esc(s.name)}" title="${off?"Show it in the supplier dropdowns again":"Keep it on file but leave it out of the dropdowns"}">${off?"Show":"Hide"}</button></td>
+      <td><button class="delbtn" data-sup-del="${esc(s.name)}" title="Remove from the list (past buys keep their supplier)">✕</button></td></tr>`;
+  }).join("");
+  const suggRows = sugg.slice(0,40).map(g=>`<tr><td>${esc(g.name)}${g.variants.length>1?`<div class="helptext">also typed as: ${g.variants.slice(1,5).map(esc).join(", ")}${g.variants.length>5?"…":""}</div>`:""}</td>
+      <td class="num">${g.count}</td>
+      <td><button class="btn small" data-sup-add="${esc(g.name)}">+ Add</button></td></tr>`).join("");
+  return `<details class="card" id="suppliersCard" ${open?"open":""}>
+    <summary style="cursor:pointer;padding:14px 18px;font-weight:600;">Suppliers <span class="helptext" style="font-weight:400;">— ${supplierList_().length} in the dropdowns${all.length ? "" : " · the list is empty, so buyers can only pick Other until it is set up"}</span></summary>
+    <div class="cardbody">
+      <p class="helptext" style="margin-top:0;">Every buy (Shopping List, Quick Buy, and Receiving's "received, no order on file") must pick a supplier from this list, or <b>Other (not listed)</b> and type the name. A typed name that matches one here apart from capitals or spaces is saved under the listed spelling. Hiding a supplier keeps it on file but out of the dropdowns; removing it never changes past buys.</p>
+      <div class="formgrid" style="align-items:end;">
+        <div class="field"><label>Add a supplier</label><input type="text" id="newSupplierName" placeholder="e.g. JHB Market" data-pristine=""></div>
+        <div><button class="btn primary" id="addSupplierBtn">Add</button></div>
+      </div>
+      <div style="display:flex;gap:18px;flex-wrap:wrap;margin-top:12px;">
+        <div style="flex:1;min-width:260px;"><div style="font-weight:600;margin-bottom:6px;">On the list (${all.length})</div>
+          <div class="tablewrap" style="max-height:320px;"><table><tbody>${rows || `<tr><td class="empty">Nothing yet — add suppliers above or from the suggestions.</td></tr>`}</tbody></table></div></div>
+        <div style="flex:1;min-width:260px;"><div style="font-weight:600;margin-bottom:6px;">Used on buys but not on the list (last 60 days)</div>
+          <div class="tablewrap" style="max-height:320px;"><table><thead><tr><th>Name</th><th class="num">Buys</th><th></th></tr></thead><tbody>${suggRows || `<tr><td colspan="3" class="empty">None — every recent supplier is on the list.</td></tr>`}</tbody></table></div>
+          <div class="helptext" style="margin-top:6px;">Spellings that differ only in capitals or spaces are grouped. Add the right spelling once; different spellings of the same name (e.g. "Fineliving Feed" vs "Fineliving Feeds") are separate rows — add just one.</div></div>
+      </div>
+    </div>
+  </details>`;
+}
+
 function procUnitForBase(bp){
   const it = (DATA.itemSetup||[]).find(x=> x.baseProduct===bp && x.procurementUnit);
   return it ? it.procurementUnit : "";
@@ -3331,12 +3439,12 @@ function renderBuyCell(r, today){
     <div class="buyrow" data-buy-row="${esc(bp)}" data-buy-editid="${esc(editingExisting?editingVal:"")}" style="display:flex;align-items:center;gap:4px;white-space:nowrap;">
       <input type="number" step="0.01" class="buy-qty" placeholder="Qty*" value="${esc(prefillQty)}" style="width:56px;">
       <input type="number" step="0.01" class="buy-cost" placeholder="Price/u (if known)" value="${esc(prefillCost)}" style="width:110px;">
-      <input type="text" class="buy-supplier" placeholder="Supplier" value="${esc(prefillSupplier)}" style="width:90px;">
+      ${supplierPickerHtml_(prefillSupplier, {style:"width:130px;"})}
       <input type="text" class="buy-overreason" placeholder="Reason for exceeding suggested buy*" value="${esc(prefillOverReason)}" style="width:190px;${prefillOverReason?"":"display:none;"}">
       <button class="btn primary" data-buy-tick="${esc(bp)}" title="Save" style="padding:2px 10px;font-size:12px;">✓</button>
       <button class="btn" data-buy-cancel="${esc(bp)}" style="padding:2px 6px;font-size:12px;" title="Close without saving">✕</button>
     </div>
-    <div class="helptext">*Qty is what you're ordering. Leave price blank if it isn't known yet (e.g. invoiced later) — it'll show as "Ordered" until Receiving confirms delivery.</div>
+    <div class="helptext">*Qty is what you're ordering, and a supplier must be picked (Other lets you type one that isn't listed). Leave price blank if it isn't known yet (e.g. invoiced later) — it'll show as "Ordered" until Receiving confirms delivery.</div>
   </div>`;
 }
 
@@ -3518,7 +3626,7 @@ function renderQuickBuy(){
       <div class="formgrid">
         <div class="field"><label>Quantity (what you're ordering)</label><input type="number" inputmode="decimal" step="0.01" id="quickBuyQty" value="${esc(prefillQty)}" style="font-size:20px;padding:13px;"></div>
         <div class="field"><label>Price per unit (if known)</label><input type="number" inputmode="decimal" step="0.01" id="quickBuyCost" value="${esc(prefillCost)}" style="font-size:20px;padding:13px;" placeholder="leave blank if not invoiced yet"></div>
-        <div class="field"><label>Supplier</label><input type="text" id="quickBuySupplier" value="${esc(prefillSupplier)}" style="font-size:20px;padding:13px;" placeholder="optional"></div>
+        <div class="field" id="quickBuySupplierWrap"><label>Supplier*</label>${supplierPickerHtml_(prefillSupplier, {block:true, style:"font-size:20px;padding:13px;width:100%;"})}</div>
       </div>
       <div class="field" id="quickBuyOverReasonField" style="margin-top:10px;${prefillOverBuyReason?"":"display:none;"}">
         <label>Reason for exceeding suggested buy</label>
@@ -4012,7 +4120,7 @@ function renderReceiving(){
         <div class="formgrid">
           <div class="field"><label>Base product</label><input type="text" id="directReceiveBase" list="baseProductsDL"></div>
           <div class="field"><label>Quantity received</label><input type="number" step="0.01" id="directReceiveQty" placeholder="e.g. 10"></div>
-          <div class="field"><label>Supplier</label><input type="text" id="directReceiveSupplier" placeholder="optional"></div>
+          <div class="field" id="directReceiveSupplierWrap"><label>Supplier*</label>${supplierPickerHtml_("", {block:true, style:"width:100%;"})}</div>
           <div><button class="btn primary" id="logDirectReceipt">+ Log received stock</button></div>
         </div>
       </div>
@@ -4968,6 +5076,7 @@ function renderPurchase(){
       <div><h2>Purchase Costs</h2><p>Every purchase logged through Receiving, Quick Buy, or the Shopping List lands here automatically — this page is for reviewing those figures and removing a line only if it was logged by mistake.</p></div>
     </div>
     ${blankBanner}
+    ${renderSuppliersCard_()}
     <div class="card">
       <div class="cardhead">
         <div><h3>Current entries</h3><div class="desc">Multiple lines for the same product on the same day (different suppliers) are expected — remove a line only if it was a mistake. Qty/Cost/Total show the confirmed Receiving figures once a line's been received (including any correction made there) — the "Ordered" tag marks a line still awaiting confirmation, still showing what it was ordered at.</div></div>
@@ -7025,11 +7134,13 @@ function wireTabEvents(){
         const editId = container.dataset.buyEditid || "";
         const qtyVal = container.querySelector(".buy-qty").value;
         const costVal = container.querySelector(".buy-cost").value;
-        const supplierVal = (container.querySelector(".buy-supplier")||{}).value || "";
         // qty is what's actually being ordered, so it's required; cost is often genuinely not known yet
         // (e.g. herbs invoiced later) — leave it blank and it'll show as "Ordered" until Receiving fills
         // it in when the delivery is confirmed.
         if(!qtyVal){ toast("Enter a quantity to log this order"); return; }
+        const supPick = readSupplierPicker_(container); // supplier is required (Nov 2026)
+        if(supPick.error){ toast(supPick.error); return; }
+        const supplierVal = supPick.value;
         // Shane's ask: ordering more than OVER_SUGGESTED_BUY_MULTIPLIER above the suggested buy needs a
         // reason on record before it can go through, and gets flagged for Owner/Procurement everywhere
         // this purchase line shows up (see purchaseLineChip). The reason field is hidden until it's
@@ -7250,11 +7361,13 @@ function wireTabEvents(){
           if(purchaseLogBusy || !quickBuySelected){ toast("Saving — one moment…"); return; } // a second tap while the first is still saving
           const qtyVal = document.getElementById("quickBuyQty").value;
           const costVal = document.getElementById("quickBuyCost").value;
-          const supplierVal = (document.getElementById("quickBuySupplier")||{}).value || "";
           // qty is what's actually being ordered, so it's required; cost is often genuinely not known yet
           // (e.g. herbs invoiced later) — leave it blank and it'll show as "Ordered" until Receiving fills
           // it in when the delivery is confirmed.
           if(!qtyVal){ toast("Enter a quantity to confirm"); return; }
+          const supPick = readSupplierPicker_(document.getElementById("quickBuySupplierWrap")); // supplier is required (Nov 2026)
+          if(supPick.error){ toast(supPick.error); return; }
+          const supplierVal = supPick.value;
           const bp = quickBuySelected;
           // Shane's ask: ordering more than OVER_SUGGESTED_BUY_MULTIPLIER above the suggested buy needs a
           // reason on record before it can go through — same rule and same "reveal the field, then
@@ -7610,7 +7723,6 @@ function wireTabEvents(){
       directReceiptBtn.addEventListener("click", ()=>{
         const bpTyped = document.getElementById("directReceiveBase").value.trim();
         const qtyVal = document.getElementById("directReceiveQty").value;
-        const supplierVal = document.getElementById("directReceiveSupplier").value.trim();
         if(!bpTyped){ toast("Enter a base product"); return; }
         // This form receives stock against an item that should already exist in Item Setup — Procurement
         // Unit, Conversion Factor, VAT and category all come from that record, so a base product that
@@ -7634,6 +7746,9 @@ function wireTabEvents(){
           }
         }
         if(!qtyVal){ toast("Enter the quantity received"); return; }
+        const supPick = readSupplierPicker_(document.getElementById("directReceiveSupplierWrap")); // supplier is required (Nov 2026)
+        if(supPick.error){ toast(supPick.error); return; }
+        const supplierVal = supPick.value;
         const today = todaySA();
         // Deliberately no entry.qty/entry.cost — there was never an order logged for this delivery, so
         // there's nothing to compare the count against. isReceived/purchaseLineChip/receivingDiscrepancy
@@ -7975,6 +8090,42 @@ function wireTabEvents(){
   }
 
   if(currentTab==="purchase"){
+    // ---- Suppliers card ----
+    const supCard = document.getElementById("suppliersCard");
+    if(supCard) supCard.addEventListener("toggle", ()=>{ suppliersCardOpen = supCard.open; });
+    const addSupplier_ = (raw)=>{
+      const name = String(raw||"").replace(/\s+/g," ").trim();
+      if(!name){ toast("Type the supplier's name first"); return; }
+      const existing = matchSupplier_(name);
+      if(existing){
+        const rec = (DATA.suppliers||[]).find(s=> String(s.name).trim()===existing);
+        if(rec && isSupplierHidden_(rec)){ delete rec.hidden; persist(existing+" is back in the dropdowns", ["suppliers"]); return; }
+        toast('"'+existing+'" is already on the list'); return;
+      }
+      if(!DATA.suppliers) DATA.suppliers = [];
+      DATA.suppliers.push({name});
+      suppliersCardOpen = true;
+      persist("Added supplier " + name, ["suppliers"]);
+    };
+    const addSupBtn = document.getElementById("addSupplierBtn");
+    if(addSupBtn) addSupBtn.addEventListener("click", ()=> addSupplier_((document.getElementById("newSupplierName")||{}).value));
+    const newSupInput = document.getElementById("newSupplierName");
+    if(newSupInput) newSupInput.addEventListener("keydown", (e)=>{ if(e.key==="Enter") addSupplier_(newSupInput.value); });
+    document.querySelectorAll("[data-sup-add]").forEach(b=> b.addEventListener("click", ()=> addSupplier_(b.dataset.supAdd)));
+    document.querySelectorAll("[data-sup-toggle]").forEach(b=> b.addEventListener("click", ()=>{
+      const rec = (DATA.suppliers||[]).find(s=> String(s.name).trim()===b.dataset.supToggle); if(!rec) return;
+      const hide = !isSupplierHidden_(rec);
+      if(hide) rec.hidden = "yes"; else delete rec.hidden;
+      suppliersCardOpen = true;
+      persist((hide ? "Hid " : "Showing ") + rec.name + (hide ? " from the dropdowns" : " in the dropdowns again"), ["suppliers"]);
+    }));
+    document.querySelectorAll("[data-sup-del]").forEach(b=> b.addEventListener("click", ()=>{
+      const name = b.dataset.supDel;
+      if(!confirm('Remove "'+name+'" from the supplier list?\n\nPast buys keep their supplier; it just won\'t be in the dropdowns any more.')) return;
+      DATA.suppliers = (DATA.suppliers||[]).filter(s=> String(s.name).trim()!==name);
+      suppliersCardOpen = true;
+      persist("Removed supplier " + name, ["suppliers"]);
+    }));
     document.getElementById("purchDateFilter").addEventListener("change", (e)=>{
       purchaseDateFilter = e.target.value;
       render();
@@ -8957,6 +9108,16 @@ boot();
 // Code.gs), no Sheet I/O at all, so even a handful of people all polling every 20s is negligible load.
 const DATA_POLL_INTERVAL_MS = 20000;
 wireActivityTracking();
+// Supplier picker: "Other (not listed)…" opens the text box for the name (see supplierPickerHtml_).
+document.addEventListener("change", (e)=>{
+  const sel = e.target;
+  if(!sel || !sel.classList || !sel.classList.contains("sup-select")) return;
+  const box = sel.parentElement ? sel.parentElement.querySelector(".sup-other") : null;
+  if(!box) return;
+  const other = sel.value===SUPPLIER_OTHER;
+  box.style.display = other ? "" : "none";
+  if(other) box.focus();
+});
 setInterval(()=>{ checkIdleLogout(); checkForUpdates(); }, DATA_POLL_INTERVAL_MS);
 document.addEventListener("visibilitychange", ()=>{ if(document.visibilityState === "visible"){ checkIdleLogout(); checkForUpdates(); } });
 window.addEventListener("focus", ()=>{ checkIdleLogout(); checkForUpdates(); });
