@@ -2044,6 +2044,7 @@ function supplierSuggestions_(){
   }).sort((a,b)=> b.count-a.count);
 }
 let suppliersCardOpen = null; // null = open only while the list is empty
+let supplierListOnServer_ = true; // false until the Code.gs with the Suppliers sheet is deployed (set by loadData)
 function renderSuppliersCard_(){
   const all = (DATA.suppliers||[]).filter(s=> s && String(s.name||"").trim()).slice().sort((a,b)=> String(a.name).localeCompare(String(b.name)));
   const sugg = supplierSuggestions_();
@@ -2061,7 +2062,8 @@ function renderSuppliersCard_(){
     <summary style="cursor:pointer;padding:14px 18px;font-weight:600;">Suppliers <span class="helptext" style="font-weight:400;">— ${supplierList_().length} in the dropdowns${all.length ? "" : " · the list is empty, so buyers can only pick Other until it is set up"}</span></summary>
     <div class="cardbody">
       <p class="helptext" style="margin-top:0;">Every buy (Shopping List, Quick Buy, and Receiving's "received, no order on file") must pick a supplier from this list, or <b>Other (not listed)</b> and type the name. A typed name that matches one here apart from capitals or spaces is saved under the listed spelling. Hiding a supplier keeps it on file but out of the dropdowns; removing it never changes past buys.</p>
-      <div class="formgrid" style="align-items:end;">
+      ${supplierListOnServer_ ? "" : `<div class="banner critical">⛔ The server (Code.gs) hasn't been updated for the supplier list yet, so it can't be saved. Deploy the new Code.gs and Auth.gs as a new version, then reload. Until then buyers pick <b>Other</b> and type the supplier.</div>`}
+      <div class="formgrid" style="align-items:end;${supplierListOnServer_?"":"opacity:.5;pointer-events:none;"}">
         <div class="field"><label>Add a supplier</label><input type="text" id="newSupplierName" placeholder="e.g. JHB Market" data-pristine=""></div>
         <div><button class="btn primary" id="addSupplierBtn">Add</button></div>
       </div>
@@ -2621,6 +2623,7 @@ async function loadData(){
   const fresh = result;
   // The backend answers HTTP 200 with {ok:false,error} when it trips over something — never treat that as "empty data"
   if(!fresh || fresh.ok===false || !Array.isArray(fresh.users)) throw new Error((fresh && fresh.error) ? String(fresh.error) : "The server answered, but sent no user list");
+  supplierListOnServer_ = Array.isArray(fresh.suppliers); // an older Code.gs has no Suppliers sheet and would silently drop the list
   return applyDataDefaults(fresh);
 }
 
@@ -8094,6 +8097,7 @@ function wireTabEvents(){
     const supCard = document.getElementById("suppliersCard");
     if(supCard) supCard.addEventListener("toggle", ()=>{ suppliersCardOpen = supCard.open; });
     const addSupplier_ = (raw)=>{
+      if(!supplierListOnServer_){ toast("Deploy the new Code.gs first — the server can't save the supplier list yet"); return; }
       const name = String(raw||"").replace(/\s+/g," ").trim();
       if(!name){ toast("Type the supplier's name first"); return; }
       const existing = matchSupplier_(name);
