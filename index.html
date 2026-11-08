@@ -576,6 +576,7 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
 // VERSION HISTORY (newest first). The menu shows only APP_VERSION; quote it when asking for a change so the exact build is known.
+//  v2026.11.08a  — Item Sales: page text now says sales are pulled from Sage every morning and the CSV upload is only a fallback.
 //  v2026.11.07c  — Market vs Receiving: price check. Each product/day shows the statement price per base unit next to the confirmed price (Confirm Prices) of the deliveries counted, with the difference; tiles "Confirmed price higher / lower" (clickable) and a Price filter. Within 1% counts as the same.
 //  v2026.11.07b  — From 08 Nov, Market vs Receiving counts only deliveries whose supplier is JHB MARKET or PTA MARKET (farm and other suppliers are left out). Everything before 08 Nov is left as it was.
 //  v2026.11.07a  — Supplier is now required on every buy (Shopping List, Quick Buy, Receiving "received, no order on file"): pick it from the supplier list, or Other (not listed) and type the name. The list is kept on Purchase Costs > Suppliers, which also suggests names already used on recent buys. Needs the new Code.gs + Auth.gs.
@@ -613,7 +614,7 @@ function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 //  v2026.10.26b  — Market Product Mapping: pack size calculator (works out Pack size + Receiving pack)
 //  v2026.10.26a  — footer shows only the version number (this list replaces the long on-screen text)
 //  Everything below was the on-screen build text up to 2026-10-23, newest first: Market vs Receiving audit + optional Receiving pack in the mapping | Price Export: only changed costs flag a day as outdated, not margin/min-price changes | GP Watch table: Short of target column + sticky product name | Phone menu button | Product GP Watch (from the Item Sales reports) | Made-to-order items can be removed from the stock take | Received-date grouping, changed-since-download check, queued download saves, lighter saves, stock take completeness checks, tick-box page access
-const APP_VERSION = "v2026.11.07c";
+const APP_VERSION = "v2026.11.08a";
 const APP_BUILD = APP_VERSION; // kept as an alias in case anything else reads it
 
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
@@ -5008,7 +5009,7 @@ function renderSalesData(){
   }).join("");
   return `
     <div class="pagehead">
-      <div><h2>Item Sales</h2><p>Manual backup for now — this will pull automatically from Sage once the API is connected. Drop each company's "Sales By Item Report" export here as a CSV: Item, Qty Sold, Total Cost, Total Selling. Both companies need a file staged for the report date before Submit goes live.</p></div>
+      <div><h2>Item Sales</h2><p>Item Sales come in from Sage automatically every morning, for both companies (see "pulled from Sage" below). The upload further down is only a fallback for a day that stays missing: drop each company's "Sales By Item Report" export as a CSV (Item, Qty Sold, Total Cost, Total Selling) — both companies need a file staged for the report date before Submit goes live.</p></div>
     </div>
     ${renderSageSalesCard_()}
     ${renderUploadCoverage()}
