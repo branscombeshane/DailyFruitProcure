@@ -456,7 +456,7 @@ function applyDataDefaults(d){
   if(!d.productCeilings) d.productCeilings = {}; // backward-compatible default: per-product shelf-life hold ceilings (no cap when unset)
   if(!d.suppliers) d.suppliers = [];
   if(!d.trayDemand) d.trayDemand = []; // Fruit Trays: tray orders copied from Zoho Creator (ZohoCreator.gs on the server)
-  if(!d.trayItemMap) d.trayItemMap = []; // Fruit Trays: Creator item -> section / Base Product / pieces per buying unit // the maintained supplier list (Nov 2026) — Purchase Costs > Suppliers
+  if(!d.trayItemMap) d.trayItemMap = []; // Fruit Trays: Creator item -> section / Base Product / pieces per buying unit // the maintained supplier list (Nov 2026) — Product Setup > Suppliers
   if(!d.categories) d.categories = []; // backward-compatible default for backups predating explicit category management (name + hidden flag)
   if(!d.users) d.users = []; // PINs never come to the browser; login is checked on the server (Auth.gs)
   if(d.syncVersion===undefined) d.syncVersion = null; // backward-compatible default for backups/backends predating the two-tabs-open safety net
@@ -578,6 +578,7 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
 // VERSION HISTORY (newest first). The menu shows only APP_VERSION; quote it when asking for a change so the exact build is known.
+//  v2026.11.09b  — The supplier list has moved off Purchase Costs to its own tab: Product Setup > Suppliers. Owner and Procurement see it (a user with hand-ticked pages needs "Suppliers" ticked on the Users page). Works with the Code.gs already live.
 //  v2026.11.09a  — NEW Fruit Trays page (Buying): the Jhb corporate fruit-tray orders from Zoho Creator (same numbers as Creator's Shopping Schedule), turned into buying units per Base Product via a Creator-item mapping, and added to the wholesale holding target on the Shopping List (same stock). Fri/Sat cover Mon+Tue deliveries, Mon/Tue cover Wed–Fri. Fruit and Dry goods sections. Needs the new Code.gs, Auth.gs and ZohoCreator.gs.
 //  v2026.11.08a  — Item Sales: page text now says sales are pulled from Sage every morning and the CSV upload is only a fallback.
 //  v2026.11.07c  — Market vs Receiving: price check. Each product/day shows the statement price per base unit next to the confirmed price (Confirm Prices) of the deliveries counted, with the difference; tiles "Confirmed price higher / lower" (clickable) and a Price filter. Within 1% counts as the same.
@@ -617,7 +618,7 @@ function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 //  v2026.10.26b  — Market Product Mapping: pack size calculator (works out Pack size + Receiving pack)
 //  v2026.10.26a  — footer shows only the version number (this list replaces the long on-screen text)
 //  Everything below was the on-screen build text up to 2026-10-23, newest first: Market vs Receiving audit + optional Receiving pack in the mapping | Price Export: only changed costs flag a day as outdated, not margin/min-price changes | GP Watch table: Short of target column + sticky product name | Phone menu button | Product GP Watch (from the Item Sales reports) | Made-to-order items can be removed from the stock take | Received-date grouping, changed-since-download check, queued download saves, lighter saves, stock take completeness checks, tick-box page access
-const APP_VERSION = "v2026.11.09a";
+const APP_VERSION = "v2026.11.09b";
 const APP_BUILD = APP_VERSION; // kept as an alias in case anything else reads it
 
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
@@ -837,6 +838,7 @@ const NAV = [
     {id:"stockvariance", label:"Stock Variance"},
     {id:"itemsetup", label:"Item Setup"},
     {id:"recipes", label:"Product Mixes"},
+    {id:"suppliers", label:"Suppliers"},
   ]},
   {group:"Costings", items:[
     {id:"purchase", label:"Purchase Costs"},
@@ -857,7 +859,7 @@ const TAB_GROUPS = [
   {id:"g_shop",   label:"Shopping List",    tabs:[["shoppinglist","Shopping List"],["quickbuy","Quick Buy"],["trays","Fruit Trays"],["shoppingarchive","Archive"]]},
   {id:"g_recv",   label:"Receiving",        tabs:[["receiving","Receiving"],["confirmprices","Confirm Prices"]]},
   {id:"g_hold",   label:"Holdings & Sales", tabs:[["dashboard","Calculated Holdings"],["salesdata","Item Sales"],["stockvariance","Stock Variance"]]},
-  {id:"g_setup",  label:"Product Setup",    tabs:[["itemsetup","Item Setup"],["recipes","Product Mixes"]]},
+  {id:"g_setup",  label:"Product Setup",    tabs:[["itemsetup","Item Setup"],["recipes","Product Mixes"],["suppliers","Suppliers"]]},
   {id:"g_cost",   label:"Purchase Costs",   tabs:[["purchase","Purchases"],["pricehistory","Price History"]]},
   {id:"g_market", label:"Market",           tabs:[["marketstatements","Statements"],["marketaudit","vs Receiving"],["marketmapping","Product Mapping"]]},
   {id:"g_price",  label:"Pricing",          tabs:[["sellingprices","Price Export"],["gpwatch","GP Watch"]]},
@@ -883,8 +885,8 @@ if(!TABS.some(t=>t.id===currentTab)){
 // "home" (the landing Dashboard) is Owner + Procurement only, by Shane's explicit request — Stock Taker,
 // Receiving and Market stay scoped to their single-purpose tab(s), same as before.
 const ROLE_TABS = {
-  owner: ["home","findash","shoppinglist","quickbuy","shoppingarchive","trays","receiving","dashboard","salesdata","itemsetup","recipes","purchase","confirmprices","pricehistory","marketstatements","marketaudit","sellingprices","gpwatch","stocktake","users","stockvariance","marketmapping"],
-  procurement: ["home","shoppinglist","quickbuy","shoppingarchive","trays","receiving","purchase","confirmprices","pricehistory","marketstatements","sellingprices","stocktake"],
+  owner: ["home","findash","shoppinglist","quickbuy","shoppingarchive","trays","receiving","dashboard","salesdata","itemsetup","recipes","suppliers","purchase","confirmprices","pricehistory","marketstatements","marketaudit","sellingprices","gpwatch","stocktake","users","stockvariance","marketmapping"],
+  procurement: ["home","shoppinglist","quickbuy","shoppingarchive","trays","receiving","suppliers","purchase","confirmprices","pricehistory","marketstatements","sellingprices","stocktake"],
   stocktaker: ["stocktake","receiving"],
   receiving: ["receiving"],
   market: ["quickbuy"],
@@ -2057,7 +2059,7 @@ function awaitingPriceLines(){
 }
 // The unit a price is "per" — the base product's procurement unit from Item Setup (what Receiving counts in).
 // ---- Suppliers (Shane, 7 Nov 2026) ----
-// Every logged buy must name its supplier, picked from a maintained list (Purchase Costs > Suppliers) or, for one not on it,
+// Every logged buy must name its supplier, picked from a maintained list (Product Setup > Suppliers) or, for one not on it,
 // "Other (not listed)…" plus the name typed in. Before this the supplier was free text and often left blank, which gave 228
 // spellings for a few dozen real suppliers (Fineliving Feeds alone ~10 ways). A typed name that matches a listed one apart from
 // capitals/spaces/punctuation snaps to the listed spelling. Shopping List buy row, Quick Buy, and Receiving's "received, no order
@@ -2143,12 +2145,10 @@ function supplierSuggestions_(){
     return {name:names[0], count:g.count, variants:names};
   }).sort((a,b)=> b.count-a.count);
 }
-let suppliersCardOpen = null; // null = open only while the list is empty
 let supplierListOnServer_ = true; // false until the Code.gs with the Suppliers sheet is deployed (set by loadData)
-function renderSuppliersCard_(){
+function renderSuppliersPage_(){
   const all = (DATA.suppliers||[]).filter(s=> s && String(s.name||"").trim()).slice().sort((a,b)=> String(a.name).localeCompare(String(b.name)));
   const sugg = supplierSuggestions_();
-  const open = suppliersCardOpen===null ? !all.length : suppliersCardOpen;
   const rows = all.map(s=>{
     const off = isSupplierHidden_(s);
     const mk = marketOfSupplier_(s.name);
@@ -2159,9 +2159,11 @@ function renderSuppliersCard_(){
   const suggRows = sugg.slice(0,40).map(g=>`<tr><td>${esc(g.name)}${g.variants.length>1?`<div class="helptext">also typed as: ${g.variants.slice(1,5).map(esc).join(", ")}${g.variants.length>5?"…":""}</div>`:""}</td>
       <td class="num">${g.count}</td>
       <td><button class="btn small" data-sup-add="${esc(g.name)}">+ Add</button></td></tr>`).join("");
-  return `<details class="card" id="suppliersCard" ${open?"open":""}>
-    <summary style="cursor:pointer;padding:14px 18px;font-weight:600;">Suppliers <span class="helptext" style="font-weight:400;">— ${supplierList_().length} in the dropdowns${all.length ? "" : " · the list is empty, so buyers can only pick Other until it is set up"}</span></summary>
-    <div class="cardbody">
+  return `
+    <div class="pagehead">
+      <div><h2>Suppliers</h2><p>${supplierList_().length} in the dropdowns${all.length ? "" : " · the list is empty, so buyers can only pick Other until it is set up"}</p></div>
+    </div>
+    <div class="card"><div class="cardbody">
       <p class="helptext" style="margin-top:0;">Every buy (Shopping List, Quick Buy, and Receiving's "received, no order on file") must pick a supplier from this list, or <b>Other (not listed)</b> and type the name. A typed name that matches one here apart from capitals or spaces is saved under the listed spelling. Hiding a supplier keeps it on file but out of the dropdowns; removing it never changes past buys. Market vs Receiving counts deliveries from <b>JHB MARKET</b> and <b>PTA MARKET</b> only.</p>
       ${supplierListOnServer_ ? "" : `<div class="banner critical">⛔ The server (Code.gs) hasn't been updated for the supplier list yet, so it can't be saved. Deploy the new Code.gs and Auth.gs as a new version, then reload. Until then buyers pick <b>Other</b> and type the supplier.</div>`}
       <div class="formgrid" style="align-items:end;${supplierListOnServer_?"":"opacity:.5;pointer-events:none;"}">
@@ -2175,8 +2177,7 @@ function renderSuppliersCard_(){
           <div class="tablewrap" style="max-height:320px;"><table><thead><tr><th>Name</th><th class="num">Buys</th><th></th></tr></thead><tbody>${suggRows || `<tr><td colspan="3" class="empty">None — every recent supplier is on the list.</td></tr>`}</tbody></table></div>
           <div class="helptext" style="margin-top:6px;">Spellings that differ only in capitals or spaces are grouped. Add the right spelling once; different spellings of the same name (e.g. "Fineliving Feed" vs "Fineliving Feeds") are separate rows — add just one.</div></div>
       </div>
-    </div>
-  </details>`;
+    </div></div>`;
 }
 
 function procUnitForBase(bp){
@@ -3066,6 +3067,7 @@ function render(){
     else if(currentTab==="recipes") pageHtml = renderRecipes();
     else if(currentTab==="salesdata") pageHtml = renderSalesData();
     else if(currentTab==="purchase") pageHtml = renderPurchase();
+    else if(currentTab==="suppliers") pageHtml = renderSuppliersPage_();
     else if(currentTab==="confirmprices") pageHtml = renderConfirmPrices();
     else if(currentTab==="pricehistory") pageHtml = renderPriceHistory();
     else if(currentTab==="marketstatements") pageHtml = renderMarketStatements();
@@ -5343,7 +5345,6 @@ function renderPurchase(){
       <div><h2>Purchase Costs</h2><p>Every purchase logged through Receiving, Quick Buy, or the Shopping List lands here automatically — this page is for reviewing those figures and removing a line only if it was logged by mistake.</p></div>
     </div>
     ${blankBanner}
-    ${renderSuppliersCard_()}
     <div class="card">
       <div class="cardhead">
         <div><h3>Current entries</h3><div class="desc">Multiple lines for the same product on the same day (different suppliers) are expected — remove a line only if it was a mistake. Qty/Cost/Total show the confirmed Receiving figures once a line's been received (including any correction made there) — the "Ordered" tag marks a line still awaiting confirmation, still showing what it was ordered at.</div></div>
@@ -8356,10 +8357,7 @@ function wireTabEvents(){
     });
   }
 
-  if(currentTab==="purchase"){
-    // ---- Suppliers card ----
-    const supCard = document.getElementById("suppliersCard");
-    if(supCard) supCard.addEventListener("toggle", ()=>{ suppliersCardOpen = supCard.open; });
+  if(currentTab==="suppliers"){
     const addSupplier_ = (raw)=>{
       if(!supplierListOnServer_){ toast("Deploy the new Code.gs first — the server can't save the supplier list yet"); return; }
       const name = String(raw||"").replace(/\s+/g," ").trim();
@@ -8372,7 +8370,6 @@ function wireTabEvents(){
       }
       if(!DATA.suppliers) DATA.suppliers = [];
       DATA.suppliers.push({name});
-      suppliersCardOpen = true;
       persist("Added supplier " + name, ["suppliers"]);
     };
     const addSupBtn = document.getElementById("addSupplierBtn");
@@ -8384,16 +8381,17 @@ function wireTabEvents(){
       const rec = (DATA.suppliers||[]).find(s=> String(s.name).trim()===b.dataset.supToggle); if(!rec) return;
       const hide = !isSupplierHidden_(rec);
       if(hide) rec.hidden = "yes"; else delete rec.hidden;
-      suppliersCardOpen = true;
       persist((hide ? "Hid " : "Showing ") + rec.name + (hide ? " from the dropdowns" : " in the dropdowns again"), ["suppliers"]);
     }));
     document.querySelectorAll("[data-sup-del]").forEach(b=> b.addEventListener("click", ()=>{
       const name = b.dataset.supDel;
       if(!confirm('Remove "'+name+'" from the supplier list?\n\nPast buys keep their supplier; it just won\'t be in the dropdowns any more.')) return;
       DATA.suppliers = (DATA.suppliers||[]).filter(s=> String(s.name).trim()!==name);
-      suppliersCardOpen = true;
       persist("Removed supplier " + name, ["suppliers"]);
     }));
+  }
+
+  if(currentTab==="purchase"){
     document.getElementById("purchDateFilter").addEventListener("change", (e)=>{
       purchaseDateFilter = e.target.value;
       render();
