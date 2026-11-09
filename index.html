@@ -413,7 +413,7 @@ function emptyDataShape(){
     // the cold-start fallback, never something that overwrites a value he's already set.
     pricingPlan: {defaultMarginPct:0.32, goodDealThresholdPct:0.10, goodDealBonusPct:0.05, trendWindowDays:21},
     categoryMarginPct: {"Eggs":0.30, "Herbs":0.35, "Mixes":0.35}, itemMarginPct: {}, itemMinPrice: {}, priceQuotes: [],
-    palletTallyResets: [], palletTallyArchive: [], costCsvDownloads: [], suppliers: [],
+    palletTallyResets: [], palletTallyArchive: [], costCsvDownloads: [], suppliers: [], trayDemand: [], trayItemMap: [],
   };
 }
 
@@ -454,7 +454,9 @@ function applyDataDefaults(d){
   if(!d.contractWatch) d.contractWatch = {}; // backward-compatible default: Contract GP Watch settings (minGp, and "off|company|list" flags for lists not watched)
   if(!d.stockTakeExempt) d.stockTakeExempt = {}; // backward-compatible default: base products NOT stock counted (made to order) — left out of Stock Take, the completeness checks and the Shopping List
   if(!d.productCeilings) d.productCeilings = {}; // backward-compatible default: per-product shelf-life hold ceilings (no cap when unset)
-  if(!d.suppliers) d.suppliers = []; // the maintained supplier list (Nov 2026) — Purchase Costs > Suppliers
+  if(!d.suppliers) d.suppliers = [];
+  if(!d.trayDemand) d.trayDemand = []; // Fruit Trays: tray orders copied from Zoho Creator (ZohoCreator.gs on the server)
+  if(!d.trayItemMap) d.trayItemMap = []; // Fruit Trays: Creator item -> section / Base Product / pieces per buying unit // the maintained supplier list (Nov 2026) — Purchase Costs > Suppliers
   if(!d.categories) d.categories = []; // backward-compatible default for backups predating explicit category management (name + hidden flag)
   if(!d.users) d.users = []; // PINs never come to the browser; login is checked on the server (Auth.gs)
   if(d.syncVersion===undefined) d.syncVersion = null; // backward-compatible default for backups/backends predating the two-tabs-open safety net
@@ -576,6 +578,7 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
 // VERSION HISTORY (newest first). The menu shows only APP_VERSION; quote it when asking for a change so the exact build is known.
+//  v2026.11.09a  — NEW Fruit Trays page (Buying): the Jhb corporate fruit-tray orders from Zoho Creator (same numbers as Creator's Shopping Schedule), turned into buying units per Base Product via a Creator-item mapping, and added to the wholesale holding target on the Shopping List (same stock). Fri/Sat cover Mon+Tue deliveries, Mon/Tue cover Wed–Fri. Fruit and Dry goods sections. Needs the new Code.gs, Auth.gs and ZohoCreator.gs.
 //  v2026.11.08a  — Item Sales: page text now says sales are pulled from Sage every morning and the CSV upload is only a fallback.
 //  v2026.11.07c  — Market vs Receiving: price check. Each product/day shows the statement price per base unit next to the confirmed price (Confirm Prices) of the deliveries counted, with the difference; tiles "Confirmed price higher / lower" (clickable) and a Price filter. Within 1% counts as the same.
 //  v2026.11.07b  — From 08 Nov, Market vs Receiving counts only deliveries whose supplier is JHB MARKET or PTA MARKET (farm and other suppliers are left out). Everything before 08 Nov is left as it was.
@@ -614,7 +617,7 @@ function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 //  v2026.10.26b  — Market Product Mapping: pack size calculator (works out Pack size + Receiving pack)
 //  v2026.10.26a  — footer shows only the version number (this list replaces the long on-screen text)
 //  Everything below was the on-screen build text up to 2026-10-23, newest first: Market vs Receiving audit + optional Receiving pack in the mapping | Price Export: only changed costs flag a day as outdated, not margin/min-price changes | GP Watch table: Short of target column + sticky product name | Phone menu button | Product GP Watch (from the Item Sales reports) | Made-to-order items can be removed from the stock take | Received-date grouping, changed-since-download check, queued download saves, lighter saves, stock take completeness checks, tick-box page access
-const APP_VERSION = "v2026.11.08a";
+const APP_VERSION = "v2026.11.09a";
 const APP_BUILD = APP_VERSION; // kept as an alias in case anything else reads it
 
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
@@ -823,6 +826,7 @@ const NAV = [
     {id:"shoppinglist", label:"Shopping List"},
     {id:"quickbuy", label:"Quick Buy"},
     {id:"shoppingarchive", label:"Shopping List Archive"},
+    {id:"trays", label:"Fruit Trays"},
     {id:"receiving", label:"Receiving"},
     {id:"confirmprices", label:"Confirm Prices"},
     {id:"stocktake", label:"Input Stock Levels"},
@@ -850,7 +854,7 @@ const NAV = [
 // One sidebar entry per group, tabs across the top of the page. "tabs" = [pageId, tab label]. A user only ever sees the tabs they
 // can access; a group with a single accessible page shows that page's own name and no tab bar.
 const TAB_GROUPS = [
-  {id:"g_shop",   label:"Shopping List",    tabs:[["shoppinglist","Shopping List"],["quickbuy","Quick Buy"],["shoppingarchive","Archive"]]},
+  {id:"g_shop",   label:"Shopping List",    tabs:[["shoppinglist","Shopping List"],["quickbuy","Quick Buy"],["trays","Fruit Trays"],["shoppingarchive","Archive"]]},
   {id:"g_recv",   label:"Receiving",        tabs:[["receiving","Receiving"],["confirmprices","Confirm Prices"]]},
   {id:"g_hold",   label:"Holdings & Sales", tabs:[["dashboard","Calculated Holdings"],["salesdata","Item Sales"],["stockvariance","Stock Variance"]]},
   {id:"g_setup",  label:"Product Setup",    tabs:[["itemsetup","Item Setup"],["recipes","Product Mixes"]]},
@@ -879,8 +883,8 @@ if(!TABS.some(t=>t.id===currentTab)){
 // "home" (the landing Dashboard) is Owner + Procurement only, by Shane's explicit request — Stock Taker,
 // Receiving and Market stay scoped to their single-purpose tab(s), same as before.
 const ROLE_TABS = {
-  owner: ["home","findash","shoppinglist","quickbuy","shoppingarchive","receiving","dashboard","salesdata","itemsetup","recipes","purchase","confirmprices","pricehistory","marketstatements","marketaudit","sellingprices","gpwatch","stocktake","users","stockvariance","marketmapping"],
-  procurement: ["home","shoppinglist","quickbuy","shoppingarchive","receiving","purchase","confirmprices","pricehistory","marketstatements","sellingprices","stocktake"],
+  owner: ["home","findash","shoppinglist","quickbuy","shoppingarchive","trays","receiving","dashboard","salesdata","itemsetup","recipes","purchase","confirmprices","pricehistory","marketstatements","marketaudit","sellingprices","gpwatch","stocktake","users","stockvariance","marketmapping"],
+  procurement: ["home","shoppinglist","quickbuy","shoppingarchive","trays","receiving","purchase","confirmprices","pricehistory","marketstatements","sellingprices","stocktake"],
   stocktaker: ["stocktake","receiving"],
   receiving: ["receiving"],
   market: ["quickbuy"],
@@ -899,6 +903,7 @@ const ROLE_TABS = {
 // refresh silently; something IS dirty -> only that tab shows the banner, and it clears itself the very
 // next poll once the edit is saved or reverted, since this is re-evaluated every 20s, not just once.
 function hasUnsavedInlineEdit(){
+  if(currentTab==="trays"){ for(const el of document.querySelectorAll("[data-tray-map-sec],[data-tray-map-bp],[data-tray-map-per]")){ if(el.value !== (el.dataset.pristine||"")) return true; } }
   for(const el of document.querySelectorAll(".sup-select")){ if(el.value !== (el.dataset.initial||"")) return true; }
   for(const el of document.querySelectorAll(".sup-other")){ if(el.style.display!=="none" && el.value.trim()) return true; }
   if(shoppingBuyEditing.size > 0 || shoppingIssueEditing.size > 0 || quickBuySelected !== null) return true;
@@ -1327,6 +1332,48 @@ function allowEnoughStock_(baseProduct){
   return false;
 }
 
+// ---------- Fruit Trays (Shane, 9 Nov 2026) ----------
+// The Jhb corporate fruit-tray business takes its orders in Zoho Creator. Those orders are KNOWN in advance (often weeks ahead),
+// unlike wholesale demand, which is forecast from Sage sales. The server copies Creator's "Shopping Schedule" numbers (pieces per
+// item per delivery date — see ZohoCreator.gs) into DATA.trayDemand; DATA.trayItemMap turns each Creator item into a Base Product
+// and buying units (pieces per unit). Trays and wholesale share one stock (same stock take), so the tray orders still to be
+// delivered in a buying day's window are ADDED to the wholesale holding target on the Shopping List.
+// Window (Shane): Fri/Sat buy for Mon+Tue deliveries, Mon/Tue for Wed–Fri. So a buying day covers every tray delivery (Mon–Fri)
+// from the next day up to the end of the block it buys for: Mon–Thu -> this Friday, Fri/Sat/Sun -> next Tuesday. Monday still
+// holds Tuesday's (bought on Friday/Saturday, already in the count). No buffer — exactly as ordered (Shane).
+// MIRRORED in Code.gs (trayWindow_ / trayNeedMap_, used by the nightly Shopping List archive) — keep in step.
+const TRAY_SECTIONS = {fruit:"Fruit", dry:"Dry goods"};
+function trayWindow_(dateStr){
+  const d = new Date(String(dateStr).slice(0,10)+"T00:00:00Z"), wd = d.getUTCDay();
+  const end = (wd>=1 && wd<=4) ? 5-wd : (wd===5 ? 4 : (wd===6 ? 3 : 2));
+  const days = [];
+  for(let i=1;i<=end;i++){ const x = new Date(d.getTime()); x.setUTCDate(x.getUTCDate()+i); const w = x.getUTCDay(); if(w>=1 && w<=5) days.push(x.toISOString().slice(0,10)); }
+  return days;
+}
+function trayMapFor_(item){ return (DATA.trayItemMap||[]).find(m=> String(m.item)===String(item)) || null; }
+// {days, byBp:{bp:{baseProduct, section, units, items:{item:{item, perUnit, pieces, byDate}}}}, unmapped:{item:{item,pieces,why}}}
+function trayNeedMap_(dateStr){
+  const dayList = trayWindow_(dateStr), days = new Set(dayList);
+  const byBp = {}, unmapped = {};
+  (DATA.trayDemand||[]).forEach(r=>{
+    const d = String(r.date||"").slice(0,10); if(!days.has(d)) return;
+    const q = Number(r.qty)||0; if(!q) return;
+    const m = trayMapFor_(r.item), sec = m ? String(m.section||"") : "";
+    if(sec==="ignore") return; // "not ours" — not bought by Procurement
+    const per = m ? Number(m.perUnit) : NaN;
+    if(!m || !(sec==="fruit" || sec==="dry") || !m.baseProduct || !(per>0)){
+      const u = unmapped[r.item] || (unmapped[r.item] = {item:r.item, pieces:0, why: (!m || !sec) ? "not mapped" : (!m.baseProduct ? "no Base Product" : "no pieces per unit")});
+      u.pieces += q; return;
+    }
+    const b = byBp[m.baseProduct] || (byBp[m.baseProduct] = {baseProduct:m.baseProduct, section:sec, units:0, items:{}});
+    b.units += q/per;
+    const it = b.items[r.item] || (b.items[r.item] = {item:r.item, perUnit:per, pieces:0, byDate:{}});
+    it.pieces += q; it.byDate[d] = (it.byDate[d]||0) + q;
+  });
+  Object.values(byBp).forEach(b=>{ b.units = Math.round(b.units*1000)/1000; });
+  return {days:dayList, byBp, unmapped};
+}
+
 function shoppingListComputed(referenceDate){
   // compares each base product's most recent (pre-referenceDate) stock take against its Calculated
   // Holdings target — referenceDate defaults to today, since every live caller (Shopping List, Quick
@@ -1338,6 +1385,7 @@ function shoppingListComputed(referenceDate){
   const overPct = Number(DATA.shoppingList.overstockPct)||1.5;
   const buyPct = Number(DATA.shoppingList.buyPct)||1; // ratio below which stock still counts as "Buy" (Consider Buying); at/above it, and below the overstock threshold, it's OK — defaults to 100% (old hardcoded behavior)
   const cover = weekendCoverDays_(today), wmap = cover ? weekdayDemandMap_(today) : null; // Friday/Saturday only — see Weekend cover above
+  const trays = trayNeedMap_(today).byBp; // Fruit Trays: tray orders still to deliver in this buying day's window (same stock)
   const rows = plan.map(row=>{
     const stockEntry = stockMap[row.baseProduct] || null;
     const currentStock = stockEntry ? stockEntry.amount : null;
@@ -1353,6 +1401,11 @@ function shoppingListComputed(referenceDate){
         if(n>recommended){ recommended = n; weekendRaised = true; }
       }
     }
+    // Fruit trays come on top of the wholesale target: the same stock serves both (see trayNeedMap_). A tray-only product with no
+    // wholesale target of its own gets the tray need as its whole target.
+    const wholesaleRecommended = recommended;
+    const trayNeed = trays[row.baseProduct] ? trays[row.baseProduct].units : 0;
+    if(trayNeed>0) recommended = Math.ceil((recommended===null ? 0 : recommended) + trayNeed);
     let status, toBuy = null, ratio = null;
     if(recommended === null){
       status = "Missing setup"; // no computable holding target yet (e.g. missing conversion factor)
@@ -1374,7 +1427,7 @@ function shoppingListComputed(referenceDate){
       mondayGap = Math.ceil(weekendNeed - currentStock - plannedInToday_(row.baseProduct, today));
       atRisk = mondayGap > 0;
     }
-    return Object.assign({}, row, {recommended, baseRecommended: row.recommended, weekendNeed, weekendRaised, atRisk, mondayGap, currentStock, stockDate, status, toBuy, ratio});
+    return Object.assign({}, row, {recommended, wholesaleRecommended, trayNeed, baseRecommended: row.recommended, weekendNeed, weekendRaised, atRisk, mondayGap, currentStock, stockDate, status, toBuy, ratio});
   });
   // Sorted by % of stock ascending — lowest stock (0%) at the top, fullest (100%+) at the bottom — so
   // the most urgent restocking is always what you see first. A row with no computable % at all (no
@@ -2672,6 +2725,7 @@ async function loadData(){
   // The backend answers HTTP 200 with {ok:false,error} when it trips over something — never treat that as "empty data"
   if(!fresh || fresh.ok===false || !Array.isArray(fresh.users)) throw new Error((fresh && fresh.error) ? String(fresh.error) : "The server answered, but sent no user list");
   supplierListOnServer_ = Array.isArray(fresh.suppliers); // an older Code.gs has no Suppliers sheet and would silently drop the list
+  traysOnServer_ = Array.isArray(fresh.trayItemMap); // likewise for Fruit Trays (TrayDemand / TrayItemMap sheets, Creator pull)
   return applyDataDefaults(fresh);
 }
 
@@ -3005,6 +3059,7 @@ function render(){
     else if(currentTab==="shoppinglist") pageHtml = renderShoppingList();
     else if(currentTab==="quickbuy") pageHtml = renderQuickBuy();
     else if(currentTab==="shoppingarchive") pageHtml = renderShoppingArchive();
+    else if(currentTab==="trays") pageHtml = renderTrays();
     else if(currentTab==="receiving") pageHtml = renderReceiving();
     else if(currentTab==="dashboard") pageHtml = renderDashboard();
     else if(currentTab==="itemsetup") pageHtml = renderItemSetup();
@@ -3565,7 +3620,7 @@ function renderShoppingList(){
       <td>${shoppingStatusChip(r.status)} ${stockPctBadge(r)}</td>
       <td class="num">${r.currentStock!==null ? fmtNum(r.currentStock) : "—"}</td>
       <td class="helptext">${esc(r.stockDate||"—")}</td>
-      <td class="num">${r.recommended!==null ? fmtNum(r.recommended,0) : "—"}${r.weekendRaised ? ` <span class="helptext" title="Raised for the weekend: enough to last until Monday's delivery (normal target ${fmtNum(r.baseRecommended,0)})">🗓</span>` : ""}</td>
+      <td class="num">${r.recommended!==null ? fmtNum(r.recommended,0) : "—"}${r.weekendRaised ? ` <span class="helptext" title="Raised for the weekend: enough to last until Monday's delivery (normal target ${fmtNum(r.baseRecommended,0)})">🗓</span>` : ""}${r.trayNeed>0 ? `<div class="helptext" title="Includes ${fmtNum(r.trayNeed,1)} for fruit-tray orders still to deliver (Fruit Trays page); wholesale alone ${r.wholesaleRecommended!==null && r.wholesaleRecommended!==undefined ? fmtNum(r.wholesaleRecommended,0) : "—"}">incl. ${fmtNum(r.trayNeed,1)} trays</div>` : ""}</td>
       <td class="num" style="font-weight:${r.toBuy?'600':'400'};">${r.toBuy!==null ? fmtNum(r.toBuy,0) : "—"}</td>
       <td>${esc(r.procUnit||"—")}</td>
       <td>${renderBuyCell(r, today)}</td>
@@ -5041,6 +5096,167 @@ function renderSalesData(){
 }
 
 // ---------- Purchase Costs ----------
+// ---------- Fruit Trays page ----------
+let traysOnServer_ = true; // false until Code.gs / Auth.gs / ZohoCreator.gs with Fruit Trays are deployed (set by loadData)
+let traysDate = "", traysSection = "fruit", traysFilter = "", traysOpen = "", traysMapOpen = null, traysAutoTried = false, traysRefreshing = false;
+function traysDate_(){ return traysDate || todaySA(); }
+function traysRows_(dateStr){
+  const t = trayNeedMap_(dateStr);
+  const sl = {}; shoppingListComputed(dateStr).forEach(r=>{ sl[r.baseProduct] = r; });
+  const stockMap = latestStockTakeMap(dateStr);
+  const rows = Object.values(t.byBp).map(b=>{
+    const s = sl[b.baseProduct];
+    const st = s ? s.currentStock : (stockMap[b.baseProduct] ? stockMap[b.baseProduct].amount : null);
+    const stDate = s ? s.stockDate : (stockMap[b.baseProduct] ? stockMap[b.baseProduct].date : null);
+    const wholesale = s && s.wholesaleRecommended!==undefined ? s.wholesaleRecommended : null;
+    const total = (s && s.recommended!==null && s.recommended!==undefined) ? s.recommended : Math.ceil(b.units);
+    const toBuy = st===null || st===undefined ? null : Math.max(0, Math.ceil(total - st));
+    const status = (st===null || st===undefined) ? "nostock" : (toBuy>0 ? "short" : "ok");
+    return Object.assign({}, b, {wholesale, total, stock: st, stockDate: stDate, toBuy, status, procUnit: procUnitForBase(b.baseProduct), notInList: !s});
+  }).sort((a,b)=> (a.status==="short"?0:a.status==="nostock"?1:2) - (b.status==="short"?0:b.status==="nostock"?1:2) || a.baseProduct.localeCompare(b.baseProduct));
+  return {days:t.days, rows, unmapped:Object.values(t.unmapped).sort((a,b)=> b.pieces-a.pieces)};
+}
+function trayPulledAgeMin_(){
+  const p = DATA.trayDemandPulled; if(!p || !p.at) return Infinity;
+  const t = new Date(String(p.at).replace(" ","T")+"+02:00").getTime();
+  return isNaN(t) ? Infinity : (Date.now()-t)/60000;
+}
+async function traysRefresh_(silent){
+  if(traysRefreshing) return;
+  if(!traysOnServer_){ if(!silent) toast("Deploy the new server files first — see the notice at the top"); return; }
+  traysRefreshing = true; setSyncBusy(true); render();
+  let r = null;
+  try{ r = (await apiPost_({action:"refreshTrayDemand"})).result; }catch(e){ r = null; }
+  if(r && r.ok){
+    await fastDataRefresh();
+    const i = r.result || {};
+    if(!silent) toast("Tray orders copied from Creator for "+shortDayLabel(i.from)+" – "+shortDayLabel(i.to)+(i.deletedOrderLines ? " ("+i.deletedOrderLines+" lines of deleted orders left out)" : ""));
+  } else {
+    toast(r && r.error ? String(r.error) : "Couldn't reach the server — check your connection and try again");
+  }
+  traysRefreshing = false; setSyncBusy(false); render();
+}
+function renderTrays(){
+  const D = traysDate_();
+  const data = traysRows_(D);
+  const pulled = DATA.trayDemandPulled;
+  const covered = pulled && pulled.from && pulled.to && data.days.every(d=> d>=pulled.from && d<=pulled.to);
+  const sectionRows = data.rows.filter(r=> r.section===traysSection);
+  const cnt = st=> sectionRows.filter(r=> r.status===st).length;
+  let shown = sectionRows;
+  if(traysFilter==="short" || traysFilter==="ok" || traysFilter==="nostock") shown = shown.filter(r=> r.status===traysFilter);
+  const tile = (label, value, key, color, sub)=> `<div class="stat clickable${traysFilter===key?" active":""}" data-tray-filter="${key}" title="Click to show these (click again to clear)"><div class="label">${label}</div><div class="value" style="color:${value?color:"inherit"};">${value}</div><div class="helptext">${sub}</div></div>`;
+  const dayLbl = d=> shortDayLabel(d);
+  const unitTxt = (v)=> v===null || v===undefined ? "—" : fmtNum(v, Math.abs(v)%1 ? 1 : 0);
+  const body = shown.map(r=>{
+    const chipHtml = r.status==="short" ? chip("buy "+fmtNum(r.toBuy,0),"critical") : (r.status==="ok" ? chip("covered","good") : chip("no stock count","warn"));
+    const items = Object.values(r.items).sort((a,b)=> b.pieces-a.pieces);
+    const detail = traysOpen===r.baseProduct ? `<tr><td colspan="8" style="background:var(--surface-2, rgba(0,0,0,.03));">
+      <table><thead><tr><th>Creator item</th><th class="num">Pieces per ${esc(r.procUnit||"unit")}</th>${data.days.map(d=>`<th class="num">${esc(dayLbl(d))}</th>`).join("")}<th class="num">Pieces</th><th class="num">${esc(r.procUnit||"Units")}</th></tr></thead>
+      <tbody>${items.map(it=>`<tr><td>${esc(it.item)}</td><td class="num">${fmtNum(it.perUnit)}</td>${data.days.map(d=>`<td class="num">${it.byDate[d] ? fmtNum(it.byDate[d],0) : "—"}</td>`).join("")}<td class="num">${fmtNum(it.pieces,0)}</td><td class="num">${fmtNum(it.pieces/it.perUnit,1)}</td></tr>`).join("")}</tbody></table>
+      ${r.notInList ? `<div class="helptext" style="margin-top:6px;">This Base Product isn't on the Shopping List (made to order / left out of the stock take), so only the tray need is counted here.</div>` : ""}
+    </td></tr>` : "";
+    return `<tr data-tray-open="${esc(r.baseProduct)}" style="cursor:pointer;" title="Click for the Creator items and days behind this"><td>${traysOpen===r.baseProduct?"▾":"▸"} ${esc(r.baseProduct)}</td>
+      <td class="num" style="font-weight:600;">${unitTxt(r.units)}</td>
+      <td class="num">${unitTxt(r.wholesale)}</td>
+      <td class="num">${unitTxt(r.total)}</td>
+      <td class="num">${r.stock!==null && r.stock!==undefined ? fmtNum(r.stock) : "—"}<div class="helptext">${esc(r.stockDate||"")}</div></td>
+      <td class="num" style="font-weight:600;${r.status==="short"?"color:var(--critical);":""}">${r.toBuy!==null ? fmtNum(r.toBuy,0) : "—"}</td>
+      <td>${esc(r.procUnit||"—")}</td><td>${chipHtml}</td></tr>` + detail;
+  }).join("");
+  // mapping card: every Creator item seen (any day) or already mapped
+  const piecesInWindow = {}; const winSet = new Set(data.days);
+  (DATA.trayDemand||[]).forEach(r=>{ if(winSet.has(String(r.date).slice(0,10))) piecesInWindow[r.item] = (piecesInWindow[r.item]||0) + (Number(r.qty)||0); });
+  const allItems = Array.from(new Set((DATA.trayDemand||[]).map(r=> String(r.item)).concat((DATA.trayItemMap||[]).map(m=> String(m.item))))).filter(Boolean).sort((a,b)=> a.localeCompare(b));
+  const mapOpen = traysMapOpen===null ? data.unmapped.length>0 : traysMapOpen;
+  const mapRows = allItems.map(item=>{
+    const m = trayMapFor_(item) || {};
+    const sec = String(m.section||""), bp = String(m.baseProduct||""), per = (m.perUnit===undefined || m.perUnit===null) ? "" : String(m.perUnit);
+    const need = !sec ? true : (sec!=="ignore" && (!bp || !(Number(per)>0)));
+    return `<tr data-tray-map-item="${esc(item)}"${need?' style="background:var(--warnbg, rgba(245,158,11,.10));"':''}><td>${esc(item)}</td>
+      <td class="num">${piecesInWindow[item] ? fmtNum(piecesInWindow[item],0) : "—"}</td>
+      <td><select data-tray-map-sec data-pristine="${esc(sec)}"><option value="" ${sec===""?"selected":""}>— choose —</option><option value="fruit" ${sec==="fruit"?"selected":""}>Fruit</option><option value="dry" ${sec==="dry"?"selected":""}>Dry goods</option><option value="ignore" ${sec==="ignore"?"selected":""}>Not ours</option></select></td>
+      <td><input type="text" list="trayBpList" data-tray-map-bp data-pristine="${esc(bp)}" value="${esc(bp)}" placeholder="Base Product" style="min-width:220px;"></td>
+      <td><input type="number" step="any" min="0" data-tray-map-per data-pristine="${esc(per)}" value="${esc(per)}" placeholder="e.g. 110" style="max-width:100px;"> <span class="helptext">${bp ? "per "+esc(procUnitForBase(bp)||"unit") : ""}</span></td></tr>`;
+  }).join("");
+  const unmappedCard = data.unmapped.length ? `<div class="banner warn" style="flex-wrap:wrap;gap:8px;">⚠ ${data.unmapped.length} Creator item${data.unmapped.length===1?" isn't":"s aren't"} mapped yet, so ${data.unmapped.length===1?"it is":"they are"} not counted: ${data.unmapped.slice(0,8).map(u=> esc(u.item)+" ("+fmtNum(u.pieces,0)+" pcs, "+esc(u.why)+")").join("; ")}${data.unmapped.length>8?" …":""}. Map them in <b>Creator item mapping</b> below.</div>` : "";
+  const ageMin = trayPulledAgeMin_();
+  return `
+    <div class="pagehead">
+      <div><h2>Fruit Trays</h2><p>Corporate fruit-tray orders (Zoho Creator, Jhb) — the same numbers as Creator's Shopping Schedule — turned into buying units and added to the wholesale need, because both come out of the same stock and the same stock take. Fri/Sat buy for Monday + Tuesday's tray deliveries, Mon/Tue for Wednesday–Friday. Exactly as ordered — no buffer.</p></div>
+      <div class="actions">
+        <div class="field" style="min-width:170px;"><label>Buying day</label><input type="date" id="traysDateInput" value="${esc(D)}"></div>
+        <button class="btn primary" id="traysRefreshBtn" ${traysRefreshing?"disabled":""}>${traysRefreshing ? "Copying from Creator… (up to a minute)" : "↻ Refresh from Creator"}</button>
+      </div>
+    </div>
+    ${traysOnServer_ ? "" : `<div class="banner critical">⛔ The server hasn't been updated for Fruit Trays yet. Deploy the new Code.gs, Auth.gs and ZohoCreator.gs as a new version, then reload. Until then nothing can be copied from Creator or saved here.</div>`}
+    <div class="card"><div class="cardbody" style="display:flex;gap:18px;flex-wrap:wrap;align-items:center;">
+      <div><b>Covers tray deliveries on:</b> ${data.days.length ? data.days.map(d=> chip(dayLbl(d),"neutral")).join(" ") : `<span class="helptext">none</span>`}</div>
+      <div class="helptext">${pulled && pulled.at ? "Last copied from Creator: "+esc(String(pulled.at).slice(0,16))+" ("+(ageMin<1?"just now":ageMin<90?Math.round(ageMin)+" min ago":Math.round(ageMin/60)+" h ago")+"), for "+esc(dayLbl(pulled.from))+" – "+esc(dayLbl(pulled.to)) : "Not copied from Creator yet — press Refresh."}</div>
+    </div></div>
+    ${pulled && pulled.at && !covered && data.days.length ? `<div class="banner warn">⚠ Some of these delivery days weren't in the last copy from Creator — press <b>Refresh from Creator</b>.</div>` : ""}
+    ${unmappedCard}
+    <div class="subtabs" role="tablist">${Object.keys(TRAY_SECTIONS).map(k=> `<button class="subtab ${k===traysSection?"active":""}" data-tray-section="${k}">${esc(TRAY_SECTIONS[k])} (${data.rows.filter(r=>r.section===k).length})</button>`).join("")}</div>
+    <div class="cardrow">
+      ${tile("To buy", cnt("short"), "short", "var(--critical)", "stock won't cover trays + wholesale")}
+      ${tile("Covered", cnt("ok"), "ok", "var(--good)", "enough in stock")}
+      ${tile("No stock count", cnt("nostock"), "nostock", "var(--warn)", "can't compare without a count")}
+      <div class="stat clickable" id="traysUnmappedTile" title="Click to open the item mapping"><div class="label">Not mapped</div><div class="value" style="color:${data.unmapped.length?"var(--warn)":"inherit"};">${data.unmapped.length}</div><div class="helptext">Creator items not counted yet</div></div>
+    </div>
+    <div class="card"><div class="cardhead"><div><h3>${esc(TRAY_SECTIONS[traysSection])} for ${esc(dayLbl(D))}</h3><div class="desc">Trays need = Creator pieces ÷ pieces per unit, for the deliveries above. Total need = wholesale holding target + trays need (what the Shopping List now uses too). To buy = total need − last night's stock count. Click a row for the Creator items behind it.</div></div></div>
+      <div class="cardbody" style="padding:0;"><div class="tablewrap" style="border:none;border-radius:0;max-height:620px;overflow-y:auto;"><table>
+        <thead><tr><th>Base product</th><th class="num">Trays need</th><th class="num">Wholesale target</th><th class="num">Total need</th><th class="num">In stock</th><th class="num">To buy</th><th>Unit</th><th></th></tr></thead>
+        <tbody>${body || `<tr><td colspan="8" class="empty">${sectionRows.length ? "Nothing matches this filter." : "No "+esc(TRAY_SECTIONS[traysSection].toLowerCase())+" tray orders mapped for these days."}</td></tr>`}</tbody>
+      </table></div></div></div>
+    <details class="card" id="traysMapCard" ${mapOpen?"open":""}>
+      <summary style="cursor:pointer;padding:14px 18px;font-weight:600;">Creator item mapping <span class="helptext" style="font-weight:400;">— ${allItems.length} item${allItems.length===1?"":"s"}${data.unmapped.length ? ", "+data.unmapped.length+" still to map" : ""}</span></summary>
+      <div class="cardbody">
+        <p class="helptext" style="margin-top:0;">Link each Creator item once: <b>Fruit</b> or <b>Dry goods</b>, the <b>Base Product</b> Procurement buys, and how many Creator <b>pieces make one buying unit</b> (e.g. Banana → Banana – BOX, 110 per box). <b>Not ours</b> = Procurement doesn't buy it. Highlighted rows still need something.</p>
+        <datalist id="trayBpList">${distinctBaseProducts().map(b=>`<option value="${esc(b)}">`).join("")}</datalist>
+        <div class="tablewrap" style="max-height:480px;"><table><thead><tr><th>Creator item</th><th class="num">Pieces (these days)</th><th>Section</th><th>Base Product</th><th>Pieces per buying unit</th></tr></thead>
+        <tbody>${mapRows || `<tr><td colspan="5" class="empty">No Creator items yet — press Refresh from Creator.</td></tr>`}</tbody></table></div>
+        <div style="margin-top:10px;"><button class="btn primary" id="traysMapSave">Save mapping</button></div>
+      </div>
+    </details>`;
+}
+function wireTrays_(){
+  const dateIn = document.getElementById("traysDateInput");
+  if(dateIn) dateIn.addEventListener("change", ()=>{ traysDate = dateIn.value || ""; traysOpen = ""; render(); });
+  const rb = document.getElementById("traysRefreshBtn");
+  if(rb) rb.addEventListener("click", ()=> traysRefresh_(false));
+  document.querySelectorAll("[data-tray-section]").forEach(b=> b.addEventListener("click", ()=>{ traysSection = b.dataset.traySection; traysFilter = ""; traysOpen = ""; render(); }));
+  document.querySelectorAll("[data-tray-filter]").forEach(b=> b.addEventListener("click", ()=>{ const k = b.dataset.trayFilter; traysFilter = traysFilter===k ? "" : k; render(); }));
+  const ut = document.getElementById("traysUnmappedTile");
+  if(ut) ut.addEventListener("click", ()=>{ traysMapOpen = true; render(); const c = document.getElementById("traysMapCard"); if(c) c.scrollIntoView({behavior:"smooth", block:"start"}); });
+  document.querySelectorAll("[data-tray-open]").forEach(tr=> tr.addEventListener("click", ()=>{ traysOpen = traysOpen===tr.dataset.trayOpen ? "" : tr.dataset.trayOpen; render(); }));
+  const mc = document.getElementById("traysMapCard");
+  if(mc) mc.addEventListener("toggle", ()=>{ traysMapOpen = mc.open; });
+  const save = document.getElementById("traysMapSave");
+  if(save) save.addEventListener("click", ()=>{
+    if(!traysOnServer_){ toast("Deploy the new server files first — the mapping can't be saved yet"); return; }
+    const known = distinctBaseProducts();
+    const out = [], problems = [];
+    document.querySelectorAll("[data-tray-map-item]").forEach(tr=>{
+      const item = tr.dataset.trayMapItem;
+      const sec = tr.querySelector("[data-tray-map-sec]").value;
+      let bp = tr.querySelector("[data-tray-map-bp]").value.trim();
+      const perRaw = tr.querySelector("[data-tray-map-per]").value.trim();
+      if(!sec) return; // not mapped yet — left out
+      if(sec==="ignore"){ out.push({item, section:"ignore"}); return; }
+      if(bp && !known.includes(bp)){ const c = known.find(n=> n.toLowerCase()===bp.toLowerCase()); if(c) bp = c; else { problems.push(item+': "'+bp+'" is not a Base Product in Item Setup'); return; } }
+      const per = Number(perRaw);
+      if(!bp){ problems.push(item+": pick a Base Product"); return; }
+      if(!(per>0)){ problems.push(item+": enter how many pieces make one "+(procUnitForBase(bp)||"unit")); return; }
+      out.push({item, section:sec, baseProduct:bp, perUnit:per});
+    });
+    if(problems.length){ toast("Not saved — "+problems.slice(0,2).join("; ")+(problems.length>2?" (+"+(problems.length-2)+" more)":"")); return; }
+    DATA.trayItemMap = out;
+    persist("Fruit tray mapping saved ("+out.length+" item"+(out.length===1?"":"s")+")", ["trayItemMap"]);
+  });
+  // first visit with an old (or no) copy: fetch the latest tray orders in the background
+  if(!traysAutoTried && trayPulledAgeMin_()>60){ traysAutoTried = true; setTimeout(()=> traysRefresh_(true), 0); }
+}
+
 function renderPurchase(){
   const bpSet = distinctBaseProducts();
   // Buying the same base product from two suppliers on the same day is normal now (not a duplicate to
@@ -8631,6 +8847,7 @@ function wireTabEvents(){
   }
 
   if(currentTab==="gpwatch") wireGpWatch();
+  if(currentTab==="trays") wireTrays_();
   if(currentTab==="marketaudit") wireMarketAudit();
 
   if(currentTab==="stockvariance"){
