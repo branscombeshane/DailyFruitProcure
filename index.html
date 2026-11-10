@@ -578,6 +578,7 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
 // VERSION HISTORY (newest first). The menu shows only APP_VERSION; quote it when asking for a change so the exact build is known.
+//  v2026.11.10a  — Market vs Receiving: a ticket can now also be allocated FORWARD, to a statement up to 7 days after it was booked in (stock received Friday but only paid for / invoiced by the market on Monday). Only tickets whose own day has more booked in than the statement shows are offered. Needs the new Code.gs.
 //  v2026.11.09b  — The supplier list has moved off Purchase Costs to its own tab: Product Setup > Suppliers. Owner and Procurement see it (a user with hand-ticked pages needs "Suppliers" ticked on the Users page). Works with the Code.gs already live.
 //  v2026.11.09a  — NEW Fruit Trays page (Buying): the Jhb corporate fruit-tray orders from Zoho Creator (same numbers as Creator's Shopping Schedule), turned into buying units per Base Product via a Creator-item mapping, and added to the wholesale holding target on the Shopping List (same stock). Fri/Sat cover Mon+Tue deliveries, Mon/Tue cover Wed–Fri. Fruit and Dry goods sections. Needs the new Code.gs, Auth.gs and ZohoCreator.gs.
 //  v2026.11.08a  — Item Sales: page text now says sales are pulled from Sage every morning and the CSV upload is only a fallback.
@@ -618,7 +619,7 @@ function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 //  v2026.10.26b  — Market Product Mapping: pack size calculator (works out Pack size + Receiving pack)
 //  v2026.10.26a  — footer shows only the version number (this list replaces the long on-screen text)
 //  Everything below was the on-screen build text up to 2026-10-23, newest first: Market vs Receiving audit + optional Receiving pack in the mapping | Price Export: only changed costs flag a day as outdated, not margin/min-price changes | GP Watch table: Short of target column + sticky product name | Phone menu button | Product GP Watch (from the Item Sales reports) | Made-to-order items can be removed from the stock take | Received-date grouping, changed-since-download check, queued download saves, lighter saves, stock take completeness checks, tick-box page access
-const APP_VERSION = "v2026.11.09b";
+const APP_VERSION = "v2026.11.10a";
 const APP_BUILD = APP_VERSION; // kept as an alias in case anything else reads it
 
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
@@ -1655,7 +1656,10 @@ const MA_PRICE_TOL = 0.01;
 // auditDate then replaces receivedDate for THIS comparison only (received date, cost, stock and the Price Export are untouched).
 function maReceiptDay_(p){ return p.auditDate || p.receivedDate; }
 function maAddDays_(d, n){ const x = new Date(d+"T00:00:00Z"); x.setUTCDate(x.getUTCDate()+n); return x.toISOString().slice(0,10); }
-function maTodayPending_(d){ return d >= todaySA(); } // today's receiving may not be finished when the statement lands
+function maTodayPending_(d){ return d >= todaySA(); }
+// Shane (10 Nov 2026): the reverse case — stock arrived Friday but the market only put the sale through (statement) on Monday. A ticket booked
+// in up to this many days BEFORE a statement day can be allocated forward to it. Code.gs allows the same 7 days.
+const MA_PAID_LATER_DAYS = 7; // today's receiving may not be finished when the statement lands
 function maCompute_(){
   const lookup = marketProductMapLookup();
   const today = todaySA();
@@ -1720,7 +1724,15 @@ function maCompute_(){
     const nextDayQty = (DATA.purchaseCosts||[]).reduce((a,p)=> a + ((p.baseProduct===c.baseProduct && maReceiptDay_(p)===nextDay && isMarketReceipt_(p)) ? (Number(p.receivedQty)||0) : 0), 0);
     // Tickets booked in LATER than this statement day (within 14 days) that nobody has allocated yet — the owner can pull one onto this day.
     const cands = (status==="short") ? (DATA.purchaseCosts||[]).filter(p=> p.baseProduct===c.baseProduct && isMarketReceipt_(p) && p.receivedDate && !p.auditDate && !p.notReceivedDate && (Number(p.receivedQty)||0)>0 && p.receivedDate > c.date && p.receivedDate <= maAddDays_(c.date,14))
-      .map(p=>({id:p.id, qty:Number(p.receivedQty)||0, ordered:Number(p.qty)||0, orderDate:p.date||"", receivedDate:p.receivedDate, receivedTime:p.receivedTime||"", by:p.receivedBy||"", supplier:p.supplier||"", fits:Math.abs((Number(p.receivedQty)||0)-shortUnits)<0.005, early:!!p.date && p.date<=c.date}))
+      .concat((status==="short") ? (DATA.purchaseCosts||[]).filter(p=>{
+        // booked in BEFORE this statement day (paid for later) — only offered when that ticket's own day has more booked in than its
+        // statement shows (or no statement line at all), so balanced days don't fill the list
+        if(!(p.baseProduct===c.baseProduct && isMarketReceipt_(p) && p.receivedDate && !p.auditDate && !p.notReceivedDate && (Number(p.receivedQty)||0)>0)) return false;
+        if(!(p.receivedDate < c.date && p.receivedDate >= maAddDays_(c.date,-MA_PAID_LATER_DAYS))) return false;
+        const own = cells[p.receivedDate+"|"+p.baseProduct];
+        return !own || own.received - own.market > 0.005;
+      }) : [])
+      .map(p=>({id:p.id, qty:Number(p.receivedQty)||0, ordered:Number(p.qty)||0, orderDate:p.date||"", receivedDate:p.receivedDate, receivedTime:p.receivedTime||"", by:p.receivedBy||"", supplier:p.supplier||"", fits:Math.abs((Number(p.receivedQty)||0)-shortUnits)<0.005, early:!!p.date && p.date<=c.date, before: p.receivedDate < c.date}))
       .sort((a,b)=> (b.fits-a.fits) || (b.early-a.early) || a.receivedDate.localeCompare(b.receivedDate)) : [];
     const confUnit = c.confQty>0 ? c.confVal/c.confQty : null;
     const stmtUnit = c.priceBase>0 ? c.priceTotal/c.priceBase : 0; // statement price per base unit (pricing pack size)
@@ -1780,7 +1792,7 @@ function renderMarketAudit(){
       <div><div class="helptext"><b>On the market statement</b></div><table><thead><tr><th>Market</th><th>Agent</th><th>Commodity</th><th class="num">Packs</th><th class="num">× pack</th><th class="num">Base qty</th><th class="num" title="This line's price per base unit (pricing pack size)">R/unit</th><th class="num">Total</th></tr></thead><tbody>${r.lines.map(l=>`<tr><td>${esc(l.market||"")}</td><td>${esc(l.agent||"")}</td><td>${esc(l.commodity)}</td><td class="num">${fmtNum(l.qty,l.qty%1?2:0)}</td><td class="num">${fmtNum(l.pack,2)}</td><td class="num">${fmtNum(l.base,2)}</td><td class="num">${l.unit!==null ? money(l.unit) : "—"}</td><td class="num">${money(l.total)}</td></tr>`).join("")}</tbody></table></div>
       <div><div class="helptext"><b>Booked in at the factory (${esc(r.date)})</b></div>${r.receipts.length ? `<table><thead><tr><th>Time</th><th>Received by</th><th>Supplier</th><th class="num">Confirmed price</th><th class="num">Qty</th></tr></thead><tbody>${r.receipts.map(x=>`<tr><td>${esc(x.time)}${x.late ? `<div class="helptext">logged ${esc(x.late)}</div>` : ""}</td><td>${esc(x.by)}</td><td>${esc(x.supplier)}</td><td class="num">${x.price!==null ? money(x.price) : `<span class="helptext">not confirmed</span>`}</td><td class="num">${fmtNum(x.qty,x.qty%1?2:0)}${x.late && isOwner() ? ` <button class="btn small" data-ma-unalloc="${esc(x.id)}" title="Put this ticket back on the day it was logged">Undo</button>` : ""}</td></tr>`).join("")}</tbody></table>` : `<div class="helptext">Nothing was booked in for this product that day.</div>`}</div>
       <div><div class="helptext"><b>Orders logged that day (Shopping List / Quick Buy)</b></div>${r.ordered.length ? `<table><thead><tr><th>Logged by</th><th>Supplier</th><th class="num">Ordered</th><th class="num">Received</th></tr></thead><tbody>${r.ordered.map(o=>`<tr><td>${esc(o.by)}</td><td>${esc(o.supplier)}</td><td class="num">${fmtNum(o.qty,o.qty%1?2:0)}</td><td class="num">${o.received===null ? (o.notReceivedReason ? esc("not received: "+o.notReceivedReason) : "not yet") : fmtNum(o.received,o.received%1?2:0)}${o.received!==null && o.receivedDate && o.receivedDate!==r.date ? ` <span class="helptext">(${esc(o.receivedDate)})</span>` : ""}</td></tr>`).join("")}</tbody></table>` : `<div class="helptext">No order was logged for this product that day.</div>`}</div>
-      ${r.cands.length && isOwner() ? `<div style="flex-basis:100%;"><div class="helptext"><b>Stock that arrived on ${esc(shortDayLabel(r.date))} but was only booked in later?</b> Allocate that ticket to this day so it counts against this statement line. Only the Market vs Receiving comparison changes — the ticket's received date, cost and stock stay as logged.</div><table><thead><tr><th>Booked in</th><th>Ordered</th><th>Received by</th><th>Supplier</th><th class="num">Qty</th><th></th></tr></thead><tbody>${r.cands.map(k=>`<tr><td>${esc(shortDayLabel(k.receivedDate))}${k.receivedTime ? " "+esc(fmtTime(k.receivedTime)) : ""}</td><td>${k.orderDate ? esc(shortDayLabel(k.orderDate)) : "—"}${k.early ? ' <span class="helptext">on/before this day</span>' : ""}</td><td>${esc(k.by)}</td><td>${esc(k.supplier)}</td><td class="num">${fmtNum(k.qty,k.qty%1?2:0)}${k.fits ? ' <span class="helptext">= the shortfall</span>' : ""}</td><td><button class="btn small" data-ma-alloc="${esc(k.id)}" data-ma-day="${esc(r.date)}">Allocate to ${esc(shortDayLabel(r.date))}</button></td></tr>`).join("")}</tbody></table></div>` : ""}
+      ${r.cands.length && isOwner() ? `<div style="flex-basis:100%;"><div class="helptext"><b>Stock that arrived on ${esc(shortDayLabel(r.date))} but was only booked in later — or booked in earlier and only paid for (put on the statement) on ${esc(shortDayLabel(r.date))}?</b> Allocate that ticket to this day so it counts against this statement line. Only the Market vs Receiving comparison changes — the ticket's received date, cost and stock stay as logged.</div><table><thead><tr><th>Booked in</th><th>Ordered</th><th>Received by</th><th>Supplier</th><th class="num">Qty</th><th></th></tr></thead><tbody>${r.cands.map(k=>`<tr><td>${esc(shortDayLabel(k.receivedDate))}${k.receivedTime ? " "+esc(fmtTime(k.receivedTime)) : ""}${k.before ? ' <span class="helptext">before this statement — paid later?</span>' : ""}</td><td>${k.orderDate ? esc(shortDayLabel(k.orderDate)) : "—"}${k.early ? ' <span class="helptext">on/before this day</span>' : ""}</td><td>${esc(k.by)}</td><td>${esc(k.supplier)}</td><td class="num">${fmtNum(k.qty,k.qty%1?2:0)}${k.fits ? ' <span class="helptext">= the shortfall</span>' : ""}</td><td><button class="btn small" data-ma-alloc="${esc(k.id)}" data-ma-day="${esc(r.date)}">Allocate to ${esc(shortDayLabel(r.date))}</button></td></tr>`).join("")}</tbody></table></div>` : ""}
     </div></td></tr>`;
   const body = shown.map(r=>{
     const diffTxt = (r.diff>0?"+":"")+fmtNum(r.diff, Math.abs(r.diff)%1?2:0);
@@ -1814,8 +1826,10 @@ async function maAllocate_(id, day){
   const p = (DATA.purchaseCosts||[]).find(x=> x.id===id);
   if(!p){ toast("That ticket no longer exists — reload and try again"); return; }
   const q = fmtNum(Number(p.receivedQty)||0, (Number(p.receivedQty)||0)%1?2:0);
-  const msg = day
+  const msg = day && day < p.receivedDate
     ? "Count the "+q+" "+p.baseProduct+" booked in on "+p.receivedDate+" against the "+day+" market statement?\n\nOnly do this when the stock really arrived on "+day+" and was logged late. It changes the Market vs Receiving comparison only — the ticket's received date, cost and stock are not touched."
+    : day
+    ? "Count the "+q+" "+p.baseProduct+" booked in on "+p.receivedDate+" against the "+day+" market statement?\n\nOnly do this when the stock arrived on "+p.receivedDate+" but the market only put the sale through on "+day+". It changes the Market vs Receiving comparison only — the ticket's received date, cost and stock are not touched."
     : "Put this "+p.baseProduct+" ticket back on the day it was logged ("+p.receivedDate+")?";
   if(!confirm(msg)) return;
   await persistPurchaseAction({action:"allocateReceiptToDay", id, auditDate:day, by:(currentUser&&currentUser.name)||""}, day ? "Ticket counted against "+day : "Ticket put back on "+p.receivedDate, (res)=>{
