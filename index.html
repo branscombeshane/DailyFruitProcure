@@ -578,6 +578,7 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
 // VERSION HISTORY (newest first). The menu shows only APP_VERSION; quote it when asking for a change so the exact build is known.
+//  v2026.11.10b  — Market vs Receiving, allocating forward: only tickets booked in during the 6 days before the statement day are offered (a week including the statement day; Shane: "only allow transactions from 7 days prior"), and from 08 Nov only JHB MARKET / PTA MARKET tickets (a farm delivery such as Ferreira Fresh is never on a market statement).
 //  v2026.11.10a  — Market vs Receiving: a ticket can now also be allocated FORWARD, to a statement up to 7 days after it was booked in (stock received Friday but only paid for / invoiced by the market on Monday). Only tickets whose own day has more booked in than the statement shows are offered. Needs the new Code.gs.
 //  v2026.11.09b  — The supplier list has moved off Purchase Costs to its own tab: Product Setup > Suppliers. Owner and Procurement see it (a user with hand-ticked pages needs "Suppliers" ticked on the Users page). Works with the Code.gs already live.
 //  v2026.11.09a  — NEW Fruit Trays page (Buying): the Jhb corporate fruit-tray orders from Zoho Creator (same numbers as Creator's Shopping Schedule), turned into buying units per Base Product via a Creator-item mapping, and added to the wholesale holding target on the Shopping List (same stock). Fri/Sat cover Mon+Tue deliveries, Mon/Tue cover Wed–Fri. Fruit and Dry goods sections. Needs the new Code.gs, Auth.gs and ZohoCreator.gs.
@@ -619,7 +620,7 @@ function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 //  v2026.10.26b  — Market Product Mapping: pack size calculator (works out Pack size + Receiving pack)
 //  v2026.10.26a  — footer shows only the version number (this list replaces the long on-screen text)
 //  Everything below was the on-screen build text up to 2026-10-23, newest first: Market vs Receiving audit + optional Receiving pack in the mapping | Price Export: only changed costs flag a day as outdated, not margin/min-price changes | GP Watch table: Short of target column + sticky product name | Phone menu button | Product GP Watch (from the Item Sales reports) | Made-to-order items can be removed from the stock take | Received-date grouping, changed-since-download check, queued download saves, lighter saves, stock take completeness checks, tick-box page access
-const APP_VERSION = "v2026.11.10a";
+const APP_VERSION = "v2026.11.10b";
 const APP_BUILD = APP_VERSION; // kept as an alias in case anything else reads it
 
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
@@ -1658,8 +1659,9 @@ function maReceiptDay_(p){ return p.auditDate || p.receivedDate; }
 function maAddDays_(d, n){ const x = new Date(d+"T00:00:00Z"); x.setUTCDate(x.getUTCDate()+n); return x.toISOString().slice(0,10); }
 function maTodayPending_(d){ return d >= todaySA(); }
 // Shane (10 Nov 2026): the reverse case — stock arrived Friday but the market only put the sale through (statement) on Monday. A ticket booked
-// in up to this many days BEFORE a statement day can be allocated forward to it. Code.gs allows the same 7 days.
-const MA_PAID_LATER_DAYS = 7; // today's receiving may not be finished when the statement lands
+// in up to this many days BEFORE a statement day can be allocated forward to it: 6 = the week including the statement day (Shane, 10 Nov:
+// "only allow transactions from 7 days prior" — a 09 Nov statement offers tickets from 03-08 Nov). Code.gs allows up to 7, so this is the limit.
+const MA_PAID_LATER_DAYS = 6; // today's receiving may not be finished when the statement lands
 function maCompute_(){
   const lookup = marketProductMapLookup();
   const today = todaySA();
@@ -1729,6 +1731,9 @@ function maCompute_(){
         // statement shows (or no statement line at all), so balanced days don't fill the list
         if(!(p.baseProduct===c.baseProduct && isMarketReceipt_(p) && p.receivedDate && !p.auditDate && !p.notReceivedDate && (Number(p.receivedQty)||0)>0)) return false;
         if(!(p.receivedDate < c.date && p.receivedDate >= maAddDays_(c.date,-MA_PAID_LATER_DAYS))) return false;
+        // once moved onto a statement day from 08 Nov the market-supplier rule applies to it (isMarketReceipt_ uses the allocated day), so a farm
+        // ticket booked earlier would be allocated and then silently not counted — don't offer it
+        if(c.date >= MA_SUPPLIER_RULE_FROM && !marketOfSupplier_(p.supplier)) return false;
         const own = cells[p.receivedDate+"|"+p.baseProduct];
         return !own || own.received - own.market > 0.005;
       }) : [])
