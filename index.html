@@ -582,6 +582,7 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
 // VERSION HISTORY (newest first). The menu shows only APP_VERSION; quote it when asking for a change so the exact build is known.
+//  v2026.11.13a  — Market vs Receiving: a cancellation the market puts through on a LATER statement (same agent, same product line, same number of packs, within 14 days of the sale) now counts against the day of the original purchase, so that day no longer shows short and the cancellation day no longer shows "received over". The line still shows in the row, marked "cancelled on …".
 //  v2026.11.12a  — Market vs Receiving: stock bought at the market that never came to the factory can be booked in manually, with a reason (open a short row → "Book in manually"). It balances the statement line only — it adds no stock and no cost. New "Booked in manually" tile/filter. The Product by day table is narrower (9 columns, prices in one column) so it no longer scrolls sideways. Needs the new Code.gs + Auth.gs.
 //  v2026.11.10b  — Market vs Receiving, allocating forward: only tickets booked in during the 6 days before the statement day are offered (a week including the statement day; Shane: "only allow transactions from 7 days prior"), and from 08 Nov only JHB MARKET / PTA MARKET tickets (a farm delivery such as Ferreira Fresh is never on a market statement).
 //  v2026.11.10a  — Market vs Receiving: a ticket can now also be allocated FORWARD, to a statement up to 7 days after it was booked in (stock received Friday but only paid for / invoiced by the market on Monday). Only tickets whose own day has more booked in than the statement shows are offered. Needs the new Code.gs.
@@ -625,7 +626,7 @@ function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 //  v2026.10.26b  — Market Product Mapping: pack size calculator (works out Pack size + Receiving pack)
 //  v2026.10.26a  — footer shows only the version number (this list replaces the long on-screen text)
 //  Everything below was the on-screen build text up to 2026-10-23, newest first: Market vs Receiving audit + optional Receiving pack in the mapping | Price Export: only changed costs flag a day as outdated, not margin/min-price changes | GP Watch table: Short of target column + sticky product name | Phone menu button | Product GP Watch (from the Item Sales reports) | Made-to-order items can be removed from the stock take | Received-date grouping, changed-since-download check, queued download saves, lighter saves, stock take completeness checks, tick-box page access
-const APP_VERSION = "v2026.11.12a";
+const APP_VERSION = "v2026.11.13a";
 const APP_BUILD = APP_VERSION; // kept as an alias in case anything else reads it
 
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
@@ -1671,6 +1672,26 @@ function maTodayPending_(d){ return d >= todaySA(); }
 // in up to this many days BEFORE a statement day can be allocated forward to it: 6 = the week including the statement day (Shane, 10 Nov:
 // "only allow transactions from 7 days prior" — a 09 Nov statement offers tickets from 03-08 Nov). Code.gs allows up to 7, so this is the limit.
 const MA_PAID_LATER_DAYS = 6; // today's receiving may not be finished when the statement lands
+// Cancellations (Shane, 13 Nov 2026): the market books a cancelled purchase as a negative line on the statement of the day it CANCELS it.
+// Same day nets out on its own; a later-day cancellation used to leave the purchase day short and the cancel day "over". A negative line is
+// matched to the latest earlier sale with the same market, agent, commodity and the same number of packs, within MA_CANCEL_DAYS, each sale
+// used once — and is then counted on that sale's day. Returns Map(line object -> {day, cancelledOn}).
+const MA_CANCEL_DAYS = 14;
+function maCancelMoves_(){
+  const lines = DATA.marketStatementLines||[];
+  const key = r=> [r.market||"", r.agent||"", r.commodity||""].join("|");
+  const sales = new Map();
+  lines.forEach(r=>{ const q = Number(r.qty)||0; if(q>0 && r.statementDate){ const k = key(r)+"|"+q; (sales.get(k) || sales.set(k, []).get(k)).push(r); } });
+  const used = new Set(), moves = new Map();
+  lines.filter(r=> (Number(r.qty)||0) < 0 && r.statementDate).sort((a,b)=> String(a.statementDate).localeCompare(String(b.statementDate))).forEach(n=>{
+    const cand = (sales.get(key(n)+"|"+(-(Number(n.qty)||0))) || []).filter(p=> !used.has(p) && p.statementDate <= n.statementDate && p.statementDate >= maAddDays_(n.statementDate, -MA_CANCEL_DAYS))
+      .sort((a,b)=> String(b.statementDate).localeCompare(String(a.statementDate)));
+    if(!cand.length) return;
+    used.add(cand[0]); // a same-day sale is taken first (latest first) and already nets out on its own day — nothing to move
+    if(cand[0].statementDate < n.statementDate) moves.set(n, {day: cand[0].statementDate, cancelledOn: n.statementDate});
+  });
+  return moves;
+}
 function maCompute_(){
   const lookup = marketProductMapLookup();
   const today = todaySA();
@@ -1683,10 +1704,12 @@ function maCompute_(){
     dates = allDates.filter(d=> d>=f);
   }
   const dateSet = new Set(dates);
+  const cancelMoves = maCancelMoves_();
   const cells = {};      // date|baseProduct -> aggregate
   const unmapped = {};   // market|commodity -> lines that can't be compared
   (DATA.marketStatementLines||[]).forEach(r=>{
-    if(!dateSet.has(r.statementDate)) return;
+    const mv = cancelMoves.get(r); const day = mv ? mv.day : r.statementDate; // a later-day cancellation counts on its purchase day
+    if(!dateSet.has(day)) return;
     const m = lookup.get(marketMapKey(r.market, r.commodity));
     if(isMapIgnored(m)) return; // deliberately not used (pallets, firewood, things not bought for the factory)
     const priceUnits = m && m.packSize!=null && m.packSize!=="" ? Number(m.packSize) : null;
@@ -1697,18 +1720,18 @@ function maCompute_(){
     if(!m || !m.baseProduct || !(pack>0)){
       const k = (r.market||"")+"::"+r.commodity;
       const u = unmapped[k] || (unmapped[k] = {market:r.market, commodity:r.commodity, why: !m || !m.baseProduct ? "not mapped to a Base Product" : "no pack size", lines:0, qty:0, total:0, dates:new Set()});
-      u.lines++; u.qty += Number(r.qty)||0; u.total += Number(r.total)||0; u.dates.add(r.statementDate);
+      u.lines++; u.qty += Number(r.qty)||0; u.total += Number(r.total)||0; u.dates.add(day);
       return;
     }
-    const key = r.statementDate+"|"+m.baseProduct;
-    const c = cells[key] || (cells[key] = {key, date:r.statementDate, baseProduct:m.baseProduct, market:0, total:0, markets:new Set(), lines:[], received:0, receipts:[], suppliers:new Set(), ordered:[]});
+    const key = day+"|"+m.baseProduct;
+    const c = cells[key] || (cells[key] = {key, date:day, baseProduct:m.baseProduct, market:0, total:0, markets:new Set(), lines:[], received:0, receipts:[], suppliers:new Set(), ordered:[]});
     const base = (Number(r.qty)||0)*pack;
     // the PRICE per base unit uses the pricing Pack size, not the Receiving pack (they differ when a pack is priced differently from
     // how Receiving counts it — see the mapping comment above)
     if(priceUnits>0){ c.priceBase = (c.priceBase||0) + (Number(r.qty)||0)*priceUnits; c.priceTotal = (c.priceTotal||0) + (Number(r.total)||0); }
     c.market += base; c.total += Number(r.total)||0; c.markets.add(r.market||"?");
     const lineQty = Number(r.qty)||0;
-    c.lines.push({agent:r.agent, invoice:r.invoice, commodity:r.commodity, qty:lineQty, pack, base, total:Number(r.total)||0, market:r.market,
+    c.lines.push({agent:r.agent, invoice:r.invoice, commodity:r.commodity, qty:lineQty, pack, base, total:Number(r.total)||0, market:r.market, cancelledOn: mv ? mv.cancelledOn : "",
       unit: (priceUnits>0 && lineQty) ? (Number(r.total)||0)/(lineQty*priceUnits) : null}); // this line's price per base unit
   });
   (DATA.purchaseCosts||[]).forEach(p=>{
@@ -1823,7 +1846,7 @@ function renderMarketAudit(){
     return `<div style="flex-basis:100%;"><div class="helptext"><b>Bought at the market but never came to the factory?</b> Book it in here with a reason so this statement line balances. It counts in Market vs Receiving only — it adds no stock and no cost.${maAdjOnServer_ ? "" : ` <b style="color:var(--critical);">The server (Code.gs) hasn't been updated for this yet — deploy the new Code.gs and Auth.gs as a new version, then reload.</b>`}</div>${list}${form}</div>`;
   };
   const detail = r=> `<tr><td colspan="9" style="position:static;background:var(--surface-2, rgba(0,0,0,.03));"><div style="display:flex;gap:24px;flex-wrap:wrap;align-items:flex-start;">
-      <div><div class="helptext"><b>On the market statement</b></div><table><thead><tr><th>Market</th><th>Agent</th><th>Commodity</th><th class="num">Packs</th><th class="num">× pack</th><th class="num">Base qty</th><th class="num" title="This line's price per base unit (pricing pack size)">R/unit</th><th class="num">Total</th></tr></thead><tbody>${r.lines.map(l=>`<tr><td>${esc(l.market||"")}</td><td>${esc(l.agent||"")}</td><td>${esc(l.commodity)}</td><td class="num">${fmtNum(l.qty,l.qty%1?2:0)}</td><td class="num">${fmtNum(l.pack,2)}</td><td class="num">${fmtNum(l.base,2)}</td><td class="num">${l.unit!==null ? money(l.unit) : "—"}</td><td class="num">${money(l.total)}</td></tr>`).join("")}</tbody></table></div>
+      <div><div class="helptext"><b>On the market statement</b></div><table><thead><tr><th>Market</th><th>Agent</th><th>Commodity</th><th class="num">Packs</th><th class="num">× pack</th><th class="num">Base qty</th><th class="num" title="This line's price per base unit (pricing pack size)">R/unit</th><th class="num">Total</th></tr></thead><tbody>${r.lines.map(l=>`<tr><td>${esc(l.market||"")}</td><td>${esc(l.agent||"")}</td><td>${esc(l.commodity)}${l.cancelledOn ? `<div class="helptext">cancelled on ${esc(shortDayLabel(l.cancelledOn))}'s statement</div>` : ""}</td><td class="num">${fmtNum(l.qty,l.qty%1?2:0)}</td><td class="num">${fmtNum(l.pack,2)}</td><td class="num">${fmtNum(l.base,2)}</td><td class="num">${l.unit!==null ? money(l.unit) : "—"}</td><td class="num">${money(l.total)}</td></tr>`).join("")}</tbody></table></div>
       <div><div class="helptext"><b>Booked in at the factory (${esc(r.date)})</b></div>${r.receipts.length ? `<table><thead><tr><th>Time</th><th>Received by</th><th>Supplier</th><th class="num">Confirmed price</th><th class="num">Qty</th></tr></thead><tbody>${r.receipts.map(x=>`<tr><td>${esc(x.time)}${x.late ? `<div class="helptext">logged ${esc(x.late)}</div>` : ""}</td><td>${esc(x.by)}</td><td>${esc(x.supplier)}</td><td class="num">${x.price!==null ? money(x.price) : `<span class="helptext">not confirmed</span>`}</td><td class="num">${fmtNum(x.qty,x.qty%1?2:0)}${x.late && isOwner() ? ` <button class="btn small" data-ma-unalloc="${esc(x.id)}" title="Put this ticket back on the day it was logged">Undo</button>` : ""}</td></tr>`).join("")}</tbody></table>` : `<div class="helptext">Nothing was booked in for this product that day.</div>`}</div>
       <div><div class="helptext"><b>Orders logged that day (Shopping List / Quick Buy)</b></div>${r.ordered.length ? `<table><thead><tr><th>Logged by</th><th>Supplier</th><th class="num">Ordered</th><th class="num">Received</th></tr></thead><tbody>${r.ordered.map(o=>`<tr><td>${esc(o.by)}</td><td>${esc(o.supplier)}</td><td class="num">${fmtNum(o.qty,o.qty%1?2:0)}</td><td class="num">${o.received===null ? (o.notReceivedReason ? esc("not received: "+o.notReceivedReason) : "not yet") : fmtNum(o.received,o.received%1?2:0)}${o.received!==null && o.receivedDate && o.receivedDate!==r.date ? ` <span class="helptext">(${esc(o.receivedDate)})</span>` : ""}</td></tr>`).join("")}</tbody></table>` : `<div class="helptext">No order was logged for this product that day.</div>`}</div>
       ${adjHtml(r)}
@@ -1835,7 +1858,7 @@ function renderMarketAudit(){
     const priceChip = r.priceStatus==="higher" ? chip("+"+money(r.priceDiff)+" ("+fmtNum(r.pricePct*100,1)+"%)","critical") : (r.priceStatus==="lower" ? chip("−"+money(-r.priceDiff)+" ("+fmtNum(-r.pricePct*100,1)+"%)","warn") : (r.priceStatus==="same" ? chip("✓","good") : ""));
     // Compact (Shane, 12 Nov 2026: no sideways scrolling): Short % sits under the Difference chip, and the statement price, confirmed
     // price and price diff share one Price column.
-    return `<tr data-ma-open="${esc(r.key)}" style="cursor:pointer;" title="Click for the statement lines, receipts and orders"><td style="white-space:nowrap;">${esc(shortDayLabel(r.date))}</td><td class="gpcol1">${maOpen===r.key?"▾":"▸"} ${esc(r.baseProduct)}</td><td class="num">${fmtNum(r.market, r.market%1?2:0)}</td><td class="num">${fmtNum(r.received, r.received%1?2:0)}${r.manual>0.005 ? `<div class="helptext" title="Booked in manually — never came to the factory">+${fmtNum(r.manual, r.manual%1?2:0)} manual</div>` : ""}</td><td class="num">${chipHtml}${r.status==="short" ? `<div class="helptext" style="white-space:nowrap;">${fmtNum(r.shortPct*100,0)}% short</div>` : ""}</td><td class="num" style="${r.status==="short"?"color:var(--critical);font-weight:600;":""}">${r.status==="short" ? money(Math.round(r.shortRand)) : "—"}</td><td class="num" style="white-space:nowrap;"><span title="Statement R/unit">${r.stmtUnit>0 ? money(r.stmtUnit) : "—"}</span> / <span title="Confirmed R/unit">${r.confUnit!==null ? money(r.confUnit) : (r.priceStatus==="unpriced" ? `<span class="helptext">not confirmed</span>` : "—")}</span>${priceChip ? `<div>${priceChip}</div>` : ""}</td><td>${Array.from(r.suppliers).map(esc).join(", ") || '<span class="helptext">none</span>'}</td><td>${r.manual>0.005 ? chip("booked in manually","warn")+" " : ""}${r.status==="short" && r.nextDayQty>0 ? chip("+"+fmtNum(r.nextDayQty, r.nextDayQty%1?2:0)+" next day","neutral")+" " : ""}${r.kind==="none" && !r.ordered.length ? chip("no order logged","neutral") : ""}${r.cands.length && isOwner() ? chip("late ticket?","warn")+" " : ""}${r.receipts.some(x=>x.late) ? chip("late ticket allocated","good") : ""}</td></tr>` + (maOpen===r.key ? detail(r) : "");
+    return `<tr data-ma-open="${esc(r.key)}" style="cursor:pointer;" title="Click for the statement lines, receipts and orders"><td style="white-space:nowrap;">${esc(shortDayLabel(r.date))}</td><td class="gpcol1">${maOpen===r.key?"▾":"▸"} ${esc(r.baseProduct)}</td><td class="num">${fmtNum(r.market, r.market%1?2:0)}</td><td class="num">${fmtNum(r.received, r.received%1?2:0)}${r.manual>0.005 ? `<div class="helptext" title="Booked in manually — never came to the factory">+${fmtNum(r.manual, r.manual%1?2:0)} manual</div>` : ""}</td><td class="num">${chipHtml}${r.status==="short" ? `<div class="helptext" style="white-space:nowrap;">${fmtNum(r.shortPct*100,0)}% short</div>` : ""}</td><td class="num" style="${r.status==="short"?"color:var(--critical);font-weight:600;":""}">${r.status==="short" ? money(Math.round(r.shortRand)) : "—"}</td><td class="num" style="white-space:nowrap;"><span title="Statement R/unit">${r.stmtUnit>0 ? money(r.stmtUnit) : "—"}</span> / <span title="Confirmed R/unit">${r.confUnit!==null ? money(r.confUnit) : (r.priceStatus==="unpriced" ? `<span class="helptext">not confirmed</span>` : "—")}</span>${priceChip ? `<div>${priceChip}</div>` : ""}</td><td>${Array.from(r.suppliers).map(esc).join(", ") || '<span class="helptext">none</span>'}</td><td>${r.lines.some(l=>l.cancelledOn) ? chip("cancelled later","neutral")+" " : ""}${r.manual>0.005 ? chip("booked in manually","warn")+" " : ""}${r.status==="short" && r.nextDayQty>0 ? chip("+"+fmtNum(r.nextDayQty, r.nextDayQty%1?2:0)+" next day","neutral")+" " : ""}${r.kind==="none" && !r.ordered.length ? chip("no order logged","neutral") : ""}${r.cands.length && isOwner() ? chip("late ticket?","warn")+" " : ""}${r.receipts.some(x=>x.late) ? chip("late ticket allocated","good") : ""}</td></tr>` + (maOpen===r.key ? detail(r) : "");
   }).join("");
   const unmappedCard = (maShowUnmapped && c.unmapped.length) ? `<div class="card"><div class="cardhead"><div><h3>Statement lines that can't be compared</h3><div class="desc">These market lines have no Base Product or no pack size in Market Product Mapping, so there is nothing to compare Receiving against. Fix them there and they join the audit.</div></div><button class="btn small" data-goto-tab="marketmapping">Market Product Mapping →</button></div>
       <div class="cardbody" style="padding:0;"><div class="tablewrap" style="border:none;max-height:360px;overflow-y:auto;"><table><thead><tr><th>Market</th><th>Commodity</th><th>Why</th><th class="num">Lines</th><th class="num">Packs</th><th class="num">Total</th></tr></thead><tbody>${c.unmapped.map(u=>`<tr><td>${esc(u.market||"")}</td><td>${esc(u.commodity)}</td><td>${esc(u.why)}</td><td class="num">${u.lines}</td><td class="num">${fmtNum(u.qty,u.qty%1?2:0)}</td><td class="num">${money(u.total)}</td></tr>`).join("")}</tbody></table></div></div></div>` : "";
