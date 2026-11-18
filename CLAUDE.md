@@ -10,7 +10,7 @@ Notes for Claude sessions working on this repo. Read before making changes.
 4. **Every click shows a loading indicator.** Any action that waits on the server must show progress. Use `setSyncBusy(true/false)` for the sync pill, or a busy state on the button/card.
 5. **Never put credentials in chat.** No PINs, passwords, API keys or tokens in messages, commits or code. Secrets live in Apps Script **Script Properties**.
 6. **Never open the Users sheet** (the `Users` tab in the Google Sheet). It holds staff names and PINs.
-7. **Remind the owner to redeploy `Code.gs`** whenever it changes: Apps Script → Deploy → Manage deployments → edit → **New version**. Saving the file alone does not update the live web app. Also say in the version-history line when a front-end change "Needs the new Code.gs".
+7. **Server code deploys from the private repo.** Since 18 Nov 2026 a push to `main` in `DailyFruitProcurePrivate` deploys the Apps Script project automatically (GitHub Action, new version on the same deployment). Check the Action succeeded before pushing a front end that needs it, and say in the version-history line when a front-end change "Needs the new Code.gs".
 
 ## What's in the repo
 
@@ -49,4 +49,4 @@ Notes for Claude sessions working on this repo. Read before making changes.
 
 - Edit `index.html` in the repo. The owner no longer uploads files by hand, so the repo copy is the live source of truth.
 - Work on the assigned branch, then open a PR into `main` when asked. Merging to `main` deploys via GitHub Pages.
-- Changes to `.gs` files still have to be pasted into Apps Script and redeployed as a new version (rule 7). A front-end change that depends on new server code must not be merged to `main` until the owner has deployed that server code, because the live site would break.
+- Changes to `.gs` files go to `main` in the private repo, which deploys them (rule 7). A front-end change that depends on new server code must not be merged to `main` here until that server deploy has succeeded, because the live site would break.
