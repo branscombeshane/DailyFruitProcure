@@ -582,6 +582,7 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
 // VERSION HISTORY (newest first). The menu shows only APP_VERSION; quote it when asking for a change so the exact build is known.
+//  v2026.11.19a  — NEW Speed log page (Admin, owners only): how many requests the app sends Google per hour and at the busiest minute, how long each takes and where the time goes (reading sheets, waiting for the lock, calls to the Packing app / Zoho), the nightly/hourly/daily background jobs' minutes, and this browser's own round trips — with a CSV download. Also: a tab that is hidden (another tab or app in front) no longer checks for updates every 20 s; it checks the moment it is shown again. Needs the new Code.gs + Auth.gs.
 //  v2026.11.18a  — Market vs Receiving: in an open row, the late / next-day tickets to allocate now show first and "Book in manually" sits at the bottom.
 //  v2026.11.13a  — Market vs Receiving: a cancellation the market puts through on a LATER statement (same agent, same product line, same number of packs, within 14 days of the sale) now counts against the day of the original purchase, so that day no longer shows short and the cancellation day no longer shows "received over". The line still shows in the row, marked "cancelled on …".
 //  v2026.11.12a  — Market vs Receiving: stock bought at the market that never came to the factory can be booked in manually, with a reason (open a short row → "Book in manually"). It balances the statement line only — it adds no stock and no cost. New "Booked in manually" tile/filter. The Product by day table is narrower (9 columns, prices in one column) so it no longer scrolls sideways. Needs the new Code.gs + Auth.gs.
@@ -627,7 +628,7 @@ function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 //  v2026.10.26b  — Market Product Mapping: pack size calculator (works out Pack size + Receiving pack)
 //  v2026.10.26a  — footer shows only the version number (this list replaces the long on-screen text)
 //  Everything below was the on-screen build text up to 2026-10-23, newest first: Market vs Receiving audit + optional Receiving pack in the mapping | Price Export: only changed costs flag a day as outdated, not margin/min-price changes | GP Watch table: Short of target column + sticky product name | Phone menu button | Product GP Watch (from the Item Sales reports) | Made-to-order items can be removed from the stock take | Received-date grouping, changed-since-download check, queued download saves, lighter saves, stock take completeness checks, tick-box page access
-const APP_VERSION = "v2026.11.18a";
+const APP_VERSION = "v2026.11.19a";
 const APP_BUILD = APP_VERSION; // kept as an alias in case anything else reads it
 
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
@@ -860,6 +861,7 @@ const NAV = [
   ]},
   {group:"Admin", items:[
     {id:"users", label:"Users"},
+    {id:"speedlog", label:"Speed log"},
   ]},
 ];
 // One sidebar entry per group, tabs across the top of the page. "tabs" = [pageId, tab label]. A user only ever sees the tabs they
@@ -894,7 +896,7 @@ if(!TABS.some(t=>t.id===currentTab)){
 // "home" (the landing Dashboard) is Owner + Procurement only, by Shane's explicit request — Stock Taker,
 // Receiving and Market stay scoped to their single-purpose tab(s), same as before.
 const ROLE_TABS = {
-  owner: ["home","findash","shoppinglist","quickbuy","shoppingarchive","trays","receiving","dashboard","salesdata","itemsetup","recipes","suppliers","purchase","confirmprices","pricehistory","marketstatements","marketaudit","sellingprices","gpwatch","stocktake","users","stockvariance","marketmapping"],
+  owner: ["home","findash","shoppinglist","quickbuy","shoppingarchive","trays","receiving","dashboard","salesdata","itemsetup","recipes","suppliers","purchase","confirmprices","pricehistory","marketstatements","marketaudit","sellingprices","gpwatch","stocktake","users","stockvariance","marketmapping","speedlog"],
   procurement: ["home","shoppinglist","quickbuy","shoppingarchive","trays","receiving","suppliers","purchase","confirmprices","pricehistory","marketstatements","sellingprices","stocktake"],
   stocktaker: ["stocktake","receiving"],
   receiving: ["receiving"],
@@ -1900,6 +1902,86 @@ async function maAllocate_(id, day){
     else { p.auditDate = ""; p.auditBy = ""; p.auditAt = ""; }
   });
 }
+
+// ---------- Speed log (owner only, 19 Nov 2026) ----------
+// From the Financials handover: every Daily Fruit app runs on Shane's ONE Google account, whose limits are shared (~30 executions
+// at once, 90 min of trigger time a day, 20 000 outside calls a day). This page shows what Procurement uses, so fixes can be aimed
+// at the biggest number. Server side: Auth.gs perfFinish_ / handleGetPerfLog_.
+let speedLog_ = null, speedLogBusy_ = false, speedLogErr_ = "", speedView_ = "";
+async function loadSpeedLog_(){
+  if(speedLogBusy_) return;
+  speedLogBusy_ = true; speedLogErr_ = ""; setSyncBusy(true); render();
+  try{
+    const {result} = await apiPost_({action:"getPerfLog"});
+    if(result && result.ok) speedLog_ = result;
+    else speedLogErr_ = (result && result.error) || "The server didn't answer.";
+    if(result && /Unrecognized action/.test(result.error||"")) speedLogErr_ = "The server (Code.gs / Auth.gs) hasn't been updated for the speed log yet.";
+  }catch(e){ speedLogErr_ = "Couldn't reach the server: " + (e && e.message || e); }
+  speedLogBusy_ = false; setSyncBusy(false); render();
+}
+function speedLogData_(){
+  const L = speedLog_ || {hours:{}, log:[]};
+  const hourKeys = Object.keys(L.hours||{}).sort().reverse();
+  const nowKey = (L.now||"").slice(0,13);
+  const dayAgo = (()=>{ const d = new Date(Date.now()-24*3600e3); return d.toLocaleString("sv-SE",{timeZone:"Africa/Johannesburg"}).slice(0,13); })();
+  const last24 = hourKeys.filter(k=> k > dayAgo);
+  const sum = (keys, f)=> keys.reduce((a,k)=> a + (f(L.hours[k])||0), 0);
+  const actions = {};
+  last24.forEach(k=> Object.entries(L.hours[k].a||{}).forEach(([name,v])=>{ const x = actions[name] || (actions[name] = {name, n:0, ms:0, max:0}); x.n += v[0]; x.ms += v[1]; x.max = Math.max(x.max, v[2]); }));
+  return {L, hourKeys, last24, nowKey,
+    req24: sum(last24, h=>h.n), peak: Math.max(0, ...last24.map(k=> L.hours[k].peak||0)),
+    packing24: sum(last24, h=> (h.fetch||{}).packing), zoho24: sum(last24, h=> (h.fetch||{}).zoho),
+    trigMin24: sum(last24, h=>h.tms)/60000, trigRuns24: sum(last24, h=>h.tn),
+    actions: Object.values(actions).sort((a,b)=> b.ms-a.ms)};
+}
+function renderSpeedLog_(){
+  if(!isOwner()) return `<div class="card"><div class="cardbody">Owners only.</div></div>`;
+  const D = speedLogData_(), L = D.L;
+  const tile = (key, label, value, sub)=> `<div class="stat" data-speed-view="${key}" style="cursor:pointer;${speedView_===key?"outline:2px solid var(--accent);":""}" title="Click to show just this table (click again for all)"><div class="label">${label}</div><div class="value">${value}</div><div class="helptext">${sub}</div></div>`;
+  const show = k=> !speedView_ || speedView_===k;
+  const hoursRows = D.hourKeys.map(k=>{ const h = L.hours[k]; return `<tr><td>${esc(k)}:00${h.live?' <span class="helptext">(so far)</span>':""}</td><td class="num">${h.n}</td><td class="num">${h.peak||0}</td><td class="num">${h.n ? fmtNum(h.ms/h.n/1000,1)+" s" : "—"}</td><td class="num">${h.tn||0}</td><td class="num">${fmtNum((h.tms||0)/60000,1)}</td><td class="num">${(h.fetch||{}).packing||0}</td><td class="num">${(h.fetch||{}).zoho||0}</td></tr>`; }).join("");
+  const actRows = D.actions.map(a=> `<tr><td>${esc(a.name)}</td><td class="num">${a.n}</td><td class="num">${fmtNum(a.ms/a.n/1000,2)} s</td><td class="num">${fmtNum(a.max/1000,1)} s</td><td class="num">${fmtNum(a.ms/60000,1)}</td></tr>`).join("");
+  const sheetTxt = sh=> Object.entries(sh||{}).sort((a,b)=> b[1].ms-a[1].ms).slice(0,6).map(([n,v])=> `${n} ${fmtNum(v.ms/1000,1)}s/${v.rows}r${v.reads>1?" ×"+v.reads:""}`).join(", ");
+  const logRows = (L.log||[]).slice().reverse().map(x=> `<tr><td>${esc(x.at)}</td><td>${esc(x.action)}</td><td class="num">${fmtNum(x.ms/1000,1)} s</td><td class="num">${fmtNum((x.readMs||0)/1000,1)} s <span class="helptext">(${x.reads||0} reads)</span></td><td class="num">${fmtNum((x.lockMs||0)/1000,1)} s</td><td>${esc(Object.entries(x.fetch||{}).map(([k,v])=> k+" "+v.n+"× "+fmtNum(v.ms/1000,1)+"s").join(", "))}</td><td class="helptext">${esc(sheetTxt(x.sheets))}</td></tr>`).join("");
+  const cl = perfClient_.slice().reverse();
+  const clRows = cl.slice(0,150).map(c=> `<tr><td>${esc(c.at)}</td><td>${esc(c.action)}${c.hidden?' <span class="helptext">(hidden tab)</span>':""}</td><td class="num">${fmtNum(c.ms/1000,1)} s</td><td class="num">${c.serverMs!==null ? fmtNum(c.serverMs/1000,1)+" s" : "—"}</td><td class="num">${c.serverMs!==null ? fmtNum((c.ms-c.serverMs)/1000,1)+" s" : "—"}</td><td>${c.ok ? "" : chip("no answer","critical")}</td></tr>`).join("");
+  const table = (key, title, desc, head, rows, cols)=> show(key) ? `<div class="card"><div class="cardhead"><div><h3>${title}</h3><div class="desc">${desc}</div></div></div><div class="cardbody" style="padding:0;"><div class="tablewrap" style="border:none;border-radius:0;max-height:480px;overflow-y:auto;"><table><thead><tr>${head}</tr></thead><tbody>${rows || `<tr><td colspan="${cols}" class="empty">Nothing recorded yet.</td></tr>`}</tbody></table></div></div></div>` : "";
+  return `
+    <div class="pagehead"><div><h2>Speed log</h2><p>What Procurement asks of Google. Every Daily Fruit app runs on the same Google account and shares its limits: about 30 requests at the same moment across ALL apps, 90 minutes of background (trigger) time a day, and 20 000 outside calls a day. Counts start from when the new Code.gs went live; hourly totals are kept for 7 days, the slow-request list for 6 hours.</p></div>
+      <div style="display:flex;gap:8px;"><button class="btn" id="speedReload" ${speedLogBusy_?"disabled":""}>${speedLogBusy_?"Loading…":"Refresh"}</button><button class="btn primary" id="speedCsv" ${speedLog_?"":"disabled"}>Download CSV</button></div></div>
+    ${speedLogErr_ ? `<div class="banner critical">${esc(speedLogErr_)}</div>` : ""}
+    ${!speedLog_ && !speedLogErr_ ? `<div class="card"><div class="cardbody">Loading…</div></div>` : ""}
+    <div class="cardrow">
+      ${tile("hours","Requests, last 24 h", D.req24, "from browsers and other apps")}
+      ${tile("hours","Busiest minute", D.peak, "requests in one minute (last 24 h)")}
+      ${tile("hours","Calls to Packing, 24 h", D.packing24, "Sage reads / price pushes")}
+      ${tile("actions","Trigger minutes, 24 h", fmtNum(D.trigMin24,1), D.trigRuns24+" background runs (of the 90-min daily allowance)")}
+      ${tile("slow","Slow / background", (L.log||[]).length, "requests over "+fmtNum((L.slowMs||1500)/1000,1)+" s, imports and triggers (6 h)")}
+      ${tile("client","This browser", perfClient_.length, "of its own calls timed")}
+    </div>
+    ${table("hours","By hour","Busiest minute = most requests in a single minute that hour. Trigger runs/minutes = the nightly snapshot, the 06:00 Sage pull and the hourly tray copy.",
+      `<th>Hour</th><th class="num">Requests</th><th class="num">Busiest minute</th><th class="num">Avg time</th><th class="num">Trigger runs</th><th class="num">Trigger min</th><th class="num">Packing calls</th><th class="num">Zoho calls</th>`, hoursRows, 8)}
+    ${table("actions","By request type (last 24 h)","Sorted by total time used. getData = a full load of everything; version = the 20-second \"anything new?\" check.",
+      `<th>Request</th><th class="num">Count</th><th class="num">Avg</th><th class="num">Slowest</th><th class="num">Total min</th>`, actRows, 5)}
+    ${table("slow","Slow requests, imports and triggers (last 6 h)","Read = time reading sheets (which sheets, rows, ×n if read more than once). Lock = waiting for another save to finish.",
+      `<th>When</th><th>Request</th><th class="num">Total</th><th class="num">Reading sheets</th><th class="num">Lock wait</th><th>Outside calls</th><th>Sheets (slowest first)</th>`, logRows, 7)}
+    ${table("client","This browser's round trips (latest 150)","Waiting on Google = round trip − server time: Google start-up, queueing behind other requests, and the network. \"No answer\" = the request never came back.",
+      `<th>When</th><th>Request</th><th class="num">Round trip</th><th class="num">Server</th><th class="num">Waiting on Google</th><th></th>`, clRows, 6)}`;
+}
+function wireSpeedLog_(){
+  if(!speedLog_ && !speedLogBusy_ && !speedLogErr_) loadSpeedLog_();
+  const r = document.getElementById("speedReload"); if(r) r.addEventListener("click", loadSpeedLog_);
+  document.querySelectorAll("[data-speed-view]").forEach(t=> t.addEventListener("click", ()=>{ speedView_ = speedView_===t.dataset.speedView ? "" : t.dataset.speedView; render(); }));
+  const c = document.getElementById("speedCsv"); if(c) c.addEventListener("click", ()=>{
+    const D = speedLogData_(), L = D.L, rows = [["section","when","request","count","total_ms","avg_ms","max_ms","busiest_minute","trigger_runs","trigger_ms","packing_calls","zoho_calls","read_ms","reads","lock_ms","server_ms","detail"]];
+    D.hourKeys.forEach(k=>{ const h = L.hours[k]; rows.push(["hour",k,"",h.n,h.ms,h.n?Math.round(h.ms/h.n):"","",h.peak||0,h.tn||0,h.tms||0,(h.fetch||{}).packing||0,(h.fetch||{}).zoho||0,"","","","",""]);
+      Object.entries(h.a||{}).forEach(([n,v])=> rows.push(["hour_action",k,n,v[0],v[1],Math.round(v[1]/v[0]),v[2],"","","","","","","","","",""])); });
+    (L.log||[]).forEach(x=> rows.push(["slow",x.at,x.action,1,x.ms,"","","","","",(x.fetch&&x.fetch.packing&&x.fetch.packing.n)||0,(x.fetch&&x.fetch.zoho&&x.fetch.zoho.n)||0,x.readMs||0,x.reads||0,x.lockMs||0,"",Object.entries(x.sheets||{}).map(([n,v])=> n+":"+v.ms+"ms/"+v.rows+"r/x"+v.reads).join(" ")]));
+    perfClient_.forEach(cc=> rows.push(["browser",cc.at,cc.action,1,cc.ms,"","","","","","","","","","",cc.serverMs===null?"":cc.serverMs,(cc.ok?"":"no answer")+(cc.hidden?" hidden":"")]));
+    browserDownload("procurement_speed_log_"+todaySA()+".csv", rows.map(r=> r.map(toCsvField).join(",")).join("\n"), "text/csv");
+  });
+}
+
 function wireMarketAudit(){
   const bind = (id, fn, ev)=>{ const el = document.getElementById(id); if(el) el.addEventListener(ev||"change", fn); };
   bind("maPeriodSel", e=>{ maPeriod = e.target.value; maOpen = ""; render(); });
@@ -2791,11 +2873,29 @@ function pricingSuggestionsComputed(asOf){
 async function apiPost_(body){
   const payload = Object.assign({}, body);
   if(currentUser && currentUser.token) payload.token = currentUser.token;
-  const res = await fetch(API_URL, {method:"POST", headers:{"Content-Type":"text/plain;charset=utf-8"}, body:JSON.stringify(payload)});
+  const t0 = performance.now();
+  let res;
+  try{ res = await fetch(API_URL, {method:"POST", headers:{"Content-Type":"text/plain;charset=utf-8"}, body:JSON.stringify(payload)}); }
+  catch(e){ perfClientNote_(payload, t0, null, false); throw e; }
   let result = null;
   try{ result = await res.json(); }catch(e){ result = null; }
+  perfClientNote_(payload, t0, result, res.ok);
   if(result && result.authError) sessionEnded_(result.error);
   return {res, result};
+}
+// Speed log, this browser's side (Shane, 19 Nov 2026 — Google's limits are shared by every Daily Fruit app): every call's round
+// trip. Round trip minus the server's own time (_perf.ms) = Google start-up + queueing + network. Kept in this browser only
+// (last 300 calls); shown on the Speed log page. Action names and times only.
+let perfClient_ = (()=>{ try{ return JSON.parse(localStorage.getItem("dfPerfClient")||"[]"); }catch(e){ return []; } })();
+function perfClientNote_(payload, t0, result, ok){
+  try{
+    const p = result && result._perf;
+    const action = payload.action || (Array.isArray(payload.changedKeys) ? "save:"+payload.changedKeys.join("+") : "save");
+    perfClient_.push({at:new Date().toLocaleString("sv-SE",{timeZone:"Africa/Johannesburg"}), action, ms:Math.round(performance.now()-t0),
+      serverMs: p ? p.ms : null, ok: !!ok && !!result, hidden: document.visibilityState==="hidden"});
+    if(perfClient_.length>300) perfClient_ = perfClient_.slice(-300);
+    localStorage.setItem("dfPerfClient", JSON.stringify(perfClient_));
+  }catch(e){}
 }
 // The session is over: forget the user and the data this browser holds, and show the login screen with the reason.
 function sessionEnded_(msg){
@@ -3181,6 +3281,7 @@ function render(){
     else if(currentTab==="marketaudit") pageHtml = renderMarketAudit();
     else if(currentTab==="stocktake") pageHtml = renderStockTake();
     else if(currentTab==="users") pageHtml = renderUsers();
+    else if(currentTab==="speedlog") pageHtml = renderSpeedLog_();
     else if(currentTab==="stockvariance") pageHtml = renderStockVariance();
     else if(currentTab==="marketmapping") pageHtml = renderMarketMapping();
     // shown above whichever page is current, on every tab, until reloaded — a bulk save (Item Setup /
@@ -8952,6 +9053,7 @@ function wireTabEvents(){
   if(currentTab==="gpwatch") wireGpWatch();
   if(currentTab==="trays") wireTrays_();
   if(currentTab==="marketaudit") wireMarketAudit();
+  if(currentTab==="speedlog") wireSpeedLog_();
 
   if(currentTab==="stockvariance"){
     const flagInput = document.getElementById("stockVarianceFlagPctInput");
@@ -9373,6 +9475,9 @@ function wireActivityTracking(){
 // and someone's logged in (no point refreshing a login screen).
 async function checkForUpdates(){
   if(!dataLoaded || !currentUser || dataRefreshInFlight) return;
+  // A hidden tab (another tab or app in front) doesn't poll: every poll is a Google execution on Shane's shared allowance
+  // (19 Nov 2026). Becoming visible again runs this straight away (visibilitychange / focus below), so nothing is missed.
+  if(document.visibilityState === "hidden") return;
   let serverVersion;
   try{
     const {res, result} = await apiPost_({action:"version"});
