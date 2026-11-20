@@ -582,6 +582,7 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
 // VERSION HISTORY (newest first). The menu shows only APP_VERSION; quote it when asking for a change so the exact build is known.
+//  v2026.11.20b  — Push prices to Sage: every price INCREASE is still pushed, but a DECREASE smaller than 2% is held back (new "Small drops held" tile) until the drop reaches 2%. The daily moves of the 7-day average cost made ~380 tiny Sage updates a day (20+ minutes of shared Google time); margin is never at risk because rises always go through. Held items count as done for the day.
 //  v2026.11.20a  — Faster and lighter on Google: opening the app or reloading after someone saves now comes from a server copy that is rebuilt only when something is written (was 11-13 s every time), and the 20-second "anything new?" check no longer re-reads the Users sheet. A screen nobody has touched for 5 minutes checks once a minute instead of every 20 s (it checks straight away when touched). Same numbers on every screen. Needs the new Code.gs + Auth.gs.
 //  v2026.11.19a  — NEW Speed log page (Admin, owners only): how many requests the app sends Google per hour and at the busiest minute, how long each takes and where the time goes (reading sheets, waiting for the lock, calls to the Packing app / Zoho), the nightly/hourly/daily background jobs' minutes, and this browser's own round trips — with a CSV download. Also: a tab that is hidden (another tab or app in front) no longer checks for updates every 20 s; it checks the moment it is shown again. Needs the new Code.gs + Auth.gs.
 //  v2026.11.18a  — Market vs Receiving: in an open row, the late / next-day tickets to allocate now show first and "Book in manually" sits at the bottom.
@@ -629,7 +630,7 @@ function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 //  v2026.10.26b  — Market Product Mapping: pack size calculator (works out Pack size + Receiving pack)
 //  v2026.10.26a  — footer shows only the version number (this list replaces the long on-screen text)
 //  Everything below was the on-screen build text up to 2026-10-23, newest first: Market vs Receiving audit + optional Receiving pack in the mapping | Price Export: only changed costs flag a day as outdated, not margin/min-price changes | GP Watch table: Short of target column + sticky product name | Phone menu button | Product GP Watch (from the Item Sales reports) | Made-to-order items can be removed from the stock take | Received-date grouping, changed-since-download check, queued download saves, lighter saves, stock take completeness checks, tick-box page access
-const APP_VERSION = "v2026.11.20a";
+const APP_VERSION = "v2026.11.20b";
 const APP_BUILD = APP_VERSION; // kept as an alias in case anything else reads it
 
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
@@ -5768,12 +5769,22 @@ function partSig_(slice){
 const SAGE_PUSH_BATCH = 5; // a batch has to finish inside one 60 s request (Procurement -> Packing -> Sage); 10 was too many on a slow Sage day. The Packing app accepts up to 10.
 let sagePush = null; // ONE push for BOTH companies together: {date, rows, phase, cos:[per-company state], active, risky, stop, done, total, msg, waiting, ...}
 const SAGE_PUSH_PROBLEM = ["rejected","mismatch","sideeffect","unverified","error","unknown"];
-const SAGE_PUSH_LABEL = {change:"will change", same:"already correct", blocked:"blocked", notfound:"not in Sage", inactive:"inactive in Sage", noratio:"no usable Sage price", badprice:"bad price", duplicate:"repeated code", updated:"✓ updated", rejected:"Sage refused it", mismatch:"saved differently", sideeffect:"stopped — other field changed", unverified:"could not confirm", error:"error", unknown:"unknown — check Sage", skipped:"not attempted"};
+const SAGE_PUSH_LABEL = {change:"will change", same:"already correct", held:"held — drop under 2%", blocked:"blocked", notfound:"not in Sage", inactive:"inactive in Sage", noratio:"no usable Sage price", badprice:"bad price", duplicate:"repeated code", updated:"✓ updated", rejected:"Sage refused it", mismatch:"saved differently", sideeffect:"stopped — other field changed", unverified:"could not confirm", error:"error", unknown:"unknown — check Sage", skipped:"not attempted"};
 // C = one company's part of the push: {co, coName, phase:"loading"|"preview"|"error"|"running"|"done", preview, results, filter, msg}
-function sagePushEff_(C, i){ const r = C.results[i]; return r ? r.status : (C.preview && C.preview.rows[i] ? C.preview.rows[i].status : ""); }
+// Shane (20 Nov 2026, option 1): rises always go to Sage (margin protection), but a DROP of less than 2% is held back. The 7-day
+// average cost moves a few cents every day, which made almost every price change daily: ~380 Sage updates at ~3-4 s each, over
+// 20 minutes of the Google time all of Shane's apps share. A held item stays at its (slightly higher) Sage price until the drop
+// reaches 2%, and counts as done for the day (Price Export doesn't nag about it).
+const SAGE_PUSH_MIN_DROP = 0.02;
+function sagePushSmallDrop_(p){ const o = Number(p && p.oldExcl), n = Number(p && p.newExcl); return o>0 && isFinite(n) && n<o && (o-n)/o < SAGE_PUSH_MIN_DROP; }
+function sagePushEff_(C, i){
+  const r = C.results[i]; if(r) return r.status;
+  const p = C.preview && C.preview.rows[i]; if(!p) return "";
+  return (p.status==="change" && sagePushSmallDrop_(p)) ? "held" : p.status;
+}
 function sagePushGroup_(C, i){
   const e = sagePushEff_(C, i);
-  if(e==="change"||e==="updated"||e==="same"||e==="blocked") return e;
+  if(e==="change"||e==="updated"||e==="same"||e==="blocked"||e==="held") return e;
   if(SAGE_PUSH_PROBLEM.indexOf(e)!==-1) return "problem";
   return "other";
 }
@@ -5811,7 +5822,7 @@ async function sagePushOpen_(){
         if(sagePush!==S) return;
         if(!d || !Array.isArray(d.rows) || d.rows.length!==rows.length) throw new Error("The preview didn't match what was asked for — nothing was changed.");
         C.preview = d; C.phase = "preview";
-        C.filter = d.counts.change ? "change" : (d.counts.blocked ? "blocked" : (d.counts.same ? "same" : "other"));
+        C.filter = sagePushTodo_(S, C).length ? "change" : (C.preview.rows.some(p=> p.status==="change") ? "held" : null) || (d.counts.change ? "change" : (d.counts.blocked ? "blocked" : (d.counts.same ? "same" : "other")));
       }catch(e){
         if(sagePush!==S) return;
         C.phase = "error"; C.msg = String(e && e.message || e);
@@ -5922,7 +5933,7 @@ async function sagePushRunCompany_(S, C, todo){
 // Prices Sage now holds count as "sent": they get PriceQuotes (so the next export / the Check Sage card compare against them) and a
 // download-log entry for every 150-row part where EVERY item ended up correct in that company's Sage — exactly what the manual download records.
 function sagePushRecord_(S){
-  const okSets = S.cos.map(C=>{ const ok = new Set(); S.rows.forEach((r,i)=>{ const e = sagePushEff_(C, i); if(e==="updated"||e==="same") ok.add(i); }); return ok; });
+  const okSets = S.cos.map(C=>{ const ok = new Set(); S.rows.forEach((r,i)=>{ const e = sagePushEff_(C, i); if(e==="updated"||e==="same"||e==="held") ok.add(i); }); return ok; });
   const okIdx = new Set(); okSets.forEach(st=> st.forEach(i=> okIdx.add(i)));
   if(!okIdx.size){ S.recorded = "Nothing was recorded as sent."; return; }
   const now = new Date(), who = currentUser ? currentUser.name : "";
@@ -5959,7 +5970,7 @@ function sagePushDraw_(){
   el.style.display = "block";
   const running = S.phase==="running";
   const names = S.cos.map(C=> C.coName).join(" and ");
-  const groupsOf = C=>{ const g = {change:0, updated:0, same:0, blocked:0, problem:0, other:0}; if(C.preview) S.rows.forEach((r,i)=>{ g[sagePushGroup_(C,i)]++; }); return g; };
+  const groupsOf = C=>{ const g = {change:0, updated:0, same:0, held:0, blocked:0, problem:0, other:0}; if(C.preview) S.rows.forEach((r,i)=>{ g[sagePushGroup_(C,i)]++; }); return g; };
   let inner = "";
   if(S.phase==="loading"){
     inner = `<div class="spbody"><div class="empty" style="padding:30px;display:flex;gap:10px;align-items:center;justify-content:center;"><span class="sync-spinner"></span> Reading ${esc(S.reading || S.cos[0].coName)} from Sage and comparing… (nothing is changed yet; both companies are read, one after the other)</div></div>`;
@@ -5977,7 +5988,7 @@ function sagePushDraw_(){
       body = `<div class="banner critical">⚠ ${esc(C.coName)}: ${esc(C.msg)} — nothing was changed in either company. Close this window and try again.</div>`;
     }else{
       const P = C.preview, groups = allGroups[S.cos.indexOf(C)];
-      const tiles = [["change","To change","var(--accent)"],["updated","Updated","var(--good)"],["same","Already correct","var(--muted)"],["blocked","Blocked","var(--warn)"],["problem","Problems","var(--critical)"],["other","Can't push","var(--muted)"]]
+      const tiles = [["change","To change","var(--accent)"],["updated","Updated","var(--good)"],["same","Already correct","var(--muted)"],["held","Small drops held (<2%)","var(--muted)"],["blocked","Blocked","var(--warn)"],["problem","Problems","var(--critical)"],["other","Can't push","var(--muted)"]]
         .filter(t=> groups[t[0]]>0 || t[0]==="change")
         .map(t=> `<button type="button" class="sptile${C.filter===t[0]?" on":""}" data-sp-filter="${t[0]}" title="Show these rows"><b style="color:${t[2]};">${groups[t[0]]}</b><span>${t[1]}</span></button>`).join("");
       const shown = S.rows.map((r,i)=>({r:r,i:i})).filter(x=> sagePushGroup_(C,x.i)===C.filter);
