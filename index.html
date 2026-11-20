@@ -582,6 +582,7 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
 // VERSION HISTORY (newest first). The menu shows only APP_VERSION; quote it when asking for a change so the exact build is known.
+//  v2026.11.20a  — Faster and lighter on Google: opening the app or reloading after someone saves now comes from a server copy that is rebuilt only when something is written (was 11-13 s every time), and the 20-second "anything new?" check no longer re-reads the Users sheet. A screen nobody has touched for 5 minutes checks once a minute instead of every 20 s (it checks straight away when touched). Same numbers on every screen. Needs the new Code.gs + Auth.gs.
 //  v2026.11.19a  — NEW Speed log page (Admin, owners only): how many requests the app sends Google per hour and at the busiest minute, how long each takes and where the time goes (reading sheets, waiting for the lock, calls to the Packing app / Zoho), the nightly/hourly/daily background jobs' minutes, and this browser's own round trips — with a CSV download. Also: a tab that is hidden (another tab or app in front) no longer checks for updates every 20 s; it checks the moment it is shown again. Needs the new Code.gs + Auth.gs.
 //  v2026.11.18a  — Market vs Receiving: in an open row, the late / next-day tickets to allocate now show first and "Book in manually" sits at the bottom.
 //  v2026.11.13a  — Market vs Receiving: a cancellation the market puts through on a LATER statement (same agent, same product line, same number of packs, within 14 days of the sale) now counts against the day of the original purchase, so that day no longer shows short and the cancellation day no longer shows "received over". The line still shows in the row, marked "cancelled on …".
@@ -628,7 +629,7 @@ function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 //  v2026.10.26b  — Market Product Mapping: pack size calculator (works out Pack size + Receiving pack)
 //  v2026.10.26a  — footer shows only the version number (this list replaces the long on-screen text)
 //  Everything below was the on-screen build text up to 2026-10-23, newest first: Market vs Receiving audit + optional Receiving pack in the mapping | Price Export: only changed costs flag a day as outdated, not margin/min-price changes | GP Watch table: Short of target column + sticky product name | Phone menu button | Product GP Watch (from the Item Sales reports) | Made-to-order items can be removed from the stock take | Received-date grouping, changed-since-download check, queued download saves, lighter saves, stock take completeness checks, tick-box page access
-const APP_VERSION = "v2026.11.19a";
+const APP_VERSION = "v2026.11.20a";
 const APP_BUILD = APP_VERSION; // kept as an alias in case anything else reads it
 
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
@@ -9473,11 +9474,16 @@ function wireActivityTracking(){
 // back later", since a background tab's timers get throttled or paused by the browser anyway and
 // shouldn't be relied on alone. Never overlaps itself and does nothing until the first load has landed
 // and someone's logged in (no point refreshing a login screen).
+let lastUpdateCheckAt = 0;
 async function checkForUpdates(){
   if(!dataLoaded || !currentUser || dataRefreshInFlight) return;
   // A hidden tab (another tab or app in front) doesn't poll: every poll is a Google execution on Shane's shared allowance
   // (19 Nov 2026). Becoming visible again runs this straight away (visibilitychange / focus below), so nothing is missed.
   if(document.visibilityState === "hidden") return;
+  // Idle back-off (20 Nov 2026, speed log): a screen nobody has touched for 5 minutes (e.g. a kiosk tablet) checks once a minute
+  // instead of every 20 s. Any tap/key/scroll makes it a 20-second check again (lastActivityAt), so active users see no change.
+  if(Date.now() - lastActivityAt > 5*60*1000 && Date.now() - lastUpdateCheckAt < 60*1000) return;
+  lastUpdateCheckAt = Date.now();
   let serverVersion;
   try{
     const {res, result} = await apiPost_({action:"version"});
