@@ -582,6 +582,7 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
 // VERSION HISTORY (newest first). The menu shows only APP_VERSION; quote it when asking for a change so the exact build is known.
+//  v2026.11.23b  — Confirm Prices safeguard: a price more than double, or less than half, what that product usually costs (median of its confirmed deliveries in the last 60 days) now stops and asks "is this right?" before it is saved. Catches a box price typed as a unit price (gooseberries 7 Nov: R66.60 a punnet instead of ~R32, which pushed the selling price to R103 for 10 days).
 //  v2026.11.23a  — Check Sage: a price that is still in Sage because it was a drop of less than 2% (held back on purpose by the 20 Nov push rule) no longer shows as "price off" / "cost landed, price didn't"; it shows a grey "held — drop under 2%" note instead.
 //  v2026.11.20b  — Push prices to Sage: every price INCREASE is still pushed, but a DECREASE smaller than 2% is held back (new "Small drops held" tile) until the drop reaches 2%. The daily moves of the 7-day average cost made ~380 tiny Sage updates a day (20+ minutes of shared Google time); margin is never at risk because rises always go through. Held items count as done for the day.
 //  v2026.11.20a  — Faster and lighter on Google: opening the app or reloading after someone saves now comes from a server copy that is rebuilt only when something is written (was 11-13 s every time), and the 20-second "anything new?" check no longer re-reads the Users sheet. A screen nobody has touched for 5 minutes checks once a minute instead of every 20 s (it checks straight away when touched). Same numbers on every screen. Needs the new Code.gs + Auth.gs.
@@ -631,7 +632,7 @@ function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 //  v2026.10.26b  — Market Product Mapping: pack size calculator (works out Pack size + Receiving pack)
 //  v2026.10.26a  — footer shows only the version number (this list replaces the long on-screen text)
 //  Everything below was the on-screen build text up to 2026-10-23, newest first: Market vs Receiving audit + optional Receiving pack in the mapping | Price Export: only changed costs flag a day as outdated, not margin/min-price changes | GP Watch table: Short of target column + sticky product name | Phone menu button | Product GP Watch (from the Item Sales reports) | Made-to-order items can be removed from the stock take | Received-date grouping, changed-since-download check, queued download saves, lighter saves, stock take completeness checks, tick-box page access
-const APP_VERSION = "v2026.11.23a";
+const APP_VERSION = "v2026.11.23b";
 const APP_BUILD = APP_VERSION; // kept as an alias in case anything else reads it
 
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
@@ -6339,6 +6340,17 @@ function packCalc_(size, base, price, phys){
   if(!(size>0 && base>0 && price>0)) return null;
   return {cost: round2(price*base/size), baseQty: Math.round(phys*size/base*1000)/1000};
 }
+// Usual cost of a product per base unit: the median of its confirmed deliveries in the last 60 days (excluding the line being
+// confirmed). Needs at least 3 to judge; null otherwise (no warning for new or rarely bought products).
+const CONFIRM_ODD_HIGH = 2, CONFIRM_ODD_LOW = 0.5;
+function usualCostFor_(baseProduct, excludeId){
+const from = new Date(Date.now() - 60*86400000).toISOString().slice(0,10);
+const v = (DATA.purchaseCosts||[]).filter(p=> p.baseProduct===baseProduct && p.id!==excludeId && p.priceConfirmedDate && String(p.receivedDate||p.date||"")>=from && Number(p.receivedCost)>0)
+.map(p=> Number(p.receivedCost)).sort((a,b)=>a-b);
+if(v.length < 3) return null;
+const m = v.length%2 ? v[(v.length-1)/2] : (v[v.length/2-1]+v[v.length/2])/2;
+return {median:m, n:v.length};
+}
 function renderConfirmPrices(){
   const todayStr = new Date().toISOString().slice(0,10);
   const cpq = confirmPricesSearch.trim().toLowerCase();
@@ -8703,6 +8715,18 @@ function wireTabEvents(){
         items.push({id, cost:n});
       });
       if(!items.length){ toast(document.querySelector("[data-pk-box]") ? "Fill in the pack size, base unit size and invoice price first" : "Enter a price above R0 first"); return; }
+      // Safeguard (Shane, 23 Nov 2026): one wrong unit price goes straight into the cost basis (latest vs 7-day average) and the
+      // selling price — gooseberries 7 Nov were confirmed at R66.60 a punnet (a box price split wrongly; the statement says ~R32)
+      // and sold at R103 for 10 days. A price far from what the product usually costs must be confirmed on purpose.
+      const odd = [];
+      items.forEach(it=>{
+        const row = DATA.purchaseCosts.find(p=> p.id===it.id); if(!row) return;
+        const u = usualCostFor_(row.baseProduct, it.id);
+        if(u && (it.cost > u.median*CONFIRM_ODD_HIGH || it.cost < u.median*CONFIRM_ODD_LOW)){
+          odd.push("• "+row.baseProduct+": R"+fmtNum(it.cost,2)+" entered — usually about R"+fmtNum(u.median,2)+" ("+(it.cost>u.median?fmtNum(it.cost/u.median,1)+"× more":fmtNum(u.median/it.cost,1)+"× less")+", from its last "+u.n+" deliveries)");
+        }
+      });
+      if(odd.length && !confirm("These prices look very different from what the product usually costs:\n\n"+odd.join("\n")+"\n\nIs it a box/bag price typed as a unit price, or a typo? Check the invoice.\n\nPress OK only if the price is right. Cancel to fix it.")) return;
       const by = currentUser ? currentUser.name : "";
       persistPurchaseAction({action:"confirmPurchasePrices", items, confirmedBy:by}, msg || ("Confirmed " + items.length + " price" + (items.length===1?"":"s") + (missing ? " — " + missing + " skipped (no price entered)" : "")), ()=>{
         const nowD = new Date();
