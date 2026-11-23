@@ -582,6 +582,7 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
 // VERSION HISTORY (newest first). The menu shows only APP_VERSION; quote it when asking for a change so the exact build is known.
+//  v2026.11.23a  — Check Sage: a price that is still in Sage because it was a drop of less than 2% (held back on purpose by the 20 Nov push rule) no longer shows as "price off" / "cost landed, price didn't"; it shows a grey "held — drop under 2%" note instead.
 //  v2026.11.20b  — Push prices to Sage: every price INCREASE is still pushed, but a DECREASE smaller than 2% is held back (new "Small drops held" tile) until the drop reaches 2%. The daily moves of the 7-day average cost made ~380 tiny Sage updates a day (20+ minutes of shared Google time); margin is never at risk because rises always go through. Held items count as done for the day.
 //  v2026.11.20a  — Faster and lighter on Google: opening the app or reloading after someone saves now comes from a server copy that is rebuilt only when something is written (was 11-13 s every time), and the 20-second "anything new?" check no longer re-reads the Users sheet. A screen nobody has touched for 5 minutes checks once a minute instead of every 20 s (it checks straight away when touched). Same numbers on every screen. Needs the new Code.gs + Auth.gs.
 //  v2026.11.19a  — NEW Speed log page (Admin, owners only): how many requests the app sends Google per hour and at the busiest minute, how long each takes and where the time goes (reading sheets, waiting for the lock, calls to the Packing app / Zoho), the nightly/hourly/daily background jobs' minutes, and this browser's own round trips — with a CSV download. Also: a tab that is hidden (another tab or app in front) no longer checks for updates every 20 s; it checks the moment it is shown again. Needs the new Code.gs + Auth.gs.
@@ -630,7 +631,7 @@ function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 //  v2026.10.26b  — Market Product Mapping: pack size calculator (works out Pack size + Receiving pack)
 //  v2026.10.26a  — footer shows only the version number (this list replaces the long on-screen text)
 //  Everything below was the on-screen build text up to 2026-10-23, newest first: Market vs Receiving audit + optional Receiving pack in the mapping | Price Export: only changed costs flag a day as outdated, not margin/min-price changes | GP Watch table: Short of target column + sticky product name | Phone menu button | Product GP Watch (from the Item Sales reports) | Made-to-order items can be removed from the stock take | Received-date grouping, changed-since-download check, queued download saves, lighter saves, stock take completeness checks, tick-box page access
-const APP_VERSION = "v2026.11.20b";
+const APP_VERSION = "v2026.11.23a";
 const APP_BUILD = APP_VERSION; // kept as an alias in case anything else reads it
 
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
@@ -5776,6 +5777,8 @@ const SAGE_PUSH_LABEL = {change:"will change", same:"already correct", held:"hel
 // 20 minutes of the Google time all of Shane's apps share. A held item stays at its (slightly higher) Sage price until the drop
 // reaches 2%, and counts as done for the day (Price Export doesn't nag about it).
 const SAGE_PUSH_MIN_DROP = 0.02;
+// Check Sage (23 Nov 2026): Sage still holding the old price because the new one was a drop under 2% is the push rule working, not an error.
+function sageHeldDrop_(sagePrice, sentPrice){ const o = Number(sagePrice), n = Number(sentPrice); return o>0 && isFinite(n) && n<o && (o-n)/o < SAGE_PUSH_MIN_DROP; }
 function sagePushSmallDrop_(p){ const o = Number(p && p.oldExcl), n = Number(p && p.newExcl); return o>0 && isFinite(n) && n<o && (o-n)/o < SAGE_PUSH_MIN_DROP; }
 function sagePushEff_(C, i){
   const r = C.results[i]; if(r) return r.status;
@@ -6076,7 +6079,8 @@ function sageCheckCompute_(company){
     const hasCost = !isNaN(costN) && costN>0;
     const q = latest[code] || null;           // the price AND cost this app last sent to Sage for the item (any age)
     const below = hasCost && price < costN - 0.005;
-    const mismatch = !!q && Math.abs(price - Number(q.price)) >= 0.005;
+    const held = !!q && Math.abs(price - Number(q.price)) >= 0.005 && sageHeldDrop_(price, q.price);
+    const mismatch = !!q && Math.abs(price - Number(q.price)) >= 0.005 && !held;
     const qCost = (q && q.cost!==null && q.cost!==undefined && q.cost!=="" && !isNaN(Number(q.cost))) ? Number(q.cost) : null;
     // Sage's average cost vs the cost the app sent. A Sage cost of 0/blank against a real sent cost is a mismatch too.
     const costMismatch = !!q && qCost!==null && qCost>0 && Math.abs((hasCost ? costN : 0) - qCost) >= 0.01;
@@ -6092,7 +6096,7 @@ function sageCheckCompute_(company){
     const target = targetByCode[code] || null;
     // "Healthy" = at least the app's target margin less a 2-point allowance (prices are rounded up to 50c, so a price the app set sits at or just above target).
     const thin = !below && gp!==null && target!==null && gp < target - 0.02;
-    rows.push({code, desc: v.__desc || itemOfCode[code] || "", price, cost: hasCost ? costN : null, gp, target, thin, q, qCost, below, mismatch, costMismatch, costLanded, otherCost, crossMismatch, attention: mismatch || costMismatch || crossMismatch || below || thin, ok: !!q && !mismatch && !costMismatch && !below && !thin});
+    rows.push({code, held, desc: v.__desc || itemOfCode[code] || "", price, cost: hasCost ? costN : null, gp, target, thin, q, qCost, below, mismatch, costMismatch, costLanded, otherCost, crossMismatch, attention: mismatch || costMismatch || crossMismatch || below || thin, ok: !!q && !mismatch && !costMismatch && !below && !thin});
   });
   return {rows, otherName: other ? SAGE_COMPANIES[otherCo].name : "", compared: !!other};
 }
@@ -6107,7 +6111,7 @@ function sageCheckDate_(date, company){
     const code = codeOfItem[q.item]; const v = code ? f.byCode[code] : null;
     if(!v || v.__defEx==="" || v.__defEx===undefined) return;
     checked++;
-    const priceOff = Math.abs(Number(v.__defEx) - Number(q.price)) >= 0.005;
+    const priceOff = Math.abs(Number(v.__defEx) - Number(q.price)) >= 0.005 && !sageHeldDrop_(v.__defEx, q.price); // a held small drop is fine
     const qc = (q.cost!==null && q.cost!==undefined && q.cost!=="" && !isNaN(Number(q.cost))) ? Number(q.cost) : null;
     const sageC = (v.__cost==="" || v.__cost===undefined || isNaN(Number(v.__cost))) ? 0 : Number(v.__cost);
     const costOff = qc!==null && qc>0 && Math.abs(sageC - qc) >= 0.01;
@@ -6171,6 +6175,7 @@ function renderSageCheckCard_(exportDate){
   const trs = shown.map(r=>{
     const flags = [];
     if(r.mismatch) flags.push(r.costLanded ? chip("cost landed, price didn't","critical") : chip("price off","critical"));
+    if(r.held) flags.push(chip("held — drop under 2%","neutral"));
     if(r.costMismatch) flags.push(chip("cost off","critical"));
     if(r.crossMismatch) flags.push(chip("differs from "+chk.otherName,"critical"));
     if(r.below) flags.push(chip("below cost","critical"));
