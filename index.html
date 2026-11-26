@@ -582,6 +582,7 @@ function yesterdaySA(){ const d = new Date(todaySA()+"T00:00:00Z"); d.setUTCDate
 function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 // Shown at the bottom of the sidebar so it is obvious which version of the app a browser has actually loaded.
 // VERSION HISTORY (newest first). The menu shows only APP_VERSION; quote it when asking for a change so the exact build is known.
+//  v2026.11.26a  — NEW Market Collection page and "Driver" role, for the JHB and PTA market drivers: every buy logged today with supplier JHB MARKET or PTA MARKET (JHB / PTA tabs), grouped by agent, each with a Counted ✓ and Quality ✓ tick and a "problem" note. Ticks save straight away; Receiving shows "driver ✓" (or what's missing) next to each market delivery. Market buys on Shopping List / Quick Buy now have an optional Agent box. Needs the new Code.gs + Auth.gs.
 //  v2026.11.23b  — Confirm Prices safeguard: a price more than double, or less than half, what that product usually costs (median of its confirmed deliveries in the last 60 days) now stops and asks "is this right?" before it is saved. Catches a box price typed as a unit price (gooseberries 7 Nov: R66.60 a punnet instead of ~R32, which pushed the selling price to R103 for 10 days).
 //  v2026.11.23a  — Check Sage: a price that is still in Sage because it was a drop of less than 2% (held back on purpose by the 20 Nov push rule) no longer shows as "price off" / "cost landed, price didn't"; it shows a grey "held — drop under 2%" note instead.
 //  v2026.11.20b  — Push prices to Sage: every price INCREASE is still pushed, but a DECREASE smaller than 2% is held back (new "Small drops held" tile) until the drop reaches 2%. The daily moves of the 7-day average cost made ~380 tiny Sage updates a day (20+ minutes of shared Google time); margin is never at risk because rises always go through. Held items count as done for the day.
@@ -632,7 +633,7 @@ function costCsvTooEarly(dateStr){ return !dateStr || dateStr >= todaySA(); }
 //  v2026.10.26b  — Market Product Mapping: pack size calculator (works out Pack size + Receiving pack)
 //  v2026.10.26a  — footer shows only the version number (this list replaces the long on-screen text)
 //  Everything below was the on-screen build text up to 2026-10-23, newest first: Market vs Receiving audit + optional Receiving pack in the mapping | Price Export: only changed costs flag a day as outdated, not margin/min-price changes | GP Watch table: Short of target column + sticky product name | Phone menu button | Product GP Watch (from the Item Sales reports) | Made-to-order items can be removed from the stock take | Received-date grouping, changed-since-download check, queued download saves, lighter saves, stock take completeness checks, tick-box page access
-const APP_VERSION = "v2026.11.23b";
+const APP_VERSION = "v2026.11.26a";
 const APP_BUILD = APP_VERSION; // kept as an alias in case anything else reads it
 
 // Defaults to today (Shane's ask) rather than "All dates" — Purchase Costs is checked day-to-day far more
@@ -843,6 +844,7 @@ const NAV = [
     {id:"shoppingarchive", label:"Shopping List Archive"},
     {id:"trays", label:"Fruit Trays"},
     {id:"receiving", label:"Receiving"},
+    {id:"driver", label:"Market Collection"},
     {id:"confirmprices", label:"Confirm Prices"},
     {id:"stocktake", label:"Input Stock Levels"},
   ]},
@@ -872,7 +874,7 @@ const NAV = [
 // can access; a group with a single accessible page shows that page's own name and no tab bar.
 const TAB_GROUPS = [
   {id:"g_shop",   label:"Shopping List",    tabs:[["shoppinglist","Shopping List"],["quickbuy","Quick Buy"],["trays","Fruit Trays"],["shoppingarchive","Archive"]]},
-  {id:"g_recv",   label:"Receiving",        tabs:[["receiving","Receiving"],["confirmprices","Confirm Prices"]]},
+  {id:"g_recv",   label:"Receiving",        tabs:[["receiving","Receiving"],["driver","Market Collection"],["confirmprices","Confirm Prices"]]},
   {id:"g_hold",   label:"Holdings & Sales", tabs:[["dashboard","Calculated Holdings"],["salesdata","Item Sales"],["stockvariance","Stock Variance"]]},
   {id:"g_setup",  label:"Product Setup",    tabs:[["itemsetup","Item Setup"],["recipes","Product Mixes"],["suppliers","Suppliers"]]},
   {id:"g_cost",   label:"Purchase Costs",   tabs:[["purchase","Purchases"],["pricehistory","Price History"]]},
@@ -900,9 +902,10 @@ if(!TABS.some(t=>t.id===currentTab)){
 // "home" (the landing Dashboard) is Owner + Procurement only, by Shane's explicit request — Stock Taker,
 // Receiving and Market stay scoped to their single-purpose tab(s), same as before.
 const ROLE_TABS = {
-  owner: ["home","findash","shoppinglist","quickbuy","shoppingarchive","trays","receiving","dashboard","salesdata","itemsetup","recipes","suppliers","purchase","confirmprices","pricehistory","marketstatements","marketaudit","sellingprices","gpwatch","stocktake","users","stockvariance","marketmapping","speedlog"],
-  procurement: ["home","shoppinglist","quickbuy","shoppingarchive","trays","receiving","suppliers","purchase","confirmprices","pricehistory","marketstatements","sellingprices","stocktake"],
+  owner: ["home","findash","shoppinglist","quickbuy","shoppingarchive","trays","receiving","dashboard","salesdata","itemsetup","recipes","suppliers","purchase","confirmprices","pricehistory","marketstatements","marketaudit","sellingprices","gpwatch","stocktake","users","stockvariance","marketmapping","speedlog","driver"],
+  procurement: ["home","shoppinglist","quickbuy","shoppingarchive","trays","receiving","driver","suppliers","purchase","confirmprices","pricehistory","marketstatements","sellingprices","stocktake"],
   stocktaker: ["stocktake","receiving"],
+  driver: ["driver"], // Market Collection only (26 Nov 2026) — JHB / PTA market drivers
   receiving: ["receiving"],
   market: ["quickbuy"],
 };
@@ -1986,6 +1989,106 @@ function wireSpeedLog_(){
   });
 }
 
+
+// ---------- Market Collection (driver) — Shane, 26 Nov 2026 ----------
+// "Drivers aren't collecting all the stock that was booked because they aren't aware of everything that needs to be collected."
+// Every buy logged for the day with supplier JHB MARKET or PTA MARKET (not marked not-received), grouped by the agent the buyer
+// typed, with a Counted and a Quality tick (and a problem note) per line. Ticks are saved on the order line (driverCheck in
+// Code.gs) so Receiving and the office can see what the driver confirmed at the market.
+let driverMarket = "JHB", driverDate = "", driverFilter = "", driverNoteOpen = "";
+const driverBusy = new Set();
+function driverDay_(){ return driverDate || todaySA(); }
+function driverLines_(day, mk){
+  return (DATA.purchaseCosts||[]).filter(p=> p.baseProduct && String(p.date||"").slice(0,10)===day && marketOfSupplier_(p.supplier)===mk && !isNotReceived(p));
+}
+function driverState_(p){
+  const c = p.driverCount==="yes", q = p.driverQuality==="yes";
+  return {c, q, done: c && q, note: String(p.driverNote||"")};
+}
+function driverChip_(p){
+  if(!p || !marketOfSupplier_(p.supplier)) return "";
+  const st = driverState_(p);
+  if(st.note) return chip("driver: " + st.note, "critical");
+  if(st.done) return chip("driver ✓ counted & quality", "good");
+  if(st.c) return chip("driver: counted, quality not ticked", "warn");
+  if(st.q) return chip("driver: quality ticked, not counted", "warn");
+  return isReceived(p) ? "" : chip("driver hasn't ticked", "neutral");
+}
+function renderDriver_(){
+  const day = driverDay_(), today = todaySA();
+  const lines = driverLines_(day, driverMarket);
+  const n = k=> lines.filter(p=>{ const s = driverState_(p); return k==="all" ? true : k==="todo" ? !s.done && !s.note : k==="counted" ? s.c : k==="quality" ? s.q : k==="problem" ? !!s.note : true; }).length;
+  const shown = lines.filter(p=>{ const s = driverState_(p); return !driverFilter ? true : driverFilter==="todo" ? !s.done && !s.note : driverFilter==="counted" ? s.c : driverFilter==="quality" ? s.q : driverFilter==="problem" ? !!s.note : true; });
+  const tile = (k, label, color)=> `<div class="stat" data-drv-filter="${k}" style="cursor:pointer;${driverFilter===k?"outline:2px solid var(--accent);":""}" title="Click to show just these (click again for all)"><div class="label">${label}</div><div class="value" style="color:${color};">${n(k)}</div></div>`;
+  const groups = {};
+  shown.forEach(p=>{ const a = String(p.agent||"").trim() || "Agent not given"; (groups[a] = groups[a] || []).push(p); });
+  const agents = Object.keys(groups).sort((a,b)=> (a==="Agent not given") - (b==="Agent not given") || a.localeCompare(b));
+  const box = (id, kind, on, label)=> `<label class="drv-tick${on?" on":""}"><input type="checkbox" data-drv-${kind}="${esc(id)}" ${on?"checked":""} ${driverBusy.has(id)?"disabled":""}> ${label}</label>`;
+  const rowHtml = p=>{
+    const s = driverState_(p), busy = driverBusy.has(p.id);
+    const qty = fmtNum(Number(p.qty)||0, (Number(p.qty)||0)%1?2:0);
+    return `<div class="drv-line${s.done?" done":""}${s.note?" problem":""}">
+      <div class="drv-what"><b>${esc(qty)}</b> × ${esc(p.baseProduct)}${isReceived(p) ? " "+chip("received at factory","good") : ""}
+        <div class="helptext">logged by ${esc(p.loggedBy||"—")}${p.loggedTime ? " at "+esc(String(p.loggedTime).slice(0,5)) : ""}${s.done||s.c||s.q ? " · ticked by "+esc(p.driverBy||"")+(p.driverAt?" "+esc(String(p.driverAt).slice(11,16)):"") : ""}${busy ? ' · <span class="sync-spinner" style="vertical-align:middle;"></span> saving…' : ""}</div>
+        ${s.note ? `<div style="color:var(--critical);font-weight:600;">⚠ ${esc(s.note)}</div>` : ""}</div>
+      <div class="drv-ticks">${box(p.id,"count",s.c,"Counted")}${box(p.id,"quality",s.q,"Quality")}
+        <button class="btn small" data-drv-note="${esc(p.id)}" ${busy?"disabled":""}>${s.note ? "Edit problem" : "Problem"}</button></div>
+      ${driverNoteOpen===p.id ? `<div class="drv-noteform"><input type="text" id="drvNoteInput" maxlength="200" placeholder="e.g. only 40 on the floor / soft, left 10 behind" value="${esc(s.note)}"><button class="btn primary small" data-drv-note-save="${esc(p.id)}">Save</button>${s.note ? `<button class="btn small" data-drv-note-clear="${esc(p.id)}">Clear</button>` : ""}<button class="btn small" data-drv-note-cancel>Cancel</button></div>` : ""}
+    </div>`;
+  };
+  const mkTab = mk=>{ const L = driverLines_(day, mk), left = L.filter(p=>{ const s = driverState_(p); return !s.done && !s.note; }).length;
+    return `<button class="btn${driverMarket===mk?" primary":""}" data-drv-market="${mk}" style="font-size:16px;padding:10px 18px;">${mk} MARKET <span class="helptext" style="color:inherit;opacity:.8;">${L.length} line${L.length===1?"":"s"}${left?" · "+left+" to tick":""}</span></button>`; };
+  return `
+    <style>
+      .drv-line{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between;padding:12px 14px;border-top:1px solid var(--line);}
+      .drv-line.done{background:rgba(46,125,50,.07);} .drv-line.problem{background:rgba(198,40,40,.07);}
+      .drv-what{flex:1;min-width:220px;font-size:16px;}
+      .drv-ticks{display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
+      .drv-tick{display:inline-flex;align-items:center;gap:8px;border:2px solid var(--line);border-radius:10px;padding:8px 12px;font-weight:600;cursor:pointer;user-select:none;}
+      .drv-tick input{width:24px;height:24px;} .drv-tick.on{border-color:var(--good, #2e7d32);color:var(--good, #2e7d32);}
+      .drv-noteform{flex-basis:100%;display:flex;gap:6px;flex-wrap:wrap;} .drv-noteform input{flex:1;min-width:200px;font-size:16px;padding:8px;}
+    </style>
+    <div class="pagehead"><div><h2>Market Collection</h2><p>Everything booked at the market for the day — collect every line, count it, check the quality and tick both. Something short or bad? Press <b>Problem</b> and say what.</p></div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;"><input type="date" id="drvDate" value="${esc(day)}" max="${esc(today)}">${day!==today ? `<button class="btn small" id="drvToday">Today</button>` : ""}</div></div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;">${mkTab("JHB")}${mkTab("PTA")}</div>
+    <div class="cardrow">
+      ${tile("all","To collect","var(--ink)")}${tile("todo","Not ticked yet", n("todo")?"var(--warn)":"var(--good)")}${tile("counted","Counted","var(--good)")}${tile("quality","Quality checked","var(--good)")}${tile("problem","Problems", n("problem")?"var(--critical)":"var(--ink)")}
+    </div>
+    ${!lines.length ? `<div class="card"><div class="cardbody"><div class="empty">Nothing booked at ${driverMarket} MARKET for ${esc(shortDayLabel(day))} yet. Buys logged with supplier ${driverMarket} MARKET on Shopping List or Quick Buy show here straight away.</div></div></div>` : ""}
+    ${agents.map(a=> `<div class="card"><div class="cardhead"><div><h3>${esc(a)}</h3><div class="desc">${groups[a].length} line${groups[a].length===1?"":"s"}</div></div></div><div class="cardbody" style="padding:0;">${groups[a].map(rowHtml).join("")}</div></div>`).join("")}
+    ${lines.length && !shown.length ? `<div class="card"><div class="cardbody"><div class="empty">Nothing in this view — click the tile again to see all lines.</div></div></div>` : ""}`;
+}
+async function driverSave_(id, patch){
+  const p = (DATA.purchaseCosts||[]).find(x=> x.id===id); if(!p){ toast("That line no longer exists — reload"); return; }
+  const cur = driverState_(p);
+  const next = {count: patch.count!==undefined ? patch.count : cur.c, quality: patch.quality!==undefined ? patch.quality : cur.q, note: patch.note!==undefined ? patch.note : cur.note};
+  driverBusy.add(id); render();
+  try{
+    await persistPurchaseAction({action:"driverCheck", id, count:next.count, quality:next.quality, note:next.note}, next.note && patch.note!==undefined ? "Problem saved" : "Saved", (res)=>{
+      if(!res || !res.driverChecked){ toast("The server (Code.gs) hasn't been updated for Market Collection yet"); return false; }
+      p.driverCount = next.count ? "yes" : ""; p.driverQuality = next.quality ? "yes" : ""; p.driverNote = next.note;
+      const any = next.count || next.quality || next.note;
+      p.driverBy = any ? ((currentUser&&currentUser.name)||"") : ""; p.driverAt = any ? new Date().toLocaleString("sv-SE",{timeZone:"Africa/Johannesburg"}).slice(0,16) : "";
+    });
+  } finally { driverBusy.delete(id); render(); }
+}
+function wireDriver_(){
+  document.querySelectorAll("[data-drv-market]").forEach(b=> b.addEventListener("click", ()=>{ driverMarket = b.dataset.drvMarket; driverFilter = ""; driverNoteOpen = ""; render(); }));
+  document.querySelectorAll("[data-drv-filter]").forEach(t=> t.addEventListener("click", ()=>{ driverFilter = driverFilter===t.dataset.drvFilter || t.dataset.drvFilter==="all" ? "" : t.dataset.drvFilter; render(); }));
+  const d = document.getElementById("drvDate"); if(d) d.addEventListener("change", ()=>{ driverDate = d.value || ""; driverNoteOpen = ""; render(); });
+  const t = document.getElementById("drvToday"); if(t) t.addEventListener("click", ()=>{ driverDate = ""; render(); });
+  document.querySelectorAll("[data-drv-count]").forEach(c=> c.addEventListener("change", ()=> driverSave_(c.dataset.drvCount, {count: c.checked})));
+  document.querySelectorAll("[data-drv-quality]").forEach(c=> c.addEventListener("change", ()=> driverSave_(c.dataset.drvQuality, {quality: c.checked})));
+  document.querySelectorAll("[data-drv-note]").forEach(b=> b.addEventListener("click", ()=>{ driverNoteOpen = b.dataset.drvNote; render(); const i = document.getElementById("drvNoteInput"); if(i) i.focus(); }));
+  document.querySelectorAll("[data-drv-note-cancel]").forEach(b=> b.addEventListener("click", ()=>{ driverNoteOpen = ""; render(); }));
+  document.querySelectorAll("[data-drv-note-save]").forEach(b=> b.addEventListener("click", ()=>{
+    const v = ((document.getElementById("drvNoteInput")||{}).value||"").replace(/\s+/g," ").trim();
+    if(!v){ toast("Type what the problem is (or Cancel)"); return; }
+    driverNoteOpen = ""; driverSave_(b.dataset.drvNoteSave, {note: v});
+  }));
+  document.querySelectorAll("[data-drv-note-clear]").forEach(b=> b.addEventListener("click", ()=>{ driverNoteOpen = ""; driverSave_(b.dataset.drvNoteClear, {note: ""}); }));
+}
+
 function wireMarketAudit(){
   const bind = (id, fn, ev)=>{ const el = document.getElementById(id); if(el) el.addEventListener(ev||"change", fn); };
   bind("maPeriodSel", e=>{ maPeriod = e.target.value; maOpen = ""; render(); });
@@ -2285,7 +2388,21 @@ function supplierPickerHtml_(current, opts){
       <option value="${SUPPLIER_OTHER}" ${sel===SUPPLIER_OTHER?"selected":""}>Other (not listed)…</option>
     </select>
     <input type="text" class="sup-other" placeholder="Supplier name*" value="${isOther?esc(cur):""}" style="${st}${isOther?"":"display:none;"}">
+    <input type="text" class="sup-agent" list="marketAgentList" placeholder="Agent (optional)" title="Market agent, so the driver knows where to collect (e.g. RSA, Dapper, Wenpro)" value="${esc(opts.agent||"")}" style="${st}${marketOfSupplier_(sel)?"":"display:none;"}">
   </span>`;
+}
+// Agents to suggest in the Agent box: those on recent market statements plus any typed on buys (Market Collection, 26 Nov 2026).
+// The <datalist> lives on <body> (outside #main, which render() rebuilds) and is refreshed whenever a picker is drawn.
+function ensureAgentDatalist_(){
+  try{
+    let dl = document.getElementById("marketAgentList");
+    if(!dl){ dl = document.createElement("datalist"); dl.id = "marketAgentList"; document.body.appendChild(dl); }
+    const from = new Date(Date.now()-60*86400000).toISOString().slice(0,10), set = new Set();
+    (DATA.marketStatementLines||[]).forEach(r=>{ if(r.agent && String(r.statementDate||"")>=from) set.add(String(r.agent).replace(/\s+/g," ").trim()); });
+    (DATA.purchaseCosts||[]).forEach(p=>{ if(p.agent) set.add(String(p.agent).trim()); });
+    const html = Array.from(set).sort().map(a=>`<option value="${esc(a)}">`).join("");
+    if(dl.innerHTML !== html) dl.innerHTML = html;
+  }catch(e){}
 }
 // Which market a supplier is: "JHB", "PTA" or "" (not market). Only JHB MARKET and PTA MARKET count (any capitals/spacing) — the
 // agents are not suppliers; they show on the market statement itself. Market vs Receiving only counts deliveries from these two
@@ -2311,9 +2428,15 @@ function readSupplierPicker_(root){
     const box = root.querySelector(".sup-other");
     const typed = box ? box.value.replace(/\s+/g," ").trim() : "";
     if(!typed){ if(box) box.focus(); return {error:"You picked Other — type the supplier's name"}; }
-    return {value: matchSupplier_(typed) || typed};
+    const v = matchSupplier_(typed) || typed;
+    return {value: v, agent: readAgent_(root, v)};
   }
-  return {value: sel.value};
+  return {value: sel.value, agent: readAgent_(root, sel.value)};
+}
+function readAgent_(root, supplier){
+  if(!marketOfSupplier_(supplier)) return "";
+  const a = root ? root.querySelector(".sup-agent") : null;
+  return a ? a.value.replace(/\s+/g," ").trim().slice(0,60) : "";
 }
 // Names used on buys in the last 60 days that aren't on the list (typed as Other, or from before the list existed), grouped so
 // "JHB MARKET" / "jhb market" / "JHB  MARKET" are one suggestion under their most-used spelling.
@@ -3207,7 +3330,7 @@ function render(){
   psAsOfCache_ = {}; // data may have changed since the last render — see pricingSuggestionsAsOf_
   // Computed up-front (not just inside the logged-in branch below) so the sync-overlay offset toggle
   // near the end of this function can always run, whichever branch actually executes.
-  const kiosk = !!currentUser && currentUser.role === "receiving" && userTabCount_(currentUser) === 1 && userCanAccessTab(currentUser, "receiving");
+  const kiosk = !!currentUser && userTabCount_(currentUser) === 1 && ((currentUser.role === "receiving" && userCanAccessTab(currentUser, "receiving")) || (currentUser.role === "driver" && userCanAccessTab(currentUser, "driver")));
   const syncOverlayEl = document.getElementById("syncOverlay");
   // The kiosk top bar's own right-hand content (name + Logout) sits in the same top-right corner the
   // floating sync pill normally uses — nudge the pill down below the bar just for that one role so the
@@ -3271,6 +3394,7 @@ function render(){
     else if(currentTab==="shoppingarchive") pageHtml = renderShoppingArchive();
     else if(currentTab==="trays") pageHtml = renderTrays();
     else if(currentTab==="receiving") pageHtml = renderReceiving();
+    else if(currentTab==="driver") pageHtml = renderDriver_();
     else if(currentTab==="dashboard") pageHtml = renderDashboard();
     else if(currentTab==="itemsetup") pageHtml = renderItemSetup();
     else if(currentTab==="recipes") pageHtml = renderRecipes();
@@ -3403,7 +3527,7 @@ function renderKioskTopBar(){
     <div class="kiosk-topbar">
       <div class="kiosk-brand"><span class="kiosk-mark">DF</span> Daily Fruit - Procurement</div>
       <div style="display:flex;align-items:center;gap:14px;">
-        <span class="kiosk-user">${esc(currentUser.name)} · Receiving</span>
+        <span class="kiosk-user">${esc(currentUser.name)} · ${currentUser.role==="driver" ? "Driver" : "Receiving"}</span>
         <button class="btn small" id="kioskLogoutBtn">Logout</button>
       </div>
     </div>`;
@@ -3610,8 +3734,8 @@ function purchaseLineChip(e, opts){
   const hasCost = cost!==undefined && cost!==null && cost!=="";
   // opts.hidePrice (Receiving page): receiving staff only deal in quantities now, so show the count alone.
   let core = opts.hidePrice
-    ? ((hasQty ? fmtNum(qty) : "—") + (e.supplier ? " (" + esc(e.supplier) + ")" : ""))
-    : ((hasQty ? fmtNum(qty)+" @ " : "") + (hasCost ? money(cost) : "cost pending") + (e.supplier ? " (" + esc(e.supplier) + ")" : ""));
+    ? ((hasQty ? fmtNum(qty) : "—") + (e.supplier ? " (" + esc(e.supplier) + (e.agent ? " · " + esc(e.agent) : "") + ")" : ""))
+    : ((hasQty ? fmtNum(qty)+" @ " : "") + (hasCost ? money(cost) : "cost pending") + (e.supplier ? " (" + esc(e.supplier) + (e.agent ? " · " + esc(e.agent) : "") + ")" : ""));
   if(opts.showWho){
     if(e.loggedBy) core += " — logged by " + esc(e.loggedBy) + atTime_(e);
     if(received && e.receivedBy) core += ", received by " + esc(e.receivedBy);
@@ -3757,7 +3881,7 @@ function renderBuyCell(r, today){
     <div class="buyrow" data-buy-row="${esc(bp)}" data-buy-editid="${esc(editingExisting?editingVal:"")}" style="display:flex;align-items:center;gap:4px;white-space:nowrap;">
       <input type="number" step="0.01" class="buy-qty" placeholder="Qty*" value="${esc(prefillQty)}" style="width:56px;">
       <input type="number" step="0.01" class="buy-cost" placeholder="Price/u (if known)" value="${esc(prefillCost)}" style="width:110px;">
-      ${supplierPickerHtml_(prefillSupplier, {style:"width:130px;"})}
+      ${supplierPickerHtml_(prefillSupplier, {style:"width:130px;", agent: editingExisting ? (editingExisting.agent||"") : ""})}
       <input type="text" class="buy-overreason" placeholder="Reason for exceeding suggested buy*" value="${esc(prefillOverReason)}" style="width:190px;${prefillOverReason?"":"display:none;"}">
       <button class="btn primary" data-buy-tick="${esc(bp)}" title="Save" style="padding:2px 10px;font-size:12px;">✓</button>
       <button class="btn" data-buy-cancel="${esc(bp)}" style="padding:2px 6px;font-size:12px;" title="Close without saving">✕</button>
@@ -3944,7 +4068,7 @@ function renderQuickBuy(){
       <div class="formgrid">
         <div class="field"><label>Quantity (what you're ordering)</label><input type="number" inputmode="decimal" step="0.01" id="quickBuyQty" value="${esc(prefillQty)}" style="font-size:20px;padding:13px;"></div>
         <div class="field"><label>Price per unit (if known)</label><input type="number" inputmode="decimal" step="0.01" id="quickBuyCost" value="${esc(prefillCost)}" style="font-size:20px;padding:13px;" placeholder="leave blank if not invoiced yet"></div>
-        <div class="field" id="quickBuySupplierWrap"><label>Supplier*</label>${supplierPickerHtml_(prefillSupplier, {block:true, style:"font-size:20px;padding:13px;width:100%;"})}</div>
+        <div class="field" id="quickBuySupplierWrap"><label>Supplier*</label>${supplierPickerHtml_(prefillSupplier, {block:true, style:"font-size:20px;padding:13px;width:100%;", agent: editingLine ? (editingLine.agent||"") : ""})}</div>
       </div>
       <div class="field" id="quickBuyOverReasonField" style="margin-top:10px;${prefillOverBuyReason?"":"display:none;"}">
         <label>Reason for exceeding suggested buy</label>
@@ -4246,7 +4370,7 @@ function renderReceivingSlipHtml(p){
       <table>
         <tr><td>Base product</td><td>${esc(p.baseProduct)}</td></tr>
         <tr><td>Category</td><td>${esc(categoryFor(p.baseProduct)||"—")}</td></tr>
-        <tr><td>Supplier</td><td>${esc(p.supplier||"—")}</td></tr>
+        <tr><td>Supplier</td><td>${esc(p.supplier||"—")}${p.agent ? " · "+esc(p.agent) : ""}</td></tr>
         <tr><td>Ordered by</td><td>${esc(p.loggedBy||"—")}</td></tr>
         <tr><td>Order date</td><td>${esc(p.date||"—")}${p.loggedTime ? " " + esc(fmtTime(p.loggedTime)) : ""}</td></tr>
         <tr><td>Ordered qty</td><td>${hasOrderedQty ? fmtNum(p.qty) : "—"}</td></tr>
@@ -4363,7 +4487,7 @@ function renderReceiving(){
       <td>${esc(p.baseProduct)}</td>
       <td>${esc(categoryFor(p.baseProduct)||"—")}</td>
       <td class="helptext">${esc(p.date||"—")}${overdue ? ` ${chip("overdue","warn")}` : ""}</td>
-      <td>${esc(p.supplier||"—")}</td>
+      <td>${esc(p.supplier||"—")}${p.agent ? ` <span class="helptext">· ${esc(p.agent)}</span>` : ""} ${driverChip_(p)}</td>
       <td>${esc(p.loggedBy||"—")}${p.loggedTime ? ` <span class="helptext">${esc(fmtTime(p.loggedTime))}</span>` : ""}</td>
       <td><input type="number" step="0.01" class="receive-qty" placeholder="Count qty" value="" style="width:80px;"></td>
       <td>${actionsCell}</td>
@@ -4372,7 +4496,7 @@ function renderReceiving(){
       <td>${esc(p.baseProduct)}</td>
       <td>${esc(categoryFor(p.baseProduct)||"—")}</td>
       <td class="helptext">${esc(p.date||"—")}${overdue ? ` ${chip("overdue","warn")}` : ""}</td>
-      <td>${esc(p.supplier||"—")}</td>
+      <td>${esc(p.supplier||"—")}${p.agent ? ` <span class="helptext">· ${esc(p.agent)}</span>` : ""} ${driverChip_(p)}</td>
       <td>${esc(p.loggedBy||"—")}${p.loggedTime ? ` <span class="helptext">${esc(fmtTime(p.loggedTime))}</span>` : ""}</td>
       <td>${actionsCell}</td>
     </tr>`;
@@ -4383,7 +4507,7 @@ function renderReceiving(){
       <td>${esc(p.baseProduct)}</td>
       <td class="num">${(p.qty===undefined || p.qty===null || p.qty==="") ? "—" : fmtNum(p.qty)}</td>
       <td class="helptext">${esc(p.date||"—")}</td>
-      <td>${esc(p.supplier||"—")}</td>
+      <td>${esc(p.supplier||"—")}${p.agent ? ` <span class="helptext">· ${esc(p.agent)}</span>` : ""} ${driverChip_(p)}</td>
       <td>${esc(p.notReceivedReason||"—")}</td>
       <td class="helptext">${esc(p.notReceivedBy||"—")} · ${esc(p.notReceivedDate||"—")}</td>
       <td>${manage ? `<button class="btn small" data-notreceived-reopen="${esc(p.id||"")}" title="Send back to Pending delivery">↺ Reopen</button>` : ""}</td>
@@ -4412,7 +4536,7 @@ function renderReceiving(){
     <tr>
       <td>${esc(p.baseProduct)}</td>
       <td class="helptext">${esc(p.date||"—")} → received ${esc(p.receivedDate||"—")}${p.receivedTime ? " at " + esc(fmtTime(p.receivedTime)) : ""}</td>
-      <td>${purchaseLineChip(p, {hidePrice:true})} ${needsPriceConfirm(p) ? chip("price to be confirmed","neutral") : ""} ${discFlag} ${noOrderFlag}</td>
+      <td>${purchaseLineChip(p, {hidePrice:true})} ${driverChip_(p)} ${needsPriceConfirm(p) ? chip("price to be confirmed","neutral") : ""} ${discFlag} ${noOrderFlag}</td>
       <td>${esc(p.receivedBy||"—")}</td>
       <td>${manage ? `<button class="btn small" data-receive-edit="${esc(p.id||"")}">${editing?"Cancel":"Correct"}</button>${editForm}` : ""} ${printBtn} ${deleteBtn}</td>
     </tr>`;
@@ -4580,7 +4704,7 @@ function renderHomeDashboard(){
     <tr>
       <td>${esc(p.baseProduct)}</td>
       <td class="helptext">${esc(p.date||"—")}${overdue?` ${chip("overdue","warn")}`:""}</td>
-      <td>${esc(p.supplier||"—")}</td>
+      <td>${esc(p.supplier||"—")}${p.agent ? ` <span class="helptext">· ${esc(p.agent)}</span>` : ""} ${driverChip_(p)}</td>
       <td>${esc(p.loggedBy||"—")}${p.loggedTime ? ` <span class="helptext">${esc(fmtTime(p.loggedTime))}</span>` : ""}</td>
     </tr>`;
   }).join("");
@@ -4760,7 +4884,7 @@ function renderFinancialDashboard(){
     <tr>
       <td>${esc(p.baseProduct)}</td>
       <td class="helptext">received ${esc(p.receivedDate||"—")}</td>
-      <td>${esc(p.supplier||"—")}</td>
+      <td>${esc(p.supplier||"—")}${p.agent ? ` <span class="helptext">· ${esc(p.agent)}</span>` : ""} ${driverChip_(p)}</td>
       <td>${hasCostValue(p) ? chip("price not confirmed","warn") : chip("no price yet","critical")}</td>
     </tr>`).join("");
   const priceAlertHtml = priceAlerts.slice(0,10).map(a=>`
@@ -5522,7 +5646,7 @@ function renderPurchase(){
         <td class="num">${hasQty ? fmtNum(displayQty) : "—"}</td>
         <td class="num">${hasCost ? money(displayCost) : "—"}</td>
         <td class="num">${total!==null ? money(total) : "—"}</td>
-        <td>${esc(p.supplier||"—")}</td>
+        <td>${esc(p.supplier||"—")}${p.agent ? ` <span class="helptext">· ${esc(p.agent)}</span>` : ""} ${driverChip_(p)}</td>
         <td>${found?statusChip("OK"):statusChip("NOT FOUND")}</td>
         <td class="num">${count}</td>
         <td class="helptext">${esc(p.loggedBy||"—")}${p.loggedTime ? " " + esc(fmtTime(p.loggedTime)) : ""}</td>
@@ -6375,7 +6499,7 @@ function renderConfirmPrices(){
       <td class="helptext">${esc(p.loggedBy||"—")}<div>${esc(p.date||"")}${p.loggedTime ? " " + esc(fmtTime(p.loggedTime)) : ""}</div></td>
       <td class="helptext">${esc(p.receivedDate||"—")}${p.receivedTime ? " " + esc(fmtTime(p.receivedTime)) : ""}<div>received by ${esc(p.receivedBy||"—")}</div></td>
       <td class="num">${fmtNum(physQty(p))}</td>
-      <td>${esc(p.supplier||"—")}</td>
+      <td>${esc(p.supplier||"—")}${p.agent ? ` <span class="helptext">· ${esc(p.agent)}</span>` : ""} ${driverChip_(p)}</td>
       <td>${hasOrdered ? money(p.cost) : chip("none entered","neutral")}${enteredAtReceiving ? `<div>${chip("entered at receiving — check it","warn")}</div>` : ""}</td>
       <td>
         <input type="number" step="0.01" min="0" class="confirm-price" data-confirm-id="${esc(p.id||"")}" placeholder="${packMode ? "auto" : "Price"}" value="${esc(pre)}" ${packMode ? "readonly" : `data-pristine="${esc(pre)}"`} style="width:100px;">
@@ -7305,8 +7429,8 @@ function accessGridHtml_(ticked, role, attrs){
 }
 function renderUsers(){
   const users = DATA.users || [];
-  const roleLabel = {owner:"Owner", procurement:"Procurement", stocktaker:"Stock Taker", receiving:"Receiving", market:"Market"};
-  const roleOptionsFor = (current)=> ["owner","procurement","stocktaker","receiving","market"].map(r=>
+  const roleLabel = {owner:"Owner", procurement:"Procurement", stocktaker:"Stock Taker", receiving:"Receiving", market:"Market", driver:"Driver"};
+  const roleOptionsFor = (current)=> ["owner","procurement","stocktaker","receiving","market","driver"].map(r=>
     `<option value="${r}" ${r===current?"selected":""}>${roleLabel[r]}</option>`).join("");
 
   const rows = users.map((u,i)=>{
@@ -7679,6 +7803,7 @@ function wireTabEvents(){
         const entry = {id, date:today, baseProduct:bp, qty:Number(qtyVal)};
         if(costVal!==""){ entry.cost = Number(costVal); } // left blank when not yet invoiced — see the comment above
         if(supplierVal.trim()) entry.supplier = supplierVal.trim();
+        entry.agent = supPick.agent || ""; // Market Collection: which agent at the market
         if(currentUser) entry.loggedBy = currentUser.name;
         entry.loggedTime = new Date().toTimeString().slice(0,8);
         if(overThreshold){ entry.overBuyReason = overReasonInput.value.trim(); entry.overBuySuggested = suggested; }
@@ -7903,6 +8028,7 @@ function wireTabEvents(){
           const entry = {id, date:today, baseProduct:bp, qty:Number(qtyVal)};
           if(costVal!==""){ entry.cost = Number(costVal); } // left blank when not yet invoiced — see the comment above
           if(supplierVal.trim()) entry.supplier = supplierVal.trim();
+          entry.agent = supPick.agent || ""; // Market Collection: which agent at the market
           if(currentUser) entry.loggedBy = currentUser.name;
           entry.loggedTime = new Date().toTimeString().slice(0,8);
           if(overThreshold){ entry.overBuyReason = overReasonInput.value.trim(); entry.overBuySuggested = suggested; }
@@ -8260,6 +8386,7 @@ function wireTabEvents(){
         // skipped the usual Order -> Received flow.
         const entry = {id:newId(), date:today, baseProduct:bp, receivedQty:Number(qtyVal), receivedDate:today, receivedTime:new Date().toTimeString().slice(0,8)};
         if(supplierVal) entry.supplier = supplierVal;
+        entry.agent = supPick.agent || "";
         if(currentUser){ entry.loggedBy = currentUser.name; entry.receivedBy = currentUser.name; }
         entry.loggedTime = entry.receivedTime;
         DATA.purchaseCosts = DATA.purchaseCosts.filter(p=> p.id !== entry.id);
@@ -9094,6 +9221,8 @@ function wireTabEvents(){
   if(currentTab==="gpwatch") wireGpWatch();
   if(currentTab==="trays") wireTrays_();
   if(currentTab==="marketaudit") wireMarketAudit();
+  if(currentTab==="driver") wireDriver_();
+  if(dataLoaded) ensureAgentDatalist_(); // the Agent suggestions for market buys (Shopping List / Quick Buy / Receiving)
   if(currentTab==="speedlog") wireSpeedLog_();
 
   if(currentTab==="stockvariance"){
@@ -9160,7 +9289,7 @@ function wireTabEvents(){
       refreshCount_(i);
       const row = document.querySelector(`[data-acc-row="${i}"]`);
       if(row && row.style.display==="none"){ row.style.display = ""; const u=(DATA.users||[])[Number(i)]; if(u) usersAccessOpen.add(u.name); const b=document.querySelector(`[data-acc-toggle="${i}"]`); if(b) b.textContent = b.textContent.replace(/[▾▸]/,"▾"); }
-      toast("Pages set to the " + (({owner:"Owner",procurement:"Procurement",stocktaker:"Stock Taker",receiving:"Receiving",market:"Market"})[sel.value]||sel.value) + " defaults — adjust if needed, then Save changes");
+      toast("Pages set to the " + (({owner:"Owner",procurement:"Procurement",stocktaker:"Stock Taker",receiving:"Receiving",market:"Market",driver:"Driver"})[sel.value]||sel.value) + " defaults — adjust if needed, then Save changes");
     }));
     const newRoleSel = document.getElementById("newUserRole");
     if(newRoleSel) newRoleSel.addEventListener("change", ()=> applyTemplate_(Array.from(document.querySelectorAll("[data-acc-new]")), newRoleSel.value));
@@ -9635,6 +9764,8 @@ wireActivityTracking();
 document.addEventListener("change", (e)=>{
   const sel = e.target;
   if(!sel || !sel.classList || !sel.classList.contains("sup-select")) return;
+  const agentBox = sel.parentElement ? sel.parentElement.querySelector(".sup-agent") : null;
+  if(agentBox){ const mk = marketOfSupplier_(sel.value); agentBox.style.display = mk ? "" : "none"; if(mk) ensureAgentDatalist_(); }
   const box = sel.parentElement ? sel.parentElement.querySelector(".sup-other") : null;
   if(!box) return;
   const other = sel.value===SUPPLIER_OTHER;
